@@ -71,6 +71,12 @@ def doctor(config: Config) -> int:
     print(f"model: {config.model or '(claude default)'}")
     print(f"persona: {config.persona_file or '(none)'}")
     print(f"mcp tools: {config.mcp_config or '(none)'}")
+    print(f"allowed tools: {', '.join(config.allowed_tools) if config.allowed_tools else '(none)'}")
+    if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
+        print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
+        print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
+        print("  skipped (it may even claim it acted). Allowlist the tools you want,")
+        print("  e.g. IRIS_ALLOWED_TOOLS=mcp__memory__recall,mcp__memory__remember")
     print("Run 'python -m iris chat' to talk to it, or 'python -m iris' for Discord.")
     return 0
 

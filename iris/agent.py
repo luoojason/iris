@@ -7,6 +7,8 @@ new session id. That lives here, once, so adding a transport is just wiring.
 
 from __future__ import annotations
 
+import threading
+
 from .config import Config
 from .driver import ClaudeDriver, ClaudeResult
 from .sessions import SessionStore
@@ -22,19 +24,30 @@ class Agent:
     def __init__(self, driver: ClaudeDriver, store: SessionStore):
         self.driver = driver
         self.store = store
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, conversation_id: str) -> threading.Lock:
+        with self._locks_guard:
+            return self._locks.setdefault(conversation_id, threading.Lock())
 
     def respond(self, conversation_id: str, text: str) -> ClaudeResult:
-        """Run one turn for a conversation and persist its session id."""
-        session_id = self.store.get(conversation_id)
-        result = self.driver.run(text, session_id)
-        # A resumed session that no longer exists carries no replacement id, so
-        # the dead id would be retried forever. Heal it: drop it and retry fresh.
-        if result.is_error and session_id and _is_dead_session(result):
-            self.store.clear(conversation_id)
-            result = self.driver.run(text, None)
-        if result.session_id:
-            self.store.set(conversation_id, result.session_id)
-        return result
+        """Run one turn for a conversation and persist its session id.
+
+        Turns for the same conversation are serialized so two messages arriving
+        at once do not run concurrent --resume turns and fork the transcript.
+        """
+        with self._lock_for(conversation_id):
+            session_id = self.store.get(conversation_id)
+            result = self.driver.run(text, session_id)
+            # A resumed session that no longer exists carries no replacement id,
+            # so the dead id would be retried forever. Heal it: drop and retry.
+            if result.is_error and session_id and _is_dead_session(result):
+                self.store.clear(conversation_id)
+                result = self.driver.run(text, None)
+            if result.session_id:
+                self.store.set(conversation_id, result.session_id)
+            return result
 
     def reset(self, conversation_id: str) -> bool:
         """Forget a conversation so the next message starts fresh."""

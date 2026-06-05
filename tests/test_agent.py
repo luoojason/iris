@@ -82,6 +82,33 @@ def test_other_error_does_not_drop_the_session(tmp_path):
     assert store.get("c1") == "keep-me"  # session preserved
 
 
+def test_respond_serializes_same_conversation(tmp_path):
+    import threading
+    import time
+
+    store = SessionStore(tmp_path / "s.json")
+    state = {"current": 0, "max": 0}
+    guard = threading.Lock()
+
+    class SlowDriver:
+        def run(self, prompt, session_id=None):
+            with guard:
+                state["current"] += 1
+                state["max"] = max(state["max"], state["current"])
+            time.sleep(0.03)
+            with guard:
+                state["current"] -= 1
+            return ClaudeResult(text="ok", session_id="s", is_error=False)
+
+    agent = Agent(SlowDriver(), store)
+    threads = [threading.Thread(target=agent.respond, args=("c1", "hi")) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert state["max"] == 1  # never two turns at once for the same conversation
+
+
 def test_from_config_builds_agent(tmp_path):
     from iris.config import Config
     cfg = Config(session_store_path=str(tmp_path / "s.json"), model="claude-sonnet-4-6")
