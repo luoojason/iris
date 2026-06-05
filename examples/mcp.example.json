@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "memory": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.memory_server"],
+      "env": {
+        "IRIS_MEMORY_FILE": "iris-memory.json"
+      }
+    }
+  }
+}

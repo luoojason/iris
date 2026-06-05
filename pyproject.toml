@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iris-agent"
+version = "0.1.0"
+description = "A personal chat agent that runs on your Claude subscription via the official Claude Code CLI. A subscription-native alternative to the Hermes agent."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jason Luo" }]
+keywords = ["claude", "claude-code", "agent", "discord", "mcp", "assistant", "hermes"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.optional-dependencies]
+discord = ["discord.py>=2.3"]
+memory = ["mcp>=1.2"]
+dev = ["pytest>=7"]
+all = ["discord.py>=2.3", "mcp>=1.2", "pytest>=7"]
+
+[project.scripts]
+iris = "iris.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/luoojason/iris"
+Repository = "https://github.com/luoojason/iris"
+
+[tool.setuptools.packages.find]
+include = ["iris*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
