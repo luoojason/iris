@@ -56,9 +56,36 @@ def test_reset_clears_session(tmp_path):
     assert store.get("c1") is None
 
 
+def test_dead_session_is_healed_and_retried(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "dead-id")
+    driver = FakeDriver([
+        ClaudeResult(text="", session_id=None, is_error=True, error="No conversation found for dead-id"),
+        ClaudeResult(text="fresh", session_id="new-id", is_error=False),
+    ])
+    agent = Agent(driver, store)
+    result = agent.respond("c1", "hi")
+    assert result.text == "fresh"
+    assert driver.calls[0] == ("hi", "dead-id")  # tried the dead id
+    assert driver.calls[1] == ("hi", None)        # then retried fresh
+    assert store.get("c1") == "new-id"
+
+
+def test_other_error_does_not_drop_the_session(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "keep-me")
+    driver = FakeDriver([ClaudeResult(text="", session_id=None, is_error=True, error="rate_limit_error")])
+    agent = Agent(driver, store)
+    result = agent.respond("c1", "hi")
+    assert result.is_error
+    assert len(driver.calls) == 1        # not retried
+    assert store.get("c1") == "keep-me"  # session preserved
+
+
 def test_from_config_builds_agent(tmp_path):
     from iris.config import Config
     cfg = Config(session_store_path=str(tmp_path / "s.json"), model="claude-sonnet-4-6")
     agent = Agent.from_config(cfg)
     assert agent.driver.model == "claude-sonnet-4-6"
+    assert agent.driver.append_system_prompt_file == cfg.persona_file
     assert isinstance(agent.store, SessionStore)

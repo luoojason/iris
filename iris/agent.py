@@ -12,6 +12,12 @@ from .driver import ClaudeDriver, ClaudeResult
 from .sessions import SessionStore
 
 
+def _is_dead_session(result: ClaudeResult) -> bool:
+    """True when an error means the resumed claude session no longer exists."""
+    blob = (result.error or "").lower()
+    return "no conversation found" in blob or ("session" in blob and "not found" in blob)
+
+
 class Agent:
     def __init__(self, driver: ClaudeDriver, store: SessionStore):
         self.driver = driver
@@ -19,7 +25,13 @@ class Agent:
 
     def respond(self, conversation_id: str, text: str) -> ClaudeResult:
         """Run one turn for a conversation and persist its session id."""
-        result = self.driver.run(text, self.store.get(conversation_id))
+        session_id = self.store.get(conversation_id)
+        result = self.driver.run(text, session_id)
+        # A resumed session that no longer exists carries no replacement id, so
+        # the dead id would be retried forever. Heal it: drop it and retry fresh.
+        if result.is_error and session_id and _is_dead_session(result):
+            self.store.clear(conversation_id)
+            result = self.driver.run(text, None)
         if result.session_id:
             self.store.set(conversation_id, result.session_id)
         return result
@@ -33,7 +45,7 @@ class Agent:
         driver = ClaudeDriver(
             claude_bin=config.claude_bin,
             model=config.model,
-            system_prompt_file=config.persona_file,
+            append_system_prompt_file=config.persona_file,
             mcp_config=config.mcp_config,
             permission_mode=config.permission_mode,
             allowed_tools=config.allowed_tools or None,

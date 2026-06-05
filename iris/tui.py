@@ -74,11 +74,14 @@ def build_app(agent: Agent):
 
         @work(thread=True)
         def _run_turn(self, text: str) -> None:
+            result: Optional[ClaudeResult] = None
+            error: Optional[str] = None
             try:
-                result: Optional[ClaudeResult] = self.agent.respond(self.conversation_id, text)
-                error = None
+                result = self.agent.respond(self.conversation_id, text)
             except ClaudeError as exc:
-                result, error = None, str(exc)
+                error = str(exc)
+            except Exception as exc:  # never leave the input disabled on a crash
+                error = f"unexpected error: {exc}"
             self.call_from_thread(self._show, result, error)
 
         def _show(self, result: Optional[ClaudeResult], error: Optional[str]) -> None:

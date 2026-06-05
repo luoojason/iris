@@ -20,9 +20,9 @@ def make_runner(responses, record=None):
     """Return a runner that yields queued FakeProcs (or raises) per call."""
     queue = list(responses)
 
-    def runner(cmd, timeout):
+    def runner(cmd, timeout, prompt):
         if record is not None:
-            record.append(list(cmd))
+            record.append({"cmd": list(cmd), "prompt": prompt})
         item = queue.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -47,11 +47,11 @@ def success_json(text="hello", session_id="sess-1", **extra):
     return json.dumps(payload)
 
 
-def test_build_command_has_core_flags():
+def test_build_command_has_core_flags_and_no_prompt():
     d = ClaudeDriver(model="claude-sonnet-4-6", runner=make_runner([]))
-    cmd = d.build_command("hi there")
+    cmd = d.build_command()
     assert cmd[0] == "claude"
-    assert "-p" in cmd and "hi there" in cmd
+    assert "-p" in cmd
     assert cmd[cmd.index("--output-format") + 1] == "json"
     assert cmd[cmd.index("--model") + 1] == "claude-sonnet-4-6"
     assert "--resume" not in cmd
@@ -60,21 +60,32 @@ def test_build_command_has_core_flags():
 def test_build_command_resume_and_extras():
     d = ClaudeDriver(
         mcp_config="tools.json",
-        system_prompt_file="persona.md",
+        append_system_prompt_file="persona.md",
         permission_mode="bypassPermissions",
         allowed_tools=["mcp__memory__recall", "Read"],
         add_dirs=["/srv/notes"],
         runner=make_runner([]),
     )
-    cmd = d.build_command("hi", session_id="abc")
+    cmd = d.build_command(session_id="abc")
     assert cmd[cmd.index("--resume") + 1] == "abc"
     assert cmd[cmd.index("--mcp-config") + 1] == "tools.json"
-    assert cmd[cmd.index("--system-prompt-file") + 1] == "persona.md"
+    assert "--strict-mcp-config" in cmd
+    # persona is APPENDED, never replacing Claude Code's own system prompt
+    assert cmd[cmd.index("--append-system-prompt-file") + 1] == "persona.md"
+    assert "--system-prompt-file" not in cmd
     assert cmd[cmd.index("--permission-mode") + 1] == "bypassPermissions"
-    # allowedTools is variadic and should carry both tool names.
     i = cmd.index("--allowedTools")
     assert cmd[i + 1] == "mcp__memory__recall" and cmd[i + 2] == "Read"
     assert cmd[cmd.index("--add-dir") + 1] == "/srv/notes"
+
+
+def test_dash_prefixed_prompt_goes_to_stdin_not_argv():
+    record = []
+    d = ClaudeDriver(runner=make_runner([FakeProc(0, success_json())], record=record))
+    d.run("- buy milk")
+    cmd = record[0]["cmd"]
+    assert "- buy milk" not in cmd          # never an argv token (would parse as a flag)
+    assert record[0]["prompt"] == "- buy milk"   # delivered on stdin
 
 
 def test_successful_turn_parses_fields():
@@ -90,11 +101,11 @@ def test_successful_turn_parses_fields():
 
 
 def test_resume_passes_existing_session():
-    record: list = []
+    record = []
     d = ClaudeDriver(runner=make_runner([FakeProc(0, success_json())], record=record))
     d.run("hello", session_id="prev-session")
-    assert "--resume" in record[0]
-    assert record[0][record[0].index("--resume") + 1] == "prev-session"
+    cmd = record[0]["cmd"]
+    assert cmd[cmd.index("--resume") + 1] == "prev-session"
 
 
 def test_error_subtype_marks_error():
@@ -106,7 +117,7 @@ def test_error_subtype_marks_error():
 
 
 def test_retries_on_rate_limit_then_succeeds():
-    slept: list = []
+    slept = []
     rate = json.dumps({"type": "result", "subtype": "success", "is_error": True,
                        "api_error_status": 429, "result": "rate_limit_error", "session_id": "s"})
     runner = make_runner([FakeProc(0, rate), FakeProc(0, success_json(text="recovered"))])
@@ -114,11 +125,11 @@ def test_retries_on_rate_limit_then_succeeds():
     result = d.run("hello")
     assert result.is_error is False
     assert result.text == "recovered"
-    assert len(slept) == 1  # backed off once between the two attempts
+    assert len(slept) == 1
 
 
 def test_timeout_is_retried_then_reported():
-    slept: list = []
+    slept = []
     runner = make_runner([subprocess.TimeoutExpired("claude", 1), subprocess.TimeoutExpired("claude", 1)])
     d = ClaudeDriver(max_retries=1, retry_base_delay=0.0, runner=runner, sleep=slept.append)
     result = d.run("hello")

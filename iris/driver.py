@@ -6,17 +6,24 @@ subscription. There is no API key and no impersonation: this is Anthropic's
 own client doing exactly what its documented headless mode exists for, which
 keeps the whole setup inside the subscription's terms.
 
+The user's message is fed to ``claude`` on **stdin**, not as a command-line
+argument. That keeps a message beginning with ``-`` from being parsed as a flag,
+stops a crafted message from injecting flags, avoids the OS argument-length
+limit on long pastes, and keeps the message out of the process list.
+
 Continuity, persona, and custom tools are all native ``claude`` features:
 
 * ``--resume <session_id>`` keeps a conversation going across turns.
-* ``--system-prompt-file`` / ``--append-system-prompt`` set the persona.
-* ``--mcp-config`` hands Claude custom tools over the Model Context Protocol.
+* ``--append-system-prompt-file`` adds the persona on top of Claude Code's own
+  system prompt (replacing it would strip Claude Code's tool instructions).
+* ``--mcp-config`` (+ ``--strict-mcp-config``) hands Claude custom tools.
 * ``--permission-mode`` / ``--allowedTools`` keep tool use under control.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -43,13 +50,30 @@ class ClaudeResult:
     raw: dict = field(default_factory=dict)
 
 
-# A runner takes (command, timeout) and returns something with ``.returncode``,
-# ``.stdout`` and ``.stderr``. The default uses subprocess; tests inject a fake.
-Runner = Callable[[Sequence[str], float], "subprocess.CompletedProcess[str]"]
+# A runner takes (command, timeout, prompt) and returns something with
+# ``.returncode``, ``.stdout`` and ``.stderr``. The prompt is fed on stdin.
+# The default uses subprocess; tests inject a fake.
+Runner = Callable[[Sequence[str], float, str], "subprocess.CompletedProcess[str]"]
 
 
-def _default_runner(cmd: Sequence[str], timeout: float):
-    return subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout)
+def _child_env() -> dict:
+    """Environment for the claude child, with Iris's own secrets removed.
+
+    The agent process holds the bot token in ``IRIS_*`` vars; those must never
+    reach the model's tool sandbox (a shell tool could otherwise read them).
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("IRIS_")}
+
+
+def _default_runner(cmd: Sequence[str], timeout: float, prompt: str):
+    return subprocess.run(
+        list(cmd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        input=prompt,
+        env=_child_env(),
+    )
 
 
 _RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "429", "overloaded", "529")
@@ -61,7 +85,7 @@ class ClaudeDriver:
 
     claude_bin: str = "claude"
     model: Optional[str] = None
-    system_prompt_file: Optional[str] = None
+    append_system_prompt_file: Optional[str] = None
     append_system_prompt: Optional[str] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
@@ -74,19 +98,21 @@ class ClaudeDriver:
     runner: Runner = _default_runner
     sleep: Callable[[float], None] = time.sleep
 
-    def build_command(self, prompt: str, session_id: Optional[str] = None) -> list[str]:
-        """Assemble the argv for one turn. Pure and side-effect free."""
-        cmd: list[str] = [self.claude_bin, "-p", prompt, "--output-format", "json"]
+    def build_command(self, session_id: Optional[str] = None) -> list[str]:
+        """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin."""
+        cmd: list[str] = [self.claude_bin, "-p", "--output-format", "json"]
         if session_id:
             cmd += ["--resume", session_id]
         if self.model:
             cmd += ["--model", self.model]
-        if self.system_prompt_file:
-            cmd += ["--system-prompt-file", self.system_prompt_file]
+        if self.append_system_prompt_file:
+            cmd += ["--append-system-prompt-file", self.append_system_prompt_file]
         if self.append_system_prompt:
             cmd += ["--append-system-prompt", self.append_system_prompt]
         if self.mcp_config:
-            cmd += ["--mcp-config", self.mcp_config]
+            # --strict-mcp-config so the bot uses only our tools, not whatever
+            # MCP servers the operator happens to have in ~/.claude.json.
+            cmd += ["--mcp-config", self.mcp_config, "--strict-mcp-config"]
         if self.permission_mode:
             cmd += ["--permission-mode", self.permission_mode]
         if self.allowed_tools:
@@ -105,12 +131,12 @@ class ClaudeDriver:
                 "Install Claude Code and sign in to your subscription first."
             )
 
-        cmd = self.build_command(prompt, session_id)
+        cmd = self.build_command(session_id)
         last_error: Optional[str] = None
 
         for attempt in range(self.max_retries + 1):
             try:
-                proc = self.runner(cmd, self.timeout)
+                proc = self.runner(cmd, self.timeout, prompt)
             except subprocess.TimeoutExpired:
                 last_error = f"claude timed out after {self.timeout:.0f}s"
                 if attempt < self.max_retries:
