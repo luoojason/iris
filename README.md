@@ -59,7 +59,7 @@ monthly agent credit once in your Claude account.
 ```bash
 git clone https://github.com/luoojason/iris
 cd iris
-pip install -e ".[discord,memory]"
+pip install -e ".[discord]"
 
 cp .env.example .env        # then edit it
 python -m iris doctor       # checks claude is installed and signed in
@@ -116,15 +116,33 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 
 ## Tools via MCP
 
-Iris keeps Hermes-style capabilities by exposing tools the way Claude Code
-understands them: MCP servers launched through `--mcp-config`. The included
-example is a memory tool (`iris/mcp/memory_server.py`) with `remember`, `recall`,
-and `forget`. Point Claude at any MCP server (filesystem, browser, web search,
-your own) the same way.
+Out of the box Iris is a plain chat bot, which runs anywhere `claude` is
+installed. Tools are opt-in, exposed the way Claude Code already understands them:
+MCP servers launched through `--mcp-config`.
 
-For an unattended bot, scope tool use deliberately. Prefer an explicit
-`IRIS_ALLOWED_TOOLS` list over `IRIS_PERMISSION_MODE=bypassPermissions`, since the
-brain can read and edit files and run commands in the directories you grant it.
+One rule trips people up: under the `default` permission mode, any tool that is
+**not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even claim
+it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that tool
+too.
+
+To turn on the bundled memory tool (`remember`, `recall`, `forget`):
+
+1. `pip install -e ".[memory]"`
+2. In `examples/mcp.example.json`, set `"command"` to the python from this
+   environment (`which python`); `claude` launches the tool as a subprocess.
+3. Set both, together:
+
+   ```
+   IRIS_MCP_CONFIG=examples/mcp.example.json
+   IRIS_ALLOWED_TOOLS=mcp__memory__remember,mcp__memory__recall,mcp__memory__forget
+   ```
+
+4. Tell the persona to use it (the example persona notes where).
+
+Point Claude at any other MCP server (filesystem, browser, web search, your own)
+the same way. The brain can read and edit files and run commands in directories
+you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
+`bypassPermissions` unless you understand the blast radius.
 
 ## What carries over from Hermes
 
@@ -141,8 +159,17 @@ agent maps cleanly onto the official client:
   mixture-of-agents reasoning, and Hermes's single-turn tool-chain collapse.
   These are out of scope for a free, single-brain, single-subscription agent.
 
-Roadmap: a Telegram transport, a skills loader, the free-local voice MCPs, and a
-documented feature-survival map against Hermes.
+## Status
+
+Early, and honest about what is proven. The core (the driver, sessions, the agent
+loop, and the bundled memory tool) is verified end to end against the real
+`claude` binary and covered by unit tests. The Discord and Telegram message loops
+are wired and unit-tested in isolation, but have **not** yet been exercised
+against a live bot connection. Start with `python -m iris chat` to try the brain,
+then wire up a transport.
+
+Roadmap: a skills loader, the free-local voice MCP servers, and a documented
+feature-survival map against Hermes.
 
 ## Related work
 
