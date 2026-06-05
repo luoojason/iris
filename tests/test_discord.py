@@ -1,14 +1,76 @@
-"""Tests for reply chunking, shared by the Discord and Telegram adapters.
+"""Tests for reply chunking and the should-handle gate.
 
-The clients themselves need their SDKs and a live connection, so they are not
-unit-tested here, but the message-splitting logic is pure and worth pinning.
+The client itself needs the SDK and a live connection, but the message-splitting
+logic and the should_handle decision are pure and worth pinning.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from iris.discord_adapter import should_handle
 from iris.textutil import chunk_text
 
 DISCORD_LIMIT = 2000
+
+BOT = SimpleNamespace(id=1)
+
+
+def _cfg(allowed_channel_ids=(), allowed_user_ids=(), respond_without_mention=False):
+    return SimpleNamespace(
+        allowed_channel_ids=list(allowed_channel_ids),
+        allowed_user_ids=list(allowed_user_ids),
+        respond_without_mention=respond_without_mention,
+    )
+
+
+def _msg(channel_id=10, parent_id=None, guild=object(), author_id=2, is_bot=False, mentions=()):
+    channel = SimpleNamespace(id=channel_id, parent_id=parent_id, guild=guild)
+    author = SimpleNamespace(id=author_id, bot=is_bot)
+    return SimpleNamespace(author=author, channel=channel, mentions=list(mentions))
+
+
+def test_ignores_own_and_other_bots():
+    assert should_handle(_msg(author_id=1), BOT, _cfg()) is False        # itself
+    assert should_handle(_msg(is_bot=True), BOT, _cfg()) is False        # another bot
+
+
+def test_respects_user_allowlist():
+    cfg = _cfg(allowed_user_ids=["2"])
+    assert should_handle(_msg(author_id=2, mentions=[BOT]), BOT, cfg) is True
+    assert should_handle(_msg(author_id=999, mentions=[BOT]), BOT, cfg) is False
+
+
+def test_channel_lock_blocks_other_channels():
+    cfg = _cfg(allowed_channel_ids=["10"])
+    assert should_handle(_msg(channel_id=10, mentions=[BOT]), BOT, cfg) is True
+    assert should_handle(_msg(channel_id=77, mentions=[BOT]), BOT, cfg) is False
+
+
+def test_general_channel_needs_mention_unless_configured():
+    cfg = _cfg(allowed_channel_ids=["10"])
+    assert should_handle(_msg(channel_id=10), BOT, cfg) is False           # no mention
+    assert should_handle(_msg(channel_id=10, mentions=[BOT]), BOT, cfg) is True
+    cfg_open = _cfg(allowed_channel_ids=["10"], respond_without_mention=True)
+    assert should_handle(_msg(channel_id=10), BOT, cfg_open) is True
+
+
+def test_thread_under_allowed_channel_auto_responds():
+    cfg = _cfg(allowed_channel_ids=["10"])
+    # A thread (parent_id=10) gets answered even with no mention and no
+    # respond_without_mention, because threads are project spaces.
+    thread_msg = _msg(channel_id=555, parent_id=10)
+    assert should_handle(thread_msg, BOT, cfg) is True
+
+
+def test_thread_under_other_channel_is_ignored():
+    cfg = _cfg(allowed_channel_ids=["10"])
+    thread_msg = _msg(channel_id=555, parent_id=88)  # parent not allowed
+    assert should_handle(thread_msg, BOT, cfg) is False
+
+
+def test_dm_is_always_handled():
+    assert should_handle(_msg(guild=None), BOT, _cfg()) is True
 
 
 def test_empty_text_is_no_messages():

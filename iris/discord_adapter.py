@@ -28,6 +28,36 @@ DISCORD_LIMIT = 2000
 RESET_COMMANDS = {"!reset", "!forget", "!newchat"}
 
 
+def should_handle(message, bot_user, config) -> bool:
+    """Decide whether to answer a message. Pure, so it is unit-testable.
+
+    A thread counts as belonging to its parent channel for the allowlist, and the
+    bot auto-replies to every message inside a thread: each thread is a focused
+    "project space" with its own session (the conversation id is the thread's own
+    channel id), while the general channel still follows the mention rules.
+    """
+    author = message.author
+    if getattr(author, "bot", False) or (bot_user and author.id == bot_user.id):
+        return False
+    if config.allowed_user_ids and str(author.id) not in config.allowed_user_ids:
+        return False
+
+    channel = message.channel
+    parent_id = getattr(channel, "parent_id", None)  # only threads have a parent
+    is_thread = parent_id is not None
+
+    if config.allowed_channel_ids:
+        channel_ids = {str(channel.id)}
+        if is_thread:
+            channel_ids.add(str(parent_id))  # allow threads of an allowed channel
+        if channel_ids.isdisjoint(set(config.allowed_channel_ids)):
+            return False
+
+    is_dm = getattr(channel, "guild", None) is None
+    mentioned = bool(bot_user and bot_user in getattr(message, "mentions", []))
+    return is_dm or is_thread or mentioned or config.respond_without_mention
+
+
 async def _save_attachments(attachments, base_dir: str, conversation_id: str) -> list[str]:
     """Download message attachments and return their absolute paths."""
     paths: list[str] = []
@@ -53,17 +83,6 @@ def build_client(config: Config, agent: Agent):
     client = discord.Client(intents=intents)
     transcriber = build_transcriber(config)  # None unless IRIS_VOICE is on
 
-    def _should_handle(message) -> bool:
-        if message.author.bot or (client.user and message.author.id == client.user.id):
-            return False
-        if config.allowed_user_ids and str(message.author.id) not in config.allowed_user_ids:
-            return False
-        if config.allowed_channel_ids and str(message.channel.id) not in config.allowed_channel_ids:
-            return False
-        is_dm = getattr(message.channel, "guild", None) is None
-        mentioned = client.user in message.mentions if client.user else False
-        return is_dm or mentioned or config.respond_without_mention
-
     def _clean_content(message) -> str:
         text = message.content or ""
         if client.user:
@@ -77,7 +96,7 @@ def build_client(config: Config, agent: Agent):
 
     @client.event
     async def on_message(message):
-        if not _should_handle(message):
+        if not should_handle(message, client.user, config):
             return
 
         conversation_id = f"discord:{message.channel.id}"
