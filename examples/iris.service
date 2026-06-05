@@ -1,0 +1,29 @@
+# Run Iris as a user service so it survives logout and restarts.
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/iris.service ~/.config/systemd/user/iris.service
+#   edit the paths below, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now iris
+#   loginctl enable-linger "$USER"   # keep it running after you log out
+# Logs:
+#   journalctl --user -u iris -f
+
+[Unit]
+Description=Iris - a personal Claude-subscription chat agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Absolute path to the iris checkout (where your .env lives).
+WorkingDirectory=%h/iris
+# Use the interpreter from the venv you installed iris into.
+ExecStart=%h/iris/.venv/bin/python -m iris discord
+Restart=on-failure
+RestartSec=5
+# claude must be on PATH for this service; adjust if it is elsewhere.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

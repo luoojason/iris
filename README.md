@@ -1,5 +1,8 @@
 # Iris
 
+[![ci](https://github.com/luoojason/iris/actions/workflows/ci.yml/badge.svg)](https://github.com/luoojason/iris/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A personal chat agent that runs on your Claude subscription. Iris uses the
 official `claude` command (Claude Code) as its brain in headless mode, so it
 runs on your existing Pro or Max plan instead of a separate pay-per-token API
@@ -72,6 +75,26 @@ python -m iris               # or: python -m iris discord
 
 Keep `IRIS_ALLOWED_USER_IDS` set to yourself. Answering other people from a
 personal subscription is against Anthropic's terms.
+
+### Run it as a service
+
+To keep Iris running after you log out, there is a systemd user unit at
+`examples/iris.service`. Edit the paths, then:
+
+```bash
+cp examples/iris.service ~/.config/systemd/user/iris.service
+systemctl --user daemon-reload
+systemctl --user enable --now iris
+loginctl enable-linger "$USER"
+journalctl --user -u iris -f
+```
+
+### Skills
+
+Claude Code skills are just `SKILL.md` files. Anything in `~/.claude/skills/` or
+in a directory you pass via `IRIS_ADD_DIRS` is available to the agent and loaded
+on demand by description. Hermes skills use the same format, so they carry over
+by copying the skill folders across.
 
 ## Configuration
 
