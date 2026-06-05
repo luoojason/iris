@@ -127,6 +127,25 @@ def reminders_tick(config: Config) -> int:
     return 0
 
 
+def skills(config: Config) -> int:
+    """List the skills the agent can use (and link IRIS_SKILLS_DIR if set)."""
+    from .skills import discover, link_skills
+
+    if config.skills_dir:
+        made = link_skills(config.skills_dir)
+        if made:
+            print(f"Linked {made} skill(s) from {config.skills_dir}")
+    found = discover()
+    if not found:
+        print("No skills found in ~/.claude/skills.")
+        print("Set IRIS_SKILLS_DIR to a folder of SKILL.md skills, or drop them there.")
+        return 0
+    print("Skills the agent can use:")
+    for name, desc in found:
+        print(f"  {name}" + (f" — {desc}" if desc else ""))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="iris", description="A chat agent on your Claude subscription.")
     sub = parser.add_subparsers(dest="command")
@@ -135,16 +154,23 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("tui", help="full-screen terminal UI")
     sub.add_parser("chat", help="plain terminal REPL")
     sub.add_parser("doctor", help="check that claude is installed and signed in")
+    sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
     args = parser.parse_args(argv)
 
     config = Config.from_env()
+    # Make any configured skills discoverable before a bot/chat run starts.
+    if config.skills_dir:
+        from .skills import link_skills
+        link_skills(config.skills_dir)
     command = args.command or "discord"
 
     if command == "doctor":
         return doctor(config)
     if command == "chat":
         return chat(config)
+    if command == "skills":
+        return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
     if command == "tui":

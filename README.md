@@ -101,10 +101,12 @@ journalctl --user -u iris -f
 
 ### Skills
 
-Claude Code skills are just `SKILL.md` files. Anything in `~/.claude/skills/` or
-in a directory you pass via `IRIS_ADD_DIRS` is available to the agent and loaded
-on demand by description. Hermes skills use the same format, so they carry over
-by copying the skill folders across.
+Claude Code skills are just `SKILL.md` folders, loaded on demand by description.
+Anything in `~/.claude/skills/` is available to the agent. To keep your bot's
+skills in their own directory instead, point `IRIS_SKILLS_DIR` at a folder of
+skill folders and Iris symlinks them into the skills path at startup. Run
+`python -m iris skills` to see what the agent can use. Hermes skills use the same
+format, so they carry over by copying the folders across.
 
 ## Configuration
 

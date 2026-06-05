@@ -57,6 +57,8 @@ class Config:
     add_dirs: list[str] = field(default_factory=list)
     # Where inbound images/files are downloaded so the brain's Read tool can see them.
     attachments_dir: str = "iris-attachments"
+    # A directory of skill folders (each with SKILL.md) to make available to the brain.
+    skills_dir: str = ""
 
     session_store_path: str = "iris-sessions.json"
     turn_timeout: float = 300.0
@@ -79,6 +81,7 @@ class Config:
             disallowed_tools=_split(os.environ.get("IRIS_DISALLOWED_TOOLS")),
             add_dirs=_split(os.environ.get("IRIS_ADD_DIRS")),
             attachments_dir=os.environ.get("IRIS_ATTACHMENTS_DIR", "iris-attachments"),
+            skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
         )
