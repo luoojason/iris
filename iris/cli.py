@@ -3,13 +3,55 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 from .agent import Agent
 from .config import Config
 from .driver import ClaudeError
+
+try:  # enables arrow keys, line editing, and history in the plain REPL
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
+
+class _Spinner:
+    """A tiny one-line 'thinking' spinner, shown only on an interactive tty."""
+
+    def __init__(self, label: str = "thinking"):
+        self.label = label
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._active = sys.stdout.isatty()
+
+    def __enter__(self) -> "_Spinner":
+        if not self._active:
+            return self
+
+        def spin() -> None:
+            for ch in itertools.cycle("|/-\\"):
+                if self._stop.is_set():
+                    break
+                sys.stdout.write(f"\riris > {self.label} {ch}")
+                sys.stdout.flush()
+                time.sleep(0.12)
+
+        self._thread = threading.Thread(target=spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=0.3)
+        if self._active:
+            sys.stdout.write("\r" + " " * 40 + "\r")
+            sys.stdout.flush()
 
 
 def doctor(config: Config) -> int:
@@ -53,7 +95,8 @@ def chat(config: Config) -> int:
             print("(fresh conversation)\n")
             continue
         try:
-            result = agent.respond(conversation_id, prompt)
+            with _Spinner():
+                result = agent.respond(conversation_id, prompt)
         except ClaudeError as exc:
             print(f"iris > [unavailable] {exc}\n")
             continue
@@ -68,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("discord", help="run the Discord bot (default)")
     sub.add_parser("telegram", help="run the Telegram bot")
-    sub.add_parser("chat", help="talk to the agent in the terminal")
+    sub.add_parser("tui", help="full-screen terminal UI")
+    sub.add_parser("chat", help="plain terminal REPL")
     sub.add_parser("doctor", help="check that claude is installed and signed in")
     args = parser.parse_args(argv)
 
@@ -79,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         return doctor(config)
     if command == "chat":
         return chat(config)
+    if command == "tui":
+        from .tui import run as run_tui
+        run_tui(config)
+        return 0
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)

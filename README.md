@@ -63,8 +63,13 @@ pip install -e ".[discord]"
 
 cp .env.example .env        # then edit it
 python -m iris doctor       # checks claude is installed and signed in
-python -m iris chat         # talk to it in your terminal, no Discord needed
+python -m iris tui          # full-screen terminal UI (needs: pip install -e ".[tui]")
+python -m iris chat         # or a plain REPL, no extra dependency
 ```
+
+The `tui` is a full-screen terminal app with a scrolling conversation, a live
+thinking indicator, and proper line editing. The `chat` REPL is the no-frills
+version (now with history and a thinking spinner).
 
 To run it on Discord, create a bot at the [Discord Developer
 Portal](https://discord.com/developers/applications), enable the **Message
