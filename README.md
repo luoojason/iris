@@ -43,7 +43,8 @@ Discord message ──> Iris ──> claude -p "<message>" --resume <session>
 - **Persona:** a system prompt file appended to Claude Code's own.
 - **Tools:** MCP servers, the same mechanism Claude Code already uses. Iris ships
   an example memory tool; add any others.
-- **Front end:** Discord today. The core is transport-agnostic.
+- **Front end:** Discord and Telegram. The core is transport-agnostic, so adding
+  another is a small adapter.
 
 It is **event-driven on purpose.** Iris only calls the model when a message
 arrives, so it burns no idle inference. That is what keeps it inside your monthly
@@ -72,6 +73,10 @@ Content** intent, put the token and **your** user id in `.env`, then:
 ```bash
 python -m iris               # or: python -m iris discord
 ```
+
+For Telegram instead, install the extra (`pip install -e ".[telegram]"`), get a
+token from [@BotFather](https://t.me/BotFather), set `IRIS_TELEGRAM_TOKEN`, and
+run `python -m iris telegram`.
 
 Keep `IRIS_ALLOWED_USER_IDS` set to yourself. Answering other people from a
 personal subscription is against Anthropic's terms.

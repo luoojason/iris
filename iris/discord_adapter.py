@@ -15,9 +15,10 @@ import asyncio
 import logging
 from typing import Optional
 
+from .agent import Agent
 from .config import Config
-from .driver import ClaudeDriver, ClaudeError
-from .sessions import SessionStore
+from .driver import ClaudeError
+from .textutil import chunk_text
 
 log = logging.getLogger("iris.discord")
 
@@ -25,31 +26,7 @@ DISCORD_LIMIT = 2000
 RESET_COMMANDS = {"!reset", "!forget", "!newchat"}
 
 
-def _chunk(text: str, limit: int = DISCORD_LIMIT) -> list[str]:
-    """Split a reply into Discord-sized pieces, preferring line boundaries."""
-    text = text or ""
-    if len(text) <= limit:
-        return [text] if text else []
-    chunks: list[str] = []
-    current = ""
-    for line in text.splitlines(keepends=True):
-        while len(line) > limit:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(line[:limit])
-            line = line[limit:]
-        if len(current) + len(line) > limit:
-            chunks.append(current)
-            current = line
-        else:
-            current += line
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def build_client(config: Config, driver: ClaudeDriver, store: SessionStore):
+def build_client(config: Config, agent: Agent):
     """Build (but do not start) the Discord client. Returns the client."""
     import discord  # lazy: only needed when actually running on Discord
 
@@ -88,23 +65,19 @@ def build_client(config: Config, driver: ClaudeDriver, store: SessionStore):
         prompt = _clean_content(message)
 
         if prompt in RESET_COMMANDS:
-            store.clear(conversation_id)
+            agent.reset(conversation_id)
             await message.channel.send("Started a fresh conversation.")
             return
         if not prompt:
             return
 
-        session_id = store.get(conversation_id)
         try:
             async with message.channel.typing():
-                result = await asyncio.to_thread(driver.run, prompt, session_id)
+                result = await asyncio.to_thread(agent.respond, conversation_id, prompt)
         except ClaudeError as exc:
             log.error("claude unavailable: %s", exc)
             await message.channel.send(f"I can't reach my brain right now: {exc}")
             return
-
-        if result.session_id:
-            store.set(conversation_id, result.session_id)
 
         if result.is_error:
             log.warning("turn errored: %s", result.error)
@@ -115,7 +88,7 @@ def build_client(config: Config, driver: ClaudeDriver, store: SessionStore):
             return
 
         reply = result.text.strip() or "(no response)"
-        for piece in _chunk(reply):
+        for piece in chunk_text(reply, DISCORD_LIMIT):
             await message.channel.send(piece)
 
     return client
@@ -127,17 +100,6 @@ def run(config: Optional[Config] = None) -> None:
     if not config.discord_token:
         raise SystemExit("IRIS_DISCORD_TOKEN is not set. See .env.example.")
 
-    driver = ClaudeDriver(
-        claude_bin=config.claude_bin,
-        model=config.model,
-        system_prompt_file=config.persona_file,
-        mcp_config=config.mcp_config,
-        permission_mode=config.permission_mode,
-        allowed_tools=config.allowed_tools or None,
-        disallowed_tools=config.disallowed_tools or None,
-        add_dirs=config.add_dirs or None,
-        timeout=config.turn_timeout,
-    )
-    store = SessionStore(config.session_store_path)
-    client = build_client(config, driver, store)
+    agent = Agent.from_config(config)
+    client = build_client(config, agent)
     client.run(config.discord_token, log_handler=None)

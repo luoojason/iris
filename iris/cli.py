@@ -7,23 +7,9 @@ import shutil
 import subprocess
 import sys
 
+from .agent import Agent
 from .config import Config
-from .driver import ClaudeDriver, ClaudeError
-from .sessions import SessionStore
-
-
-def _driver_from(config: Config) -> ClaudeDriver:
-    return ClaudeDriver(
-        claude_bin=config.claude_bin,
-        model=config.model,
-        system_prompt_file=config.persona_file,
-        mcp_config=config.mcp_config,
-        permission_mode=config.permission_mode,
-        allowed_tools=config.allowed_tools or None,
-        disallowed_tools=config.disallowed_tools or None,
-        add_dirs=config.add_dirs or None,
-        timeout=config.turn_timeout,
-    )
+from .driver import ClaudeError
 
 
 def doctor(config: Config) -> int:
@@ -48,9 +34,8 @@ def doctor(config: Config) -> int:
 
 
 def chat(config: Config) -> int:
-    """A simple terminal REPL using the same driver and session store."""
-    driver = _driver_from(config)
-    store = SessionStore(config.session_store_path)
+    """A simple terminal REPL using the shared agent core."""
+    agent = Agent.from_config(config)
     conversation_id = "cli:local"
     print("Iris terminal chat. Type 'exit' to quit, 'reset' to start fresh.\n")
     while True:
@@ -64,16 +49,14 @@ def chat(config: Config) -> int:
         if prompt.lower() in {"exit", "quit"}:
             return 0
         if prompt.lower() == "reset":
-            store.clear(conversation_id)
+            agent.reset(conversation_id)
             print("(fresh conversation)\n")
             continue
         try:
-            result = driver.run(prompt, store.get(conversation_id))
+            result = agent.respond(conversation_id, prompt)
         except ClaudeError as exc:
             print(f"iris > [unavailable] {exc}\n")
             continue
-        if result.session_id:
-            store.set(conversation_id, result.session_id)
         if result.is_error:
             print(f"iris > [error] {result.error}\n")
             continue
@@ -84,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="iris", description="A chat agent on your Claude subscription.")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("discord", help="run the Discord bot (default)")
+    sub.add_parser("telegram", help="run the Telegram bot")
     sub.add_parser("chat", help="talk to the agent in the terminal")
     sub.add_parser("doctor", help="check that claude is installed and signed in")
     args = parser.parse_args(argv)
@@ -95,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
         return doctor(config)
     if command == "chat":
         return chat(config)
+    if command == "telegram":
+        from .telegram_adapter import run as run_telegram
+        run_telegram(config)
+        return 0
     # discord
     from .discord_adapter import run as run_discord
     run_discord(config)

@@ -39,6 +39,7 @@ def _split(value: Optional[str]) -> list[str]:
 @dataclass
 class Config:
     discord_token: str = ""
+    telegram_token: str = ""
     # Restrict who the bot answers. Empty means "anyone in channels it sees".
     allowed_user_ids: list[str] = field(default_factory=list)
     # Only respond in these channel ids (empty = respond anywhere it is allowed).
@@ -63,6 +64,7 @@ class Config:
         load_dotenv(dotenv)
         return cls(
             discord_token=os.environ.get("IRIS_DISCORD_TOKEN", ""),
+            telegram_token=os.environ.get("IRIS_TELEGRAM_TOKEN", ""),
             allowed_user_ids=_split(os.environ.get("IRIS_ALLOWED_USER_IDS")),
             allowed_channel_ids=_split(os.environ.get("IRIS_ALLOWED_CHANNEL_IDS")),
             respond_without_mention=_truthy(os.environ.get("IRIS_RESPOND_WITHOUT_MENTION")),

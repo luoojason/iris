@@ -9,6 +9,7 @@ Code's own extension points (MCP, sessions, system prompts).
 
 from __future__ import annotations
 
+from .agent import Agent
 from .config import Config
 from .driver import ClaudeDriver, ClaudeError, ClaudeResult
 from .sessions import SessionStore
@@ -16,6 +17,7 @@ from .sessions import SessionStore
 __version__ = "0.1.0"
 
 __all__ = [
+    "Agent",
     "Config",
     "ClaudeDriver",
     "ClaudeError",

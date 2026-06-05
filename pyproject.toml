@@ -20,9 +20,10 @@ dependencies = []
 
 [project.optional-dependencies]
 discord = ["discord.py>=2.3"]
+telegram = ["python-telegram-bot>=20"]
 memory = ["mcp>=1.2"]
 dev = ["pytest>=7"]
-all = ["discord.py>=2.3", "mcp>=1.2", "pytest>=7"]
+all = ["discord.py>=2.3", "python-telegram-bot>=20", "mcp>=1.2", "pytest>=7"]
 
 [project.scripts]
 iris = "iris.cli:main"
