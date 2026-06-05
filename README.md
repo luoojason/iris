@@ -144,8 +144,12 @@ To turn on the bundled memory tool (`remember`, `recall`, `forget`):
 
 4. Tell the persona to use it (the example persona notes where).
 
-Point Claude at any other MCP server (filesystem, browser, web search, your own)
-the same way. The brain can read and edit files and run commands in directories
+Iris also ships a scoped **Discord server-actions** tool
+(`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
+`list_channels`, `search_members`. It is a narrow, audited surface (no
+arbitrary "send anywhere" tool) so the agent can do Discord chores the chat
+adapter can't, without raw shell. Point Claude at any other MCP server
+(filesystem, browser, web search, your own) the same way. The brain can read and edit files and run commands in directories
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 
