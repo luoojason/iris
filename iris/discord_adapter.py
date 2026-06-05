@@ -100,6 +100,10 @@ def run(config: Optional[Config] = None) -> None:
     if not config.discord_token:
         raise SystemExit("IRIS_DISCORD_TOKEN is not set. See .env.example.")
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
     agent = Agent.from_config(config)
     client = build_client(config, agent)
     client.run(config.discord_token, log_handler=None)

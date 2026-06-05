@@ -103,6 +103,10 @@ def run(config: Optional[Config] = None) -> None:
     config = config or Config.from_env()
     if not config.telegram_token:
         raise SystemExit("IRIS_TELEGRAM_TOKEN is not set. See .env.example.")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
     agent = Agent.from_config(config)
     app = build_app(config, agent)
     app.run_polling()
