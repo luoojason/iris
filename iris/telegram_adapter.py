@@ -116,7 +116,9 @@ def build_app(config: Config, agent: Agent):
 
         await context.bot.send_chat_action(chat_id=chat.id, action="typing")
         try:
-            result = await asyncio.to_thread(agent.respond, conversation_id, prompt)
+            result = await asyncio.to_thread(
+                agent.respond, conversation_id, prompt, bool(attach_paths)
+            )
         except ClaudeError as exc:
             log.error("claude unavailable: %s", exc)
             await message.reply_text(f"I can't reach my brain right now: {exc}")

@@ -12,6 +12,7 @@ import threading
 
 from .config import Config
 from .driver import ClaudeDriver, ClaudeResult
+from .router import choose_model
 from .sessions import SessionStore
 
 log = logging.getLogger("iris.agent")
@@ -61,9 +62,13 @@ class Agent:
         store: SessionStore,
         compact_every: int = 0,
         compact_at_tokens: int = 0,
+        light_model: str = "",
     ):
         self.driver = driver
         self.store = store
+        # When set, trivial turns are routed to this lighter model to save credit;
+        # everything else uses the driver's default (strong) model.
+        self.light_model = light_model
         # Compact a conversation after this many turns on one session (0 = never).
         # A coarse backstop; the token threshold below is the accurate trigger.
         self.compact_every = compact_every
@@ -82,15 +87,20 @@ class Agent:
         with self._locks_guard:
             return self._locks.setdefault(conversation_id, threading.Lock())
 
-    def respond(self, conversation_id: str, text: str) -> ClaudeResult:
+    def respond(self, conversation_id: str, text: str, has_attachments: bool = False) -> ClaudeResult:
         """Run one turn for a conversation and persist its session id.
 
         Turns for the same conversation are serialized so two messages arriving
         at once do not run concurrent --resume turns and fork the transcript.
         """
+        model = choose_model(
+            text,
+            light_model=self.light_model or None,
+            has_attachments=has_attachments,
+        )
         with self._lock_for(conversation_id):
             session_id = self.store.get(conversation_id)
-            result = self.driver.run(text, session_id)
+            result = self.driver.run(text, session_id, model)
             # A resumed session that no longer exists, or one that outgrew the
             # context window, carries no replacement id. Either way the stored id
             # is unusable, so drop it and retry once on a fresh session.
@@ -98,7 +108,7 @@ class Agent:
                 if _is_overflow(result):
                     log.warning("conversation %s overflowed its context; starting fresh", conversation_id)
                 self.store.clear(conversation_id)
-                result = self.driver.run(text, None)
+                result = self.driver.run(text, None, model)
             if result.session_id:
                 self.store.set(conversation_id, result.session_id)
             due_to_compact = not result.is_error and self._should_compact(conversation_id, result)
@@ -187,4 +197,5 @@ class Agent:
             store,
             compact_every=config.compact_every,
             compact_at_tokens=config.compact_at_tokens,
+            light_model=config.light_model,
         )

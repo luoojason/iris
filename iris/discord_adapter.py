@@ -96,7 +96,9 @@ def build_client(config: Config, agent: Agent):
 
         try:
             async with message.channel.typing():
-                result = await asyncio.to_thread(agent.respond, conversation_id, prompt)
+                result = await asyncio.to_thread(
+                    agent.respond, conversation_id, prompt, bool(attach_paths)
+                )
         except ClaudeError as exc:
             log.error("claude unavailable: %s", exc)
             await message.channel.send(f"I can't reach my brain right now: {exc}")

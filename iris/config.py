@@ -49,6 +49,8 @@ class Config:
 
     claude_bin: str = "claude"
     model: Optional[str] = None
+    # Optional lighter model for trivial turns (enables per-turn routing when set).
+    light_model: str = ""
     persona_file: Optional[str] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
@@ -85,6 +87,7 @@ class Config:
             respond_without_mention=_truthy(os.environ.get("IRIS_RESPOND_WITHOUT_MENTION")),
             claude_bin=os.environ.get("IRIS_CLAUDE_BIN", "claude"),
             model=os.environ.get("IRIS_MODEL") or None,
+            light_model=os.environ.get("IRIS_MODEL_LIGHT", ""),
             persona_file=os.environ.get("IRIS_PERSONA_FILE") or None,
             mcp_config=os.environ.get("IRIS_MCP_CONFIG") or None,
             permission_mode=os.environ.get("IRIS_PERMISSION_MODE", "default"),

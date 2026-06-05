@@ -101,13 +101,14 @@ class ClaudeDriver:
     runner: Runner = _default_runner
     sleep: Callable[[float], None] = time.sleep
 
-    def build_command(self, session_id: Optional[str] = None) -> list[str]:
+    def build_command(self, session_id: Optional[str] = None, model: Optional[str] = None) -> list[str]:
         """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin."""
         cmd: list[str] = [self.claude_bin, "-p", "--output-format", "json"]
         if session_id:
             cmd += ["--resume", session_id]
-        if self.model:
-            cmd += ["--model", self.model]
+        chosen_model = model or self.model
+        if chosen_model:
+            cmd += ["--model", chosen_model]
         if self.append_system_prompt_file:
             cmd += ["--append-system-prompt-file", self.append_system_prompt_file]
         if self.append_system_prompt:
@@ -126,15 +127,19 @@ class ClaudeDriver:
             cmd += ["--add-dir", directory]
         return cmd
 
-    def run(self, prompt: str, session_id: Optional[str] = None) -> ClaudeResult:
-        """Run one turn, retrying transient failures (rate limits, timeouts)."""
+    def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None) -> ClaudeResult:
+        """Run one turn, retrying transient failures (rate limits, timeouts).
+
+        ``model`` overrides the driver's default model for this turn only, which
+        is how per-turn routing picks a lighter model for trivial messages.
+        """
         if self.runner is _default_runner and shutil.which(self.claude_bin) is None:
             raise ClaudeError(
                 f"claude binary not found on PATH: {self.claude_bin!r}. "
                 "Install Claude Code and sign in to your subscription first."
             )
 
-        cmd = self.build_command(session_id)
+        cmd = self.build_command(session_id, model)
         last_error: Optional[str] = None
 
         for attempt in range(self.max_retries + 1):

@@ -10,12 +10,15 @@ from iris.sessions import SessionStore
 class FakeDriver:
     """Records calls and returns queued results."""
 
-    def __init__(self, results):
+    def __init__(self, results, model=None):
         self.results = list(results)
         self.calls = []
+        self.model = model  # the driver's default model, read by the router
 
-    def run(self, prompt, session_id=None):
+    def run(self, prompt, session_id=None, model=None):
         self.calls.append((prompt, session_id))
+        self.model_calls = getattr(self, "model_calls", [])
+        self.model_calls.append(model)
         return self.results.pop(0)
 
 
@@ -91,7 +94,9 @@ def test_respond_serializes_same_conversation(tmp_path):
     guard = threading.Lock()
 
     class SlowDriver:
-        def run(self, prompt, session_id=None):
+        model = None
+
+        def run(self, prompt, session_id=None, model=None):
             with guard:
                 state["current"] += 1
                 state["max"] = max(state["max"], state["current"])
@@ -184,6 +189,30 @@ def test_no_compaction_when_disabled(tmp_path):
         agent.respond("c1", "x")
     assert len(driver.calls) == 3   # never an extra summary/seed call
     assert store.get("c1") == "s1"
+
+
+def test_routing_picks_light_model_for_trivial_turn(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)], model="claude-opus-4-8")
+    agent = Agent(driver, store, light_model="claude-haiku-4-5")
+    agent.respond("c1", "thanks!")
+    assert driver.model_calls[0] == "claude-haiku-4-5"  # trivial -> light
+
+
+def test_routing_keeps_heavy_model_for_real_turn(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)], model="claude-opus-4-8")
+    agent = Agent(driver, store, light_model="claude-haiku-4-5")
+    agent.respond("c1", "please debug this stack trace and explain the root cause for me")
+    assert driver.model_calls[0] is None  # heavy -> no override, driver default used
+
+
+def test_no_routing_when_light_model_unset(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)], model="claude-opus-4-8")
+    agent = Agent(driver, store)  # no light model
+    agent.respond("c1", "thanks!")
+    assert driver.model_calls[0] is None  # always the driver default
 
 
 def test_from_config_builds_agent(tmp_path):

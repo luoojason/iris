@@ -117,6 +117,7 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 | `IRIS_DISCORD_TOKEN` | Discord bot token. |
 | `IRIS_ALLOWED_USER_IDS` | Comma-separated ids the bot will answer. Lock to yourself. |
 | `IRIS_MODEL` | `claude-opus-4-...`, `claude-sonnet-4-...`, `claude-haiku-4-...`, or blank. Haiku stretches the credit furthest. |
+| `IRIS_MODEL_LIGHT` | Optional lighter model for trivial turns (enables routing). Blank = every turn on `IRIS_MODEL`. |
 | `IRIS_PERSONA_FILE` | System prompt file for the persona. |
 | `IRIS_MCP_CONFIG` | MCP tool config (gives the agent tools). |
 | `IRIS_PERMISSION_MODE` + `IRIS_ALLOWED_TOOLS` | Control which tools run unattended. |
@@ -193,6 +194,19 @@ it on only where you have verified the box can keep up inside your turn timeout.
 With voice off, an audio attachment degrades to a plain file reference. The model
 is loaded lazily on the first voice message, so enabling it costs nothing until
 someone actually sends audio, preserving Iris's zero-idle-inference shape.
+
+### Model routing
+
+Set `IRIS_MODEL_LIGHT` to send clearly-trivial turns ("thanks", "lol", a short
+greeting) to a cheaper, faster model while everything substantive stays on
+`IRIS_MODEL`. The decision is a pure heuristic with no extra model call, and it
+is deliberately one-directional: it only ever *downgrades*, and only when a
+message is short, has no attachment, no code fence, and none of the words that
+signal real work (explain, debug, why, plan, compare, …). When in any doubt it
+keeps the strong model, because answering a hard question with a weak model is
+the costly mistake. Leave `IRIS_MODEL_LIGHT` blank to run every turn on one
+model. The default model can switch per turn even mid-conversation; the resumed
+session is just the transcript.
 
 ### Long conversations (auto-compaction)
 
