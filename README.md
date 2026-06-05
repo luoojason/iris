@@ -195,6 +195,16 @@ With voice off, an audio attachment degrades to a plain file reference. The mode
 is loaded lazily on the first voice message, so enabling it costs nothing until
 someone actually sends audio, preserving Iris's zero-idle-inference shape.
 
+Iris can also **reply** out loud. The bundled `speak` tool
+(`iris/mcp/tts_server.py`) renders text to speech with a local engine and posts
+the audio to Discord. Unlike inbound transcription, *output* speech is a natural
+MCP tool: the model decides when a spoken reply fits and calls it. It uses the
+first available engine: `IRIS_TTS_CMD` (a template reading text on stdin, writing
+to `{out}`), then [piper](https://github.com/rhasspy/piper) (set `IRIS_TTS_VOICE`
+to a voice model), then macOS `say`, then `espeak-ng`. Wire the tts server into
+your mcp config and allowlist `mcp__tts__speak`. If no engine is installed the
+tool just reports that and the bot replies in text.
+
 ### Model routing
 
 Set `IRIS_MODEL_LIGHT` to send clearly-trivial turns ("thanks", "lol", a short
@@ -242,11 +252,10 @@ agent maps cleanly onto the official client:
 
 - **Carries over well:** persona, per-conversation memory, shell and file tools,
   web search and fetch, planning, subagent delegation, browser automation (via
-  the Playwright MCP), Claude Code skills (the same `SKILL.md` format), and
-  free local speech-to-text for inbound voice messages (built in; see Voice).
-- **Re-add as MCP servers:** custom tools, platform admin actions, history
-  search, and free local text-to-speech for spoken replies (output STT/TTS that
-  the model triggers is a natural MCP tool, unlike inbound transcription).
+  the Playwright MCP), Claude Code skills (the same `SKILL.md` format), and free
+  local voice both ways (speech-to-text in, text-to-speech out; see Voice).
+- **Re-add as MCP servers:** custom tools, platform admin actions, and history
+  search (Iris ships scoped Discord-actions, history-search, and tts servers).
 - **Does not carry over:** anything that needs a paid third-party API key (image
   and video generation, paid search and voice backends), multi-model
   mixture-of-agents reasoning, and Hermes's single-turn tool-chain collapse.
@@ -261,8 +270,8 @@ are wired and unit-tested in isolation, but have **not** yet been exercised
 against a live bot connection. Start with `python -m iris chat` to try the brain,
 then wire up a transport.
 
-Roadmap: live-testing the wired transports end to end, free-local text-to-speech
-for spoken replies, and a documented feature-survival map against Hermes.
+Roadmap: live-testing the wired transports end to end, and a documented
+feature-survival map against Hermes.
 
 ## Related work
 
