@@ -152,3 +152,21 @@ def test_unparseable_output_is_an_error():
     result = d.run("hello")
     assert result.is_error is True
     assert "not logged in" in (result.error or "")
+
+
+def test_context_tokens_sums_fresh_and_cached_input():
+    usage = {
+        "input_tokens": 18311,
+        "cache_read_input_tokens": 16184,
+        "cache_creation_input_tokens": 4850,
+        "output_tokens": 17,
+    }
+    d = ClaudeDriver(runner=make_runner([FakeProc(0, success_json(usage=usage))]))
+    result = d.run("hello")
+    assert result.context_tokens == 18311 + 16184 + 4850  # output tokens excluded
+
+
+def test_context_tokens_absent_when_no_usage():
+    d = ClaudeDriver(runner=make_runner([FakeProc(0, success_json())]))
+    result = d.run("hello")
+    assert result.context_tokens is None

@@ -55,11 +55,21 @@ def _is_overflow(result: ClaudeResult) -> bool:
 
 
 class Agent:
-    def __init__(self, driver: ClaudeDriver, store: SessionStore, compact_every: int = 0):
+    def __init__(
+        self,
+        driver: ClaudeDriver,
+        store: SessionStore,
+        compact_every: int = 0,
+        compact_at_tokens: int = 0,
+    ):
         self.driver = driver
         self.store = store
         # Compact a conversation after this many turns on one session (0 = never).
+        # A coarse backstop; the token threshold below is the accurate trigger.
         self.compact_every = compact_every
+        # Compact once a turn's context reaches this many tokens (0 = never). This
+        # catches tool-heavy turns (a big web fetch) that turn-count would miss.
+        self.compact_at_tokens = compact_at_tokens
         # When False, compaction runs inline instead of in a background thread
         # (used by tests for determinism).
         self.compact_async = True
@@ -91,16 +101,20 @@ class Agent:
                 result = self.driver.run(text, None)
             if result.session_id:
                 self.store.set(conversation_id, result.session_id)
-            due_to_compact = (
-                not result.is_error
-                and self.compact_every > 0
-                and self.store.turns(conversation_id) >= self.compact_every
-            )
+            due_to_compact = not result.is_error and self._should_compact(conversation_id, result)
         # Outside the lock: the user already has their reply. Compaction runs on
         # its own and re-acquires the lock, so it never delays this turn.
         if due_to_compact:
             self._launch_compaction(conversation_id)
         return result
+
+    def _should_compact(self, conversation_id: str, result: ClaudeResult) -> bool:
+        """Whether this conversation is big enough to condense onto a fresh session."""
+        if self.compact_at_tokens > 0 and (result.context_tokens or 0) >= self.compact_at_tokens:
+            return True
+        if self.compact_every > 0 and self.store.turns(conversation_id) >= self.compact_every:
+            return True
+        return False
 
     def _launch_compaction(self, conversation_id: str) -> None:
         if not self.compact_async:
@@ -168,4 +182,9 @@ class Agent:
             timeout=config.turn_timeout,
         )
         store = SessionStore(config.session_store_path)
-        return cls(driver, store, compact_every=config.compact_every)
+        return cls(
+            driver,
+            store,
+            compact_every=config.compact_every,
+            compact_at_tokens=config.compact_at_tokens,
+        )

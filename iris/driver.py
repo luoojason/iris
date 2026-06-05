@@ -47,6 +47,9 @@ class ClaudeResult:
     model: Optional[str] = None
     duration_ms: Optional[int] = None
     num_turns: Optional[int] = None
+    # Total prompt tokens this turn carried (fresh + cache read + cache write).
+    # This is how full the context window was, used to decide when to compact.
+    context_tokens: Optional[int] = None
     raw: dict = field(default_factory=dict)
 
 
@@ -186,6 +189,8 @@ class ClaudeDriver:
         if isinstance(usage, dict) and usage:
             model = next(iter(usage))
 
+        context_tokens = _context_tokens(obj.get("usage"))
+
         error = None
         if is_error:
             error = (
@@ -204,6 +209,7 @@ class ClaudeDriver:
             model=model,
             duration_ms=obj.get("duration_ms"),
             num_turns=obj.get("num_turns"),
+            context_tokens=context_tokens,
             raw=obj,
         )
 
@@ -221,6 +227,24 @@ class ClaudeDriver:
         if rate_limited:
             delay *= 4
         self.sleep(delay)
+
+
+def _context_tokens(usage) -> Optional[int]:
+    """How many prompt tokens a turn carried, from the result's usage block.
+
+    The full context the model saw is the fresh input plus everything served
+    from (or written to) the prompt cache, so all three are summed.
+    """
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    found = False
+    for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)):
+            total += int(value)
+            found = True
+    return total if found else None
 
 
 def _loads_result(text: str) -> Optional[dict]:

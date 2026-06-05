@@ -67,9 +67,11 @@ class Config:
 
     session_store_path: str = "iris-sessions.json"
     turn_timeout: float = 300.0
-    # Compact a conversation after this many turns: summarize the session and
-    # carry the summary onto a fresh one, so long conversations never outgrow the
-    # context window. 0 disables it.
+    # Compact a conversation when a turn's context reaches this many tokens: the
+    # accurate trigger, since it catches tool-heavy turns. 0 disables it.
+    compact_at_tokens: int = 150000
+    # Backstop trigger: also compact after this many turns on one session, in
+    # case usage tokens are ever unavailable. 0 disables it.
     compact_every: int = 60
 
     @classmethod
@@ -95,6 +97,7 @@ class Config:
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
+            compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
         )
 

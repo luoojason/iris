@@ -202,15 +202,24 @@ context window. Claude Code auto-compacts in its interactive UI, but that
 behavior is undocumented for headless `-p --resume` and there is no programmatic
 `/compact`, so Iris does not rely on it: it manages its own context budget.
 
-After `IRIS_COMPACT_EVERY` turns on a session (default 60, `0` disables), Iris
-asks that session for a summary, then carries the summary onto a **fresh**
-session and continues there. The summary runs while the old session is still well
-inside its limit, so the summarization itself never overflows, and it happens in
-a background thread **after** your reply is sent, so it never adds latency to a
-message. If a turn ever does hit a context-overflow error anyway, Iris treats it
-like a dead session: it starts fresh and retries, so the bot recovers instead of
-wedging. Compaction trades a little deep history for a conversation that runs
-indefinitely, which is the same trade Claude Code's own auto-compact makes.
+The trigger is **token-accurate**, not a guess. Every `claude -p` turn reports
+how many prompt tokens it carried (fresh plus cache), and when that reaches
+`IRIS_COMPACT_AT_TOKENS` (default 150000, leaving headroom under a 200k window)
+Iris compacts. Because it reads the real context size, a single tool-heavy turn
+(a big web fetch, a large file read) trips it just as a long chat would.
+`IRIS_COMPACT_EVERY` (default 60 turns) is a coarse backstop for the rare case
+where usage numbers are missing. Either at `0` disables that trigger.
+
+To compact, Iris asks the current session for a summary, then carries the summary
+onto a **fresh** session and continues there. The summary runs while the old
+session is still inside its limit, so the summarization itself never overflows,
+and it happens in a background thread **after** your reply is sent, so it never
+adds latency to a message. If a turn ever does hit a context-overflow error
+anyway, Iris treats it like a dead session: it starts fresh and retries, so the
+bot recovers instead of wedging (that path does drop history, which is why the
+token trigger is set to fire well before it). Compaction trades a little deep
+history for a conversation that runs indefinitely, the same trade Claude Code's
+own auto-compact makes.
 
 ## What carries over from Hermes
 

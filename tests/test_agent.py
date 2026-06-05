@@ -147,6 +147,30 @@ def test_compaction_summarizes_and_reseeds(tmp_path):
     assert store.turns("c1") == 1   # counter reset for the new session
 
 
+def test_compaction_triggers_on_context_tokens(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        # One heavy turn whose context is already near the window.
+        ClaudeResult(text="reply", session_id="s1", is_error=False, context_tokens=160000),
+        ClaudeResult(text="SUMMARY", session_id="s1", is_error=False),
+        ClaudeResult(text="ok", session_id="s2", is_error=False),
+    ])
+    agent = Agent(driver, store, compact_every=0, compact_at_tokens=150000)
+    agent.compact_async = False
+    agent.respond("c1", "fetch a huge page")  # one turn is enough to cross the token line
+    assert store.get("c1") == "s2"  # compacted despite only one turn
+
+
+def test_no_compaction_below_token_threshold(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([ClaudeResult(text="reply", session_id="s1", is_error=False, context_tokens=40000)])
+    agent = Agent(driver, store, compact_every=0, compact_at_tokens=150000)
+    agent.compact_async = False
+    agent.respond("c1", "hi")
+    assert len(driver.calls) == 1   # no summary/seed call
+    assert store.get("c1") == "s1"
+
+
 def test_no_compaction_when_disabled(tmp_path):
     store = SessionStore(tmp_path / "s.json")
     driver = FakeDriver([

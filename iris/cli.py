@@ -73,7 +73,15 @@ def doctor(config: Config) -> int:
     print(f"mcp tools: {config.mcp_config or '(none)'}")
     print(f"allowed tools: {', '.join(config.allowed_tools) if config.allowed_tools else '(none)'}")
     print(f"voice transcription: {'on (' + config.voice_model + ')' if config.voice_enabled else 'off'}")
-    print(f"auto-compact: every {config.compact_every} turns" if config.compact_every else "auto-compact: off")
+    if config.compact_at_tokens or config.compact_every:
+        triggers = []
+        if config.compact_at_tokens:
+            triggers.append(f"{config.compact_at_tokens} tokens")
+        if config.compact_every:
+            triggers.append(f"{config.compact_every} turns")
+        print(f"auto-compact: at {' or '.join(triggers)}")
+    else:
+        print("auto-compact: off")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
