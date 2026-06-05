@@ -109,6 +109,59 @@ def test_respond_serializes_same_conversation(tmp_path):
     assert state["max"] == 1  # never two turns at once for the same conversation
 
 
+def test_overflow_heals_to_fresh_session(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "big-session")
+    driver = FakeDriver([
+        ClaudeResult(text="", session_id=None, is_error=True, error="prompt is too long"),
+        ClaudeResult(text="recovered", session_id="new-id", is_error=False),
+    ])
+    agent = Agent(driver, store)
+    result = agent.respond("c1", "hi")
+    assert result.text == "recovered"
+    assert driver.calls[0] == ("hi", "big-session")  # tried the overgrown id
+    assert driver.calls[1] == ("hi", None)           # then retried fresh
+    assert store.get("c1") == "new-id"
+
+
+def test_compaction_summarizes_and_reseeds(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        ClaudeResult(text="reply 1", session_id="s1", is_error=False),
+        ClaudeResult(text="reply 2", session_id="s1", is_error=False),
+        ClaudeResult(text="SUMMARY OF CHAT", session_id="s1", is_error=False),  # summary turn
+        ClaudeResult(text="ok", session_id="s2", is_error=False),               # fresh seeded session
+    ])
+    agent = Agent(driver, store, compact_every=2)
+    agent.compact_async = False  # run compaction inline for a deterministic test
+
+    agent.respond("c1", "first")
+    assert store.turns("c1") == 1  # no compaction yet
+    agent.respond("c1", "second")  # second turn crosses the threshold
+
+    # The old session was asked to summarize, and a fresh session was seeded.
+    prompts = [p for p, _ in driver.calls]
+    assert any("Summarize our entire conversation" in p for p in prompts)
+    assert any("SUMMARY OF CHAT" in p for p in prompts)  # the summary seeded the new one
+    assert store.get("c1") == "s2"  # now on the fresh session
+    assert store.turns("c1") == 1   # counter reset for the new session
+
+
+def test_no_compaction_when_disabled(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        ClaudeResult(text="a", session_id="s1", is_error=False),
+        ClaudeResult(text="b", session_id="s1", is_error=False),
+        ClaudeResult(text="c", session_id="s1", is_error=False),
+    ])
+    agent = Agent(driver, store, compact_every=0)  # disabled
+    agent.compact_async = False
+    for _ in range(3):
+        agent.respond("c1", "x")
+    assert len(driver.calls) == 3   # never an extra summary/seed call
+    assert store.get("c1") == "s1"
+
+
 def test_from_config_builds_agent(tmp_path):
     from iris.config import Config
     cfg = Config(session_store_path=str(tmp_path / "s.json"), model="claude-sonnet-4-6")

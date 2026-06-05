@@ -194,6 +194,24 @@ With voice off, an audio attachment degrades to a plain file reference. The mode
 is loaded lazily on the first voice message, so enabling it costs nothing until
 someone actually sends audio, preserving Iris's zero-idle-inference shape.
 
+### Long conversations (auto-compaction)
+
+Each conversation rides one `claude` session, resumed turn after turn. Left
+alone, a months-old Discord channel would eventually grow past the model's
+context window. Claude Code auto-compacts in its interactive UI, but that
+behavior is undocumented for headless `-p --resume` and there is no programmatic
+`/compact`, so Iris does not rely on it: it manages its own context budget.
+
+After `IRIS_COMPACT_EVERY` turns on a session (default 60, `0` disables), Iris
+asks that session for a summary, then carries the summary onto a **fresh**
+session and continues there. The summary runs while the old session is still well
+inside its limit, so the summarization itself never overflows, and it happens in
+a background thread **after** your reply is sent, so it never adds latency to a
+message. If a turn ever does hit a context-overflow error anyway, Iris treats it
+like a dead session: it starts fresh and retries, so the bot recovers instead of
+wedging. Compaction trades a little deep history for a conversation that runs
+indefinitely, which is the same trade Claude Code's own auto-compact makes.
+
 ## What carries over from Hermes
 
 Because Claude Code's skills and tools use open formats, most of a Hermes-style

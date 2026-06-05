@@ -67,6 +67,10 @@ class Config:
 
     session_store_path: str = "iris-sessions.json"
     turn_timeout: float = 300.0
+    # Compact a conversation after this many turns: summarize the session and
+    # carry the summary onto a fresh one, so long conversations never outgrow the
+    # context window. 0 disables it.
+    compact_every: int = 60
 
     @classmethod
     def from_env(cls, *, dotenv: str | os.PathLike[str] = ".env") -> "Config":
@@ -91,6 +95,7 @@ class Config:
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
+            compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
         )
 
 

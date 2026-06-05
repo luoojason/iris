@@ -57,12 +57,27 @@ class SessionStore:
             return entry.get("session_id") if entry else None
 
     def set(self, conversation_id: str, session_id: str) -> None:
+        """Record this conversation's current session id.
+
+        Tracks a turn counter alongside it: resuming the same session id
+        increments the count; a new (or changed) session id resets it to 1. The
+        counter is how the agent decides when to compact a long conversation.
+        """
         with self._lock:
+            prev = self._data.get(conversation_id) or {}
+            turns = prev.get("turns", 0) + 1 if prev.get("session_id") == session_id else 1
             self._data[conversation_id] = {
                 "session_id": session_id,
                 "updated_at": time.time(),
+                "turns": turns,
             }
             self._flush()
+
+    def turns(self, conversation_id: str) -> int:
+        """How many turns have run on this conversation's current session."""
+        with self._lock:
+            entry = self._data.get(conversation_id)
+            return entry.get("turns", 0) if entry else 0
 
     def clear(self, conversation_id: str) -> bool:
         """Forget a conversation so the next message starts a fresh session."""

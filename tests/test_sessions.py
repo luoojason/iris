@@ -43,3 +43,15 @@ def test_set_updates_existing(tmp_path):
     store.set("chan", "new")
     assert store.get("chan") == "new"
     assert len(store.all()) == 1
+
+
+def test_turns_counts_same_session_and_resets_on_change(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    assert store.turns("chan") == 0
+    store.set("chan", "sess-1")
+    assert store.turns("chan") == 1
+    store.set("chan", "sess-1")  # same session, another turn
+    store.set("chan", "sess-1")
+    assert store.turns("chan") == 3
+    store.set("chan", "sess-2")  # a new session resets the count
+    assert store.turns("chan") == 1
