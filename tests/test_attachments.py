@@ -33,3 +33,19 @@ def test_describe_with_no_text_still_references_files():
 
 def test_describe_with_no_paths_is_just_text():
     assert describe("hi", []) == "hi"
+
+
+def test_describe_renders_transcript_for_voice_paths():
+    out = describe("", ["/a/voice.ogg"], {"/a/voice.ogg": "hello there"})
+    assert "[voice message, transcribed: hello there]" in out
+    assert "[attached file" not in out
+
+
+def test_describe_mixes_transcript_and_file():
+    out = describe(
+        "see these",
+        ["/a/voice.ogg", "/a/pic.png"],
+        {"/a/voice.ogg": "play it"},
+    )
+    assert "[voice message, transcribed: play it]" in out
+    assert "[attached file: /a/pic.png]" in out

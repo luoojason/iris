@@ -20,6 +20,7 @@ from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
 from .driver import ClaudeError
 from .textutil import chunk_text
+from .transcribe import build_transcriber, transcribe_audio
 
 log = logging.getLogger("iris.discord")
 
@@ -50,6 +51,7 @@ def build_client(config: Config, agent: Agent):
     intents = discord.Intents.default()
     intents.message_content = True
     client = discord.Client(intents=intents)
+    transcriber = build_transcriber(config)  # None unless IRIS_VOICE is on
 
     def _should_handle(message) -> bool:
         if message.author.bot or (client.user and message.author.id == client.user.id):
@@ -87,7 +89,8 @@ def build_client(config: Config, agent: Agent):
             return
 
         attach_paths = await _save_attachments(message.attachments, config.attachments_dir, conversation_id)
-        prompt = describe(prompt, attach_paths)
+        transcripts = await asyncio.to_thread(transcribe_audio, attach_paths, transcriber)
+        prompt = describe(prompt, attach_paths, transcripts)
         if not prompt:
             return
 

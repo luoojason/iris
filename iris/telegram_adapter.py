@@ -15,6 +15,7 @@ from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
 from .driver import ClaudeError
 from .textutil import chunk_text
+from .transcribe import build_transcriber, transcribe_audio
 
 log = logging.getLogger("iris.telegram")
 
@@ -33,6 +34,15 @@ async def _save_attachments(message, context, base_dir: str, conversation_id: st
     doc = getattr(message, "document", None)
     if doc:
         wanted.append((doc.file_id, doc.file_name or f"doc_{doc.file_unique_id}"))
+    # Voice notes and audio clips: keep the .ogg/.oga extension so the
+    # transcriber recognizes them as audio.
+    voice = getattr(message, "voice", None)
+    if voice:
+        wanted.append((voice.file_id, f"voice_{voice.file_unique_id}.ogg"))
+    audio = getattr(message, "audio", None)
+    if audio:
+        ext = ".oga" if not (audio.file_name and "." in audio.file_name) else ""
+        wanted.append((audio.file_id, (audio.file_name or f"audio_{audio.file_unique_id}") + ext))
     if not wanted:
         return paths
     conv_dir = conversation_dir(base_dir, conversation_id)
@@ -57,6 +67,7 @@ def build_app(config: Config, agent: Agent):
     )
 
     app = ApplicationBuilder().token(config.telegram_token).build()
+    transcriber = build_transcriber(config)  # None unless IRIS_VOICE is on
 
     def _allowed(update) -> bool:
         user = update.effective_user
@@ -98,7 +109,8 @@ def build_app(config: Config, agent: Agent):
                 text = text.replace(f"@{username}", "").strip()
 
         attach_paths = await _save_attachments(message, context, config.attachments_dir, conversation_id)
-        prompt = describe(text, attach_paths)
+        transcripts = await asyncio.to_thread(transcribe_audio, attach_paths, transcriber)
+        prompt = describe(text, attach_paths, transcripts)
         if not prompt:
             return
 
@@ -124,7 +136,9 @@ def build_app(config: Config, agent: Agent):
 
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, on_message
+        (filters.TEXT | filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO)
+        & ~filters.COMMAND,
+        on_message,
     ))
     return app
 

@@ -59,6 +59,11 @@ class Config:
     attachments_dir: str = "iris-attachments"
     # A directory of skill folders (each with SKILL.md) to make available to the brain.
     skills_dir: str = ""
+    # Transcribe inbound voice messages locally (needs the [voice] extra). Off by
+    # default: the first voice message downloads a whisper model and runs CPU
+    # inference, which can be slow on small hosts.
+    voice_enabled: bool = False
+    voice_model: str = "base"
 
     session_store_path: str = "iris-sessions.json"
     turn_timeout: float = 300.0
@@ -82,6 +87,8 @@ class Config:
             add_dirs=_split(os.environ.get("IRIS_ADD_DIRS")),
             attachments_dir=os.environ.get("IRIS_ATTACHMENTS_DIR", "iris-attachments"),
             skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
+            voice_enabled=_truthy(os.environ.get("IRIS_VOICE")),
+            voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
         )

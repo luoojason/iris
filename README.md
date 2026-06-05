@@ -171,6 +171,29 @@ or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 
+### Voice messages
+
+Iris can transcribe inbound voice notes locally and for free, so you can talk to
+it on Discord or Telegram. Transcription happens **in the adapter**, before the
+prompt reaches the brain: a voice attachment is downloaded, run through a local
+[`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) model, and folded
+into the prompt as text. (This is the right seam for *inbound* speech: an MCP
+tool the model calls could not intercept the attachment itself.)
+
+```bash
+pip install -e ".[voice]"
+# then in .env:
+IRIS_VOICE=true
+IRIS_VOICE_MODEL=base   # tiny | base | small | medium — larger = slower, more accurate
+```
+
+It is **off by default** on purpose. The first voice message downloads the model
+(tens of MB) and runs CPU inference, which can be slow on a small host, so turn
+it on only where you have verified the box can keep up inside your turn timeout.
+With voice off, an audio attachment degrades to a plain file reference. The model
+is loaded lazily on the first voice message, so enabling it costs nothing until
+someone actually sends audio, preserving Iris's zero-idle-inference shape.
+
 ## What carries over from Hermes
 
 Because Claude Code's skills and tools use open formats, most of a Hermes-style
@@ -178,9 +201,11 @@ agent maps cleanly onto the official client:
 
 - **Carries over well:** persona, per-conversation memory, shell and file tools,
   web search and fetch, planning, subagent delegation, browser automation (via
-  the Playwright MCP), and Claude Code skills (the same `SKILL.md` format).
-- **Re-add as MCP servers:** custom tools, free local text-to-speech and
-  speech-to-text, platform admin actions, history search.
+  the Playwright MCP), Claude Code skills (the same `SKILL.md` format), and
+  free local speech-to-text for inbound voice messages (built in; see Voice).
+- **Re-add as MCP servers:** custom tools, platform admin actions, history
+  search, and free local text-to-speech for spoken replies (output STT/TTS that
+  the model triggers is a natural MCP tool, unlike inbound transcription).
 - **Does not carry over:** anything that needs a paid third-party API key (image
   and video generation, paid search and voice backends), multi-model
   mixture-of-agents reasoning, and Hermes's single-turn tool-chain collapse.
@@ -195,8 +220,8 @@ are wired and unit-tested in isolation, but have **not** yet been exercised
 against a live bot connection. Start with `python -m iris chat` to try the brain,
 then wire up a transport.
 
-Roadmap: a skills loader, the free-local voice MCP servers, and a documented
-feature-survival map against Hermes.
+Roadmap: live-testing the wired transports end to end, free-local text-to-speech
+for spoken replies, and a documented feature-survival map against Hermes.
 
 ## Related work
 

@@ -29,13 +29,22 @@ def safe_filename(name: str | None) -> str:
     return _SAFE.sub("_", leaf) or "file"
 
 
-def describe(text: str, paths: list[str]) -> str:
-    """Fold attachment paths into the prompt so the brain knows to read them."""
-    if not paths:
+def describe(text: str, paths: list[str], transcripts: dict[str, str] | None = None) -> str:
+    """Fold attachments into the prompt so the brain knows what came in.
+
+    Paths the caller transcribed (voice messages) are rendered as their text;
+    everything else is rendered as a file path for the brain's Read tool.
+    """
+    transcripts = transcripts or {}
+    if not paths and not transcripts:
         return text
     lines = [text] if text else []
-    if not text:
+    if not text and not transcripts:
         lines.append("(no text, see the attached file(s))")
     for path in paths:
-        lines.append(f"[attached file: {path}]")
+        transcript = transcripts.get(path)
+        if transcript:
+            lines.append(f"[voice message, transcribed: {transcript}]")
+        else:
+            lines.append(f"[attached file: {path}]")
     return "\n".join(lines).strip()
