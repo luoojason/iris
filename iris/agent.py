@@ -42,6 +42,11 @@ class Agent:
 
     @classmethod
     def from_config(cls, config: Config) -> "Agent":
+        # The attachments dir must be reachable so the Read tool can open
+        # downloaded images/files.
+        add_dirs = list(config.add_dirs)
+        if config.attachments_dir:
+            add_dirs.append(config.attachments_dir)
         driver = ClaudeDriver(
             claude_bin=config.claude_bin,
             model=config.model,
@@ -50,7 +55,7 @@ class Agent:
             permission_mode=config.permission_mode,
             allowed_tools=config.allowed_tools or None,
             disallowed_tools=config.disallowed_tools or None,
-            add_dirs=config.add_dirs or None,
+            add_dirs=add_dirs or None,
             timeout=config.turn_timeout,
         )
         store = SessionStore(config.session_store_path)

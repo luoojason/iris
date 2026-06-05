@@ -11,6 +11,7 @@ import logging
 from typing import Optional
 
 from .agent import Agent
+from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
 from .driver import ClaudeError
 from .textutil import chunk_text
@@ -18,6 +19,32 @@ from .textutil import chunk_text
 log = logging.getLogger("iris.telegram")
 
 TELEGRAM_LIMIT = 4096
+
+
+async def _save_attachments(message, context, base_dir: str, conversation_id: str) -> list[str]:
+    """Download a Telegram photo/document and return its absolute path."""
+    paths: list[str] = []
+    if not base_dir:
+        return paths
+    wanted = []  # (file_id, filename)
+    if getattr(message, "photo", None):
+        photo = message.photo[-1]  # largest size
+        wanted.append((photo.file_id, f"photo_{photo.file_unique_id}.jpg"))
+    doc = getattr(message, "document", None)
+    if doc:
+        wanted.append((doc.file_id, doc.file_name or f"doc_{doc.file_unique_id}"))
+    if not wanted:
+        return paths
+    conv_dir = conversation_dir(base_dir, conversation_id)
+    for file_id, filename in wanted[:5]:
+        dest = conv_dir / safe_filename(filename)
+        try:
+            tg_file = await context.bot.get_file(file_id)
+            await tg_file.download_to_drive(str(dest))
+            paths.append(str(dest.resolve()))
+        except Exception as exc:
+            log.warning("could not save telegram attachment: %s", exc)
+    return paths
 
 
 def build_app(config: Config, agent: Agent):
@@ -49,11 +76,12 @@ def build_app(config: Config, agent: Agent):
         if not _allowed(update):
             return
         message = update.message
-        if not message or not message.text:
+        if not message:
             return
 
         chat = update.effective_chat
-        text = message.text.strip()
+        text = (message.text or message.caption or "").strip()
+        conversation_id = f"telegram:{chat.id}"
 
         # In groups, only answer when addressed, unless told otherwise.
         if chat and chat.type in ("group", "supergroup") and not config.respond_without_mention:
@@ -69,13 +97,14 @@ def build_app(config: Config, agent: Agent):
             if username:
                 text = text.replace(f"@{username}", "").strip()
 
-        if not text:
+        attach_paths = await _save_attachments(message, context, config.attachments_dir, conversation_id)
+        prompt = describe(text, attach_paths)
+        if not prompt:
             return
 
-        conversation_id = f"telegram:{chat.id}"
         await context.bot.send_chat_action(chat_id=chat.id, action="typing")
         try:
-            result = await asyncio.to_thread(agent.respond, conversation_id, text)
+            result = await asyncio.to_thread(agent.respond, conversation_id, prompt)
         except ClaudeError as exc:
             log.error("claude unavailable: %s", exc)
             await message.reply_text(f"I can't reach my brain right now: {exc}")
@@ -94,7 +123,9 @@ def build_app(config: Config, agent: Agent):
             await message.reply_text(piece)
 
     app.add_handler(CommandHandler("reset", reset_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, on_message
+    ))
     return app
 
 

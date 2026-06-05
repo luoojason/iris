@@ -16,6 +16,7 @@ import logging
 from typing import Optional
 
 from .agent import Agent
+from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
 from .driver import ClaudeError
 from .textutil import chunk_text
@@ -24,6 +25,22 @@ log = logging.getLogger("iris.discord")
 
 DISCORD_LIMIT = 2000
 RESET_COMMANDS = {"!reset", "!forget", "!newchat"}
+
+
+async def _save_attachments(attachments, base_dir: str, conversation_id: str) -> list[str]:
+    """Download message attachments and return their absolute paths."""
+    paths: list[str] = []
+    if not attachments or not base_dir:
+        return paths
+    conv_dir = conversation_dir(base_dir, conversation_id)
+    for att in list(attachments)[:5]:
+        dest = conv_dir / safe_filename(getattr(att, "filename", None))
+        try:
+            await att.save(dest)
+            paths.append(str(dest.resolve()))
+        except Exception as exc:  # one bad attachment should not sink the turn
+            log.warning("could not save attachment %s: %s", getattr(att, "filename", "?"), exc)
+    return paths
 
 
 def build_client(config: Config, agent: Agent):
@@ -68,6 +85,9 @@ def build_client(config: Config, agent: Agent):
             agent.reset(conversation_id)
             await message.channel.send("Started a fresh conversation.")
             return
+
+        attach_paths = await _save_attachments(message.attachments, config.attachments_dir, conversation_id)
+        prompt = describe(prompt, attach_paths)
         if not prompt:
             return
 

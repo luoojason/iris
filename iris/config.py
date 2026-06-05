@@ -55,6 +55,8 @@ class Config:
     allowed_tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
     add_dirs: list[str] = field(default_factory=list)
+    # Where inbound images/files are downloaded so the brain's Read tool can see them.
+    attachments_dir: str = "iris-attachments"
 
     session_store_path: str = "iris-sessions.json"
     turn_timeout: float = 300.0
@@ -76,6 +78,7 @@ class Config:
             allowed_tools=_split(os.environ.get("IRIS_ALLOWED_TOOLS")),
             disallowed_tools=_split(os.environ.get("IRIS_DISALLOWED_TOOLS")),
             add_dirs=_split(os.environ.get("IRIS_ADD_DIRS")),
+            attachments_dir=os.environ.get("IRIS_ATTACHMENTS_DIR", "iris-attachments"),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
         )
