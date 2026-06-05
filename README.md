@@ -148,8 +148,24 @@ Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
 `list_channels`, `search_members`. It is a narrow, audited surface (no
 arbitrary "send anywhere" tool) so the agent can do Discord chores the chat
-adapter can't, without raw shell. Point Claude at any other MCP server
-(filesystem, browser, web search, your own) the same way. The brain can read and edit files and run commands in directories
+adapter can't, without raw shell. A **history search** tool
+(`iris/mcp/session_search.py`) lets it recall past conversations from the
+transcripts Claude Code already keeps. Point Claude at any other MCP server
+(filesystem, browser, web search, your own) the same way.
+
+### Reminders
+
+The `reminders` tool (`iris/mcp/reminders.py`: `schedule_reminder`,
+`list_reminders`, `cancel_reminder`) writes jobs to a file; a periodic
+`python -m iris reminders-tick` delivers the due ones over Discord REST. No model
+call happens on the clock, so this keeps the agent's zero-idle-inference shape.
+Run the tick every minute, e.g. with cron:
+
+```
+* * * * * cd /path/to/iris && IRIS_DISCORD_TOKEN=... /path/to/venv/bin/python -m iris reminders-tick
+```
+
+or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set them. The brain can read and edit files and run commands in directories
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 

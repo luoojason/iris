@@ -106,6 +106,27 @@ def chat(config: Config) -> int:
         print(f"iris > {result.text.strip()}\n")
 
 
+def reminders_tick(config: Config) -> int:
+    """Deliver any reminders that are now due. Run from cron or a systemd timer."""
+    import os
+
+    from .reminders import ReminderStore, send_discord_message
+
+    if not config.discord_token:
+        print("reminders-tick: IRIS_DISCORD_TOKEN is not set")
+        return 1
+    store = ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
+    due = store.pop_due()
+    sent = 0
+    for job in due:
+        if send_discord_message(job["channel_id"], f"Reminder: {job['text']}", config.discord_token):
+            sent += 1
+        else:
+            store.add(job["due_ts"], job["text"], job["channel_id"])  # re-queue on failure
+    print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="iris", description="A chat agent on your Claude subscription.")
     sub = parser.add_subparsers(dest="command")
@@ -114,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("tui", help="full-screen terminal UI")
     sub.add_parser("chat", help="plain terminal REPL")
     sub.add_parser("doctor", help="check that claude is installed and signed in")
+    sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
     args = parser.parse_args(argv)
 
     config = Config.from_env()
@@ -123,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
         return doctor(config)
     if command == "chat":
         return chat(config)
+    if command == "reminders-tick":
+        return reminders_tick(config)
     if command == "tui":
         from .tui import run as run_tui
         run_tui(config)
