@@ -31,11 +31,14 @@ perms 600, never in the repo):
    credentials** (Credentials → Create → OAuth client ID → **Desktop app**).
    Creating them *after* going to production is what avoids the 7-day expiry.
    Download the client ID + secret.
-4. **Mint the refresh token once**, on a laptop with a browser, using
-   `access_type=offline` and `prompt=consent` (the `prompt=consent` is what forces
-   Google to actually return a refresh token). Any OAuth playground or a tiny
-   local script works; I can give you a 10-line one. Copy `yt_client_id`,
-   `yt_client_secret`, `yt_refresh_token` into the tokens file.
+4. **Mint the refresh token once**, on a laptop with a browser:
+   ```bash
+   python scripts/mint_youtube_token.py <client_id> <client_secret>
+   ```
+   It runs the loopback OAuth flow with `access_type=offline` + `prompt=consent`
+   (the `prompt=consent` is what forces Google to return a refresh token) and
+   prints a JSON block with `yt_client_id`, `yt_client_secret`,
+   `yt_refresh_token` to paste into the tokens file. Stdlib only, no install.
 5. **Submit the YouTube API audit form**
    (`support.google.com/youtube/contact/yt_api_form`) on day one. Until it's
    approved, uploads land **private** and cannot be made public (by API or in

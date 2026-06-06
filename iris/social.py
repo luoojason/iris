@@ -95,6 +95,7 @@ def publish_youtube(
     title: str,
     description: str = "",
     privacy: str = "public",
+    category_id: str = "22",  # People & Blogs (a sane generic default; 20 is Gaming)
     *,
     tokens: SocialTokens,
     http=None,
@@ -112,7 +113,7 @@ def publish_youtube(
         access = youtube_access_token(tokens, http=http)
         data = read_file(mp4_path)
         metadata = {
-            "snippet": {"title": title[:100], "description": description, "categoryId": "20"},
+            "snippet": {"title": title[:100], "description": description, "categoryId": category_id},
             "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False},
         }
         init = http.post(
