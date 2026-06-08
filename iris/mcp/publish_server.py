@@ -21,9 +21,27 @@ except ImportError as exc:  # pragma: no cover
 mcp = FastMCP("iris-publish")
 
 
+def _within_publish_dir(path: str) -> bool:
+    """If IRIS_PUBLISH_DIR is set, the file must live inside it.
+
+    Publishing is irreversible and public, so a confused or prompt-injected turn
+    should not be able to post any file on the box. Unset = no restriction.
+    """
+    base = os.environ.get("IRIS_PUBLISH_DIR")
+    if not base:
+        return True
+    base_real = os.path.realpath(base)
+    target = os.path.realpath(path)
+    return target == base_real or target.startswith(base_real + os.sep)
+
+
 @mcp.tool()
-def publish_video(mp4_path: str, caption: str, platforms: str = "youtube,instagram", privacy: str = "public") -> str:
+def publish_video(mp4_path: str, caption: str, platforms: str = "youtube,instagram", privacy: str = "unlisted") -> str:
     """Publish a finished video to social platforms.
+
+    Defaults to ``unlisted`` so a video only goes fully public when the caller
+    asks for it. If ``IRIS_PUBLISH_DIR`` is set, only files inside it can be
+    published.
 
     Args:
         mp4_path: Absolute path to the .mp4 to publish.
@@ -33,6 +51,8 @@ def publish_video(mp4_path: str, caption: str, platforms: str = "youtube,instagr
     """
     if not os.path.isfile(mp4_path):
         return f"No such file: {mp4_path}"
+    if not _within_publish_dir(mp4_path):
+        return f"Refused: {mp4_path} is outside IRIS_PUBLISH_DIR."
     tokens = SocialTokens.load()
     wanted = [p.strip().lower() for p in platforms.split(",") if p.strip()]
     host = None

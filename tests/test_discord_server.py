@@ -44,9 +44,29 @@ def test_error_is_surfaced_not_raised(monkeypatch):
 
 
 def test_list_channels_filters_to_text(monkeypatch):
+    monkeypatch.delenv("IRIS_DISCORD_ALLOWED_GUILDS", raising=False)
     monkeypatch.setattr(ds, "discord_request", lambda m, p, b=None: [
         {"name": "general", "id": "1", "type": 0},
         {"name": "Voice", "id": "2", "type": 2},  # voice, should be dropped
     ])
     out = ds.list_channels("guild1")
     assert "#general" in out and "Voice" not in out
+
+
+def test_channel_allowlist_blocks_other_channels(monkeypatch):
+    monkeypatch.setenv("IRIS_DISCORD_ALLOWED_CHANNELS", "123")
+    out = ds.fetch_messages(channel_id="999")  # not in the allowlist
+    assert "not in IRIS_DISCORD_ALLOWED_CHANNELS" in out
+
+
+def test_channel_allowlist_admits_listed_channel(monkeypatch):
+    monkeypatch.setenv("IRIS_DISCORD_ALLOWED_CHANNELS", "123")
+    monkeypatch.setattr(ds, "discord_request",
+                        lambda m, p, b=None: [{"author": {"username": "jay"}, "content": "hi"}])
+    assert "jay: hi" in ds.fetch_messages(channel_id="123")
+
+
+def test_guild_allowlist_blocks_other_guilds(monkeypatch):
+    monkeypatch.setenv("IRIS_DISCORD_ALLOWED_GUILDS", "g1")
+    out = ds.list_channels("g2")
+    assert "not in IRIS_DISCORD_ALLOWED_GUILDS" in out
