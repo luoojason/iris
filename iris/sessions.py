@@ -7,6 +7,11 @@ runs ``claude -p --resume <session_id>``.
 
 The store is a small JSON file plus an in-process lock. It is deliberately
 boring: no database, no daemon, easy to inspect and back up.
+
+The lock is in-process only, so one store path is meant for one process. Running
+two transports against the same ``IRIS_SESSION_STORE`` can lose updates (the
+atomic rename in ``_flush`` prevents a corrupt file, not a last-writer-wins
+overwrite); give each process its own store path.
 """
 
 from __future__ import annotations
@@ -46,6 +51,8 @@ class SessionStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(self._data, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())  # durable on disk before the rename
             os.replace(tmp, self.path)
         finally:
             if os.path.exists(tmp):
