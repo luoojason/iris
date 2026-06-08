@@ -68,6 +68,9 @@ class Config:
     voice_model: str = "base"
 
     session_store_path: str = "iris-sessions.json"
+    # When set, append one JSON line of telemetry per turn to this file. Opt-in;
+    # empty means no metrics are written (the default for the published agent).
+    metrics_file: str = ""
     turn_timeout: float = 300.0
     # Compact a conversation when a turn's context reaches this many tokens: the
     # accurate trigger, since it catches tool-heavy turns. 0 disables it.
@@ -99,6 +102,7 @@ class Config:
             voice_enabled=_truthy(os.environ.get("IRIS_VOICE")),
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
+            metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
             compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),

@@ -53,3 +53,15 @@ def test_from_env_defaults(tmp_path, monkeypatch):
     assert cfg.model is None
     assert cfg.permission_mode == "default"
     assert cfg.respond_without_mention is False
+
+
+def test_metrics_file_defaults_empty(monkeypatch):
+    monkeypatch.delenv("IRIS_METRICS_FILE", raising=False)
+    cfg = Config.from_env(dotenv="/nonexistent.env")
+    assert cfg.metrics_file == ""
+
+
+def test_metrics_file_from_env(monkeypatch):
+    monkeypatch.setenv("IRIS_METRICS_FILE", "/tmp/iris-metrics.jsonl")
+    cfg = Config.from_env(dotenv="/nonexistent.env")
+    assert cfg.metrics_file == "/tmp/iris-metrics.jsonl"
