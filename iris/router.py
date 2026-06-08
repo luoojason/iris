@@ -17,13 +17,21 @@ from __future__ import annotations
 
 from typing import Optional
 
-# Words that signal a turn wants real reasoning, code, or analysis. Their
-# presence forces the strong model regardless of length.
+# Stems that signal a turn wants real reasoning, code, or analysis. Their
+# presence forces the strong model regardless of length. These are matched as
+# substrings, so stems (not whole words) are used on purpose: "analyz" catches
+# analyze / analyse / analyzing / analyzed, which the whole-word forms missed.
+# Over-keeping the strong model is the cheap mistake; downgrading a hard turn to
+# a weak model is the costly one, so the list errs toward catching work.
 _HEAVY_HINTS = (
-    "analyze", "analyse", "debug", "explain", "why", "how come", "plan", "design",
-    "prove", "derive", "compare", "refactor", "implement", "optimize", "optimise",
-    "error", "exception", "traceback", "stack trace", "bug", "fix", "review",
-    "summarize", "summarise", "translate", "calculate", "estimate", "research",
+    "analyz", "analys", "debug", "explain", "explanation", "why", "how come",
+    "plan", "design", "prove", "proof", "deriv", "compar", "refactor",
+    "implement", "optim", "error", "exception", "traceback", "stack trace",
+    "bug", "fix", "review", "summar", "translat", "calculat", "estimat",
+    "research", "diagnos", "troubleshoot", "evaluat", "rank",
+    # common imperative work verbs that short generation/solve turns use
+    "write", "rewrite", "create", "build", "generate", "draft", "compose",
+    "solve", "code", "script", "function", "convert", "outline",
 )
 
 
@@ -49,7 +57,7 @@ def choose_model_explained(
         return None, "too-long"
     if "```" in text:
         return None, "code-fence"
-    if "?" in text and len(stripped) > 60:
+    if ("?" in text or "？" in text) and len(stripped) > 60:  # full-width ？ counts too
         return None, "long-question"
     lowered = stripped.lower()
     for hint in _HEAVY_HINTS:

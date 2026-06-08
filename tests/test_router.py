@@ -39,6 +39,26 @@ def test_code_fence_stays_default():
     assert route("look:\n```\nprint(1)\n```") is None
 
 
+def test_inflected_work_words_stay_default():
+    # the costly false-downgrade direction: these short turns are real work
+    assert route("analyzing this code") is None
+    assert route("comparing these two") is None
+    assert route("optimizing the loop") is None
+    assert route("deriving the formula") is None
+
+
+def test_imperative_work_verbs_stay_default():
+    assert route("write a function to reverse a list") is None
+    assert route("solve x^2 + 3x + 2 = 0") is None
+    assert route("build me a quick script") is None
+    assert route("draft an email to my boss") is None
+
+
+def test_full_width_question_mark_counts():
+    # a long question typed with a full-width ？ still defers to the strong model
+    assert route("hey could you take a really careful long look at this whole thing for me please？") is None
+
+
 def test_attachments_stay_default():
     assert route("nice", has_attachments=True) is None
 
