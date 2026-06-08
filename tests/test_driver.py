@@ -128,14 +128,80 @@ def test_retries_on_rate_limit_then_succeeds():
     assert len(slept) == 1
 
 
-def test_timeout_is_retried_then_reported():
+def test_timeout_is_not_retried_by_default():
+    slept = []
+    runner = make_runner([subprocess.TimeoutExpired("claude", 1)])
+    d = ClaudeDriver(runner=runner, sleep=slept.append)  # timeout_max_retries defaults to 0
+    result = d.run("hello")
+    assert result.is_error is True
+    assert "timed out" in (result.error or "")
+    assert slept == []  # reported at once, no minutes-long retry storm
+
+
+def test_timeout_retried_when_configured():
     slept = []
     runner = make_runner([subprocess.TimeoutExpired("claude", 1), subprocess.TimeoutExpired("claude", 1)])
-    d = ClaudeDriver(max_retries=1, retry_base_delay=0.0, runner=runner, sleep=slept.append)
+    d = ClaudeDriver(timeout_max_retries=1, retry_base_delay=0.0, runner=runner, sleep=slept.append)
     result = d.run("hello")
     assert result.is_error is True
     assert "timed out" in (result.error or "")
     assert len(slept) == 1
+
+
+def test_default_denylist_blocks_dangerous_builtins():
+    d = ClaudeDriver(allowed_tools=["mcp__memory__recall"], runner=make_runner([]))
+    cmd = d.build_command()
+    i = cmd.index("--disallowedTools")
+    denied = cmd[i + 1:]
+    assert "Bash" in denied and "Write" in denied and "WebFetch" in denied
+    assert "Read" not in denied  # kept so the brain can still open attachments
+
+
+def test_explicit_disallowed_tools_take_over():
+    d = ClaudeDriver(disallowed_tools=["Bash"], runner=make_runner([]))
+    cmd = d.build_command()
+    i = cmd.index("--disallowedTools")
+    assert cmd[i + 1] == "Bash"
+    assert "Write" not in cmd[i + 1:]  # the default set is not also appended
+
+
+def test_restrict_builtin_tools_can_be_disabled():
+    d = ClaudeDriver(restrict_builtin_tools=False, runner=make_runner([]))
+    assert "--disallowedTools" not in d.build_command()
+
+
+def test_terminal_errors_are_not_retried():
+    slept = []
+    bad = json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                      "api_error_status": 401, "result": "authentication_error", "session_id": "s"})
+    d = ClaudeDriver(max_retries=2, retry_base_delay=0.0, runner=make_runner([FakeProc(0, bad)]), sleep=slept.append)
+    result = d.run("hello")
+    assert result.is_error is True
+    assert slept == []  # 401 is permanent, not retried
+
+
+def test_credit_exhaustion_is_not_retried():
+    slept = []
+    broke = json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                        "result": "Your credit balance is too low", "session_id": "s"})
+    d = ClaudeDriver(max_retries=2, retry_base_delay=0.0, runner=make_runner([FakeProc(0, broke)]), sleep=slept.append)
+    result = d.run("hello")
+    assert result.is_error is True
+    assert slept == []  # surfaces immediately instead of hiding behind backoff
+
+
+def test_child_env_drops_iris_and_anthropic_secrets(monkeypatch):
+    from iris.driver import _child_env
+    monkeypatch.setenv("IRIS_DISCORD_TOKEN", "bot-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-leak")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "oauth-leak")
+    monkeypatch.setenv("PATH_THROUGH", "fine")
+    env = _child_env(disable_auto_memory=True)
+    assert "IRIS_DISCORD_TOKEN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert env["PATH_THROUGH"] == "fine"
+    assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
 
 
 def test_parses_json_after_leading_log_noise():

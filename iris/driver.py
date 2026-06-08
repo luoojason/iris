@@ -18,17 +18,30 @@ Continuity, persona, and custom tools are all native ``claude`` features:
   system prompt (replacing it would strip Claude Code's tool instructions).
 * ``--mcp-config`` (+ ``--strict-mcp-config``) hands Claude custom tools.
 * ``--permission-mode`` / ``--allowedTools`` keep tool use under control.
+
+One sharp edge to know: ``--allowedTools`` is an *approval* list, not an
+availability list. Under ``--permission-mode default`` the host
+``~/.claude/settings.json`` ``permissions.allow`` still pre-approves built-in
+tools (Bash, Write, Edit, WebFetch, ...), so allowlisting only the MCP memory
+tool does not actually keep the agent from running a shell. Iris closes that gap
+by defaulting a ``--disallowedTools`` denylist of the dangerous built-ins (deny
+rules outrank allow rules, even host settings ones). Set
+``restrict_builtin_tools=False`` to opt out, or pass an explicit
+``disallowed_tools`` to take full control.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
+
+log = logging.getLogger("iris.driver")
 
 
 class ClaudeError(RuntimeError):
@@ -58,28 +71,70 @@ class ClaudeResult:
 # The default uses subprocess; tests inject a fake.
 Runner = Callable[[Sequence[str], float, str], "subprocess.CompletedProcess[str]"]
 
+# Built-in tools that give the agent real reach (shell, file writes, network,
+# subagents). Denied by default so IRIS_ALLOWED_TOOLS is an actual boundary.
+# Read is deliberately kept available so the brain can still open downloaded
+# attachments (images, files) via add_dirs.
+DANGEROUS_BUILTINS = (
+    "Bash",
+    "Write",
+    "Edit",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "Glob",
+    "Grep",
+    "KillShell",
+    "BashOutput",
+)
 
-def _child_env() -> dict:
+# Secrets that must never reach the model's tool sandbox. IRIS_* holds the bot
+# token; the ANTHROPIC_* keys, if exported on the host, could make the child
+# bill against an API key instead of drawing the subscription's agent credit,
+# silently breaking the subscription-native design.
+_SECRET_ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+
+def _child_env(disable_auto_memory: bool = False) -> dict:
     """Environment for the claude child, with Iris's own secrets removed.
 
-    The agent process holds the bot token in ``IRIS_*`` vars; those must never
-    reach the model's tool sandbox (a shell tool could otherwise read them).
+    The agent process holds the bot token in ``IRIS_*`` vars and the host may
+    export ``ANTHROPIC_*`` keys; neither must reach the model's tool sandbox.
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith("IRIS_")}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("IRIS_") and k not in _SECRET_ENV_DROP
+    }
+    if disable_auto_memory:
+        # Keep the model from writing native memory files under
+        # ~/.claude/projects/<proj>/memory; the MCP memory tool is the store.
+        env.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+    return env
 
 
 def _default_runner(cmd: Sequence[str], timeout: float, prompt: str):
-    return subprocess.run(
-        list(cmd),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        input=prompt,
-        env=_child_env(),
-    )
+    """Sentinel default runner. Real runs go through ClaudeDriver._subprocess_run;
+    this identity is what the driver checks to know it owns the subprocess."""
+    raise RuntimeError("the default runner is dispatched by ClaudeDriver._subprocess_run")
 
 
+# Rate-limit / overload responses: worth retrying after a backoff.
 _RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "429", "overloaded", "529")
+
+# Permanent failures: retrying only wastes time and credit. Auth, bad request,
+# and credit exhaustion all surface immediately instead of being hidden behind
+# minutes of backoff.
+_TERMINAL_MARKERS = (
+    "credit balance",
+    "insufficient",
+    "quota",
+    "authentication_error",
+    "permission_error",
+    "invalid_request_error",
+    "not_found_error",
+)
 
 
 @dataclass
@@ -94,12 +149,32 @@ class ClaudeDriver:
     permission_mode: str = "default"
     allowed_tools: Optional[Sequence[str]] = None
     disallowed_tools: Optional[Sequence[str]] = None
+    # Deny the dangerous built-ins by default so the allowlist is a real boundary.
+    restrict_builtin_tools: bool = True
+    # Keep native auto-memory off so the bundled MCP memory tool is the store.
+    disable_auto_memory: bool = True
     add_dirs: Optional[Sequence[str]] = None
     timeout: float = 300.0
+    # Transient failures (rate limit, overload, in-flight execution errors).
     max_retries: int = 2
     retry_base_delay: float = 2.0
+    # Timeouts are a different failure class: a slow or hung turn rarely recovers
+    # by waiting another full timeout, and a retry can re-run partial tool side
+    # effects. So they are retried separately and default to "report at once".
+    timeout_max_retries: int = 0
     runner: Runner = _default_runner
     sleep: Callable[[float], None] = time.sleep
+
+    @property
+    def _owns_subprocess(self) -> bool:
+        return self.runner is _default_runner
+
+    def _effective_disallowed(self) -> Optional[Sequence[str]]:
+        if self.disallowed_tools:
+            return self.disallowed_tools  # explicit denylist takes full control
+        if self.restrict_builtin_tools:
+            return DANGEROUS_BUILTINS
+        return None
 
     def build_command(self, session_id: Optional[str] = None, model: Optional[str] = None) -> list[str]:
         """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin."""
@@ -121,19 +196,20 @@ class ClaudeDriver:
             cmd += ["--permission-mode", self.permission_mode]
         if self.allowed_tools:
             cmd += ["--allowedTools", *self.allowed_tools]
-        if self.disallowed_tools:
-            cmd += ["--disallowedTools", *self.disallowed_tools]
+        disallowed = self._effective_disallowed()
+        if disallowed:
+            cmd += ["--disallowedTools", *disallowed]
         for directory in self.add_dirs or []:
             cmd += ["--add-dir", directory]
         return cmd
 
     def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None) -> ClaudeResult:
-        """Run one turn, retrying transient failures (rate limits, timeouts).
+        """Run one turn, retrying transient failures (rate limits, overload).
 
         ``model`` overrides the driver's default model for this turn only, which
         is how per-turn routing picks a lighter model for trivial messages.
         """
-        if self.runner is _default_runner and shutil.which(self.claude_bin) is None:
+        if self._owns_subprocess and shutil.which(self.claude_bin) is None:
             raise ClaudeError(
                 f"claude binary not found on PATH: {self.claude_bin!r}. "
                 "Install Claude Code and sign in to your subscription first."
@@ -141,15 +217,26 @@ class ClaudeDriver:
 
         cmd = self.build_command(session_id, model)
         last_error: Optional[str] = None
+        timeout_attempts = 0
+        transient_attempts = 0
 
-        for attempt in range(self.max_retries + 1):
+        while True:
             try:
-                proc = self.runner(cmd, self.timeout, prompt)
+                if self._owns_subprocess:
+                    proc = self._subprocess_run(cmd, self.timeout, prompt)
+                else:
+                    proc = self.runner(cmd, self.timeout, prompt)
             except subprocess.TimeoutExpired:
                 last_error = f"claude timed out after {self.timeout:.0f}s"
-                if attempt < self.max_retries:
-                    self._backoff(attempt)
+                if timeout_attempts < self.timeout_max_retries:
+                    timeout_attempts += 1
+                    log.warning(
+                        "claude timed out after %.0fs; retry %d/%d",
+                        self.timeout, timeout_attempts, self.timeout_max_retries,
+                    )
+                    self._backoff(timeout_attempts - 1)
                     continue
+                log.warning("claude timed out after %.0fs; giving up", self.timeout)
                 break
             except FileNotFoundError as exc:
                 raise ClaudeError(str(exc)) from exc
@@ -159,8 +246,14 @@ class ClaudeDriver:
                 return result
 
             last_error = result.error
-            if attempt < self.max_retries and self._is_retryable(result):
-                self._backoff(attempt, rate_limited=self._is_rate_limited(result))
+            if transient_attempts < self.max_retries and self._is_retryable(result):
+                transient_attempts += 1
+                rate_limited = self._is_rate_limited(result)
+                log.warning(
+                    "claude turn failed (%s); retry %d/%d",
+                    result.error, transient_attempts, self.max_retries,
+                )
+                self._backoff(transient_attempts - 1, rate_limited=rate_limited)
                 continue
             return result
 
@@ -170,6 +263,51 @@ class ClaudeDriver:
         )
 
     # -- internals ---------------------------------------------------------
+
+    def _subprocess_run(self, cmd: Sequence[str], timeout: float, prompt: str):
+        """Run claude in its own process group so a timeout kills the whole tree.
+
+        ``subprocess.run`` would terminate only the direct child on timeout,
+        orphaning anything claude spawned (MCP stdio servers, an in-flight Bash
+        tool). Running in a new session lets us signal the group.
+        """
+        kwargs = {}
+        if os.name == "posix":
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            list(cmd),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_child_env(self.disable_auto_memory),
+            **kwargs,
+        )
+        try:
+            out, err = proc.communicate(input=prompt, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._kill_tree(proc)
+            try:
+                proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        return subprocess.CompletedProcess(list(cmd), proc.returncode, out, err)
+
+    @staticmethod
+    def _kill_tree(proc: "subprocess.Popen") -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(os.getpgid(proc.pid), 9)
+                return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
     def _parse(self, proc, session_id: Optional[str]) -> ClaudeResult:
         out = (getattr(proc, "stdout", "") or "").strip()
@@ -222,10 +360,23 @@ class ClaudeDriver:
         blob = f"{result.error or ''} {result.raw.get('api_error_status', '')}".lower()
         return any(marker in blob for marker in _RATE_LIMIT_MARKERS)
 
+    def _is_terminal(self, result: ClaudeResult) -> bool:
+        """A permanent failure (auth, bad request, credit exhaustion): never retry."""
+        status = result.raw.get("api_error_status")
+        if isinstance(status, int) and 400 <= status < 500 and status not in (408, 429):
+            return True
+        blob = f"{result.error or ''} {status or ''}".lower()
+        return any(marker in blob for marker in _TERMINAL_MARKERS)
+
     def _is_retryable(self, result: ClaudeResult) -> bool:
         if self._is_rate_limited(result):
             return True
-        return bool(result.raw.get("api_error_status")) or result.raw.get("subtype") == "error_during_execution"
+        if self._is_terminal(result):
+            return False
+        status = result.raw.get("api_error_status")
+        if isinstance(status, int):
+            return status >= 500
+        return bool(status) or result.raw.get("subtype") == "error_during_execution"
 
     def _backoff(self, attempt: int, rate_limited: bool = False) -> None:
         delay = self.retry_base_delay * (2 ** attempt)
