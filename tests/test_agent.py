@@ -207,6 +207,46 @@ def test_routing_keeps_heavy_model_for_real_turn(tmp_path):
     assert driver.model_calls[0] is None  # heavy -> no override, driver default used
 
 
+def test_respond_forces_model_override(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)], model="claude-opus-4-8")
+    agent = Agent(driver, store, light_model="claude-haiku-4-5")
+    agent.respond("c1", "thanks!", model="claude-opus-4-8")  # trivial, but forced
+    assert driver.model_calls[0] == "claude-opus-4-8"  # router bypassed
+
+
+def test_async_compaction_runs_in_background(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        ClaudeResult(text="reply", session_id="s1", is_error=False, context_tokens=160000),
+        ClaudeResult(text="SUMMARY", session_id="s1", is_error=False),
+        ClaudeResult(text="ok", session_id="s2", is_error=False),
+    ])
+    agent = Agent(driver, store, compact_at_tokens=150000)  # compact_async defaults True
+    agent.respond("c1", "fetch a huge page")
+    thread = agent._last_compaction
+    assert thread is not None
+    thread.join(timeout=5)
+    assert store.get("c1") == "s2"  # the background thread compacted onto a fresh session
+
+
+def test_failed_compaction_keeps_session_and_backs_off(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        ClaudeResult(text="reply", session_id="s1", is_error=False, context_tokens=160000),
+        ClaudeResult(text="", session_id="s1", is_error=True, error="boom"),  # summary fails
+        ClaudeResult(text="reply2", session_id="s1", is_error=False, context_tokens=160000),
+    ])
+    agent = Agent(driver, store, compact_at_tokens=150000)
+    agent.compact_async = False
+    agent.respond("c1", "big one")
+    assert store.get("c1") == "s1"            # session kept after a failed summary
+    assert "c1" in agent._compact_cooldown_until
+    agent.respond("c1", "another big one")    # still inside the cooldown window
+    assert len(driver.calls) == 3             # no second doomed summary attempt
+    assert store.get("c1") == "s1"
+
+
 def test_no_routing_when_light_model_unset(tmp_path):
     store = SessionStore(tmp_path / "s.json")
     driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)], model="claude-opus-4-8")

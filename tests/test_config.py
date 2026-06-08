@@ -53,6 +53,31 @@ def test_from_env_defaults(tmp_path, monkeypatch):
     assert cfg.model is None
     assert cfg.permission_mode == "default"
     assert cfg.respond_without_mention is False
+    # secure-by-default: the allowlist boundary and native-memory lock are on
+    assert cfg.restrict_builtin_tools is True
+    assert cfg.disable_auto_memory is True
+    assert cfg.timeout_max_retries == 0  # timeouts report at once, do not block
+
+
+def test_from_env_reads_tool_boundary_flags(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_RESTRICT_BUILTIN_TOOLS", "false")
+    monkeypatch.setenv("IRIS_DISABLE_AUTO_MEMORY", "no")
+    monkeypatch.setenv("IRIS_TIMEOUT_RETRIES", "2")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.restrict_builtin_tools is False
+    assert cfg.disable_auto_memory is False
+    assert cfg.timeout_max_retries == 2
+
+
+def test_flag_defaults_when_unset():
+    from iris.config import _flag
+    assert _flag(None, True) is True
+    assert _flag(None, False) is False
+    assert _flag("off", True) is False
+    assert _flag("1", False) is True
 
 
 def test_metrics_file_defaults_empty(monkeypatch):

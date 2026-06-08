@@ -36,6 +36,13 @@ def _split(value: Optional[str]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _flag(value: Optional[str], default: bool) -> bool:
+    """Parse a boolean env var, falling back to ``default`` when it is unset."""
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class Config:
     discord_token: str = ""
@@ -56,6 +63,12 @@ class Config:
     permission_mode: str = "default"
     allowed_tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
+    # Deny the dangerous built-in tools (Bash, Write, WebFetch, ...) by default so
+    # IRIS_ALLOWED_TOOLS is a real boundary, not just an auto-approve list. Turn
+    # off only if you want the agent to have host shell/file/web reach.
+    restrict_builtin_tools: bool = True
+    # Keep Claude Code's native auto-memory off so the MCP memory tool is the store.
+    disable_auto_memory: bool = True
     add_dirs: list[str] = field(default_factory=list)
     # Where inbound images/files are downloaded so the brain's Read tool can see them.
     attachments_dir: str = "iris-attachments"
@@ -72,6 +85,12 @@ class Config:
     # empty means no metrics are written (the default for the published agent).
     metrics_file: str = ""
     turn_timeout: float = 300.0
+    # Transient (rate-limit / overload) retries, with exponential backoff.
+    max_retries: int = 2
+    retry_base_delay: float = 2.0
+    # Timeout retries are separate: a hung turn rarely recovers by waiting another
+    # full timeout, so the default is to report it at once rather than block.
+    timeout_max_retries: int = 0
     # Compact a conversation when a turn's context reaches this many tokens: the
     # accurate trigger, since it catches tool-heavy turns. 0 disables it.
     compact_at_tokens: int = 150000
@@ -96,6 +115,8 @@ class Config:
             permission_mode=os.environ.get("IRIS_PERMISSION_MODE", "default"),
             allowed_tools=_split(os.environ.get("IRIS_ALLOWED_TOOLS")),
             disallowed_tools=_split(os.environ.get("IRIS_DISALLOWED_TOOLS")),
+            restrict_builtin_tools=_flag(os.environ.get("IRIS_RESTRICT_BUILTIN_TOOLS"), True),
+            disable_auto_memory=_flag(os.environ.get("IRIS_DISABLE_AUTO_MEMORY"), True),
             add_dirs=_split(os.environ.get("IRIS_ADD_DIRS")),
             attachments_dir=os.environ.get("IRIS_ATTACHMENTS_DIR", "iris-attachments"),
             skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
@@ -104,6 +125,9 @@ class Config:
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
+            max_retries=int(os.environ.get("IRIS_MAX_RETRIES", "2")),
+            retry_base_delay=float(os.environ.get("IRIS_RETRY_BASE_DELAY", "2")),
+            timeout_max_retries=int(os.environ.get("IRIS_TIMEOUT_RETRIES", "0")),
             compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
         )
