@@ -27,6 +27,37 @@ _HEAVY_HINTS = (
 )
 
 
+def choose_model_explained(
+    text: str,
+    *,
+    light_model: Optional[str],
+    has_attachments: bool = False,
+    trivial_max_chars: int = 140,
+) -> tuple[Optional[str], str]:
+    """Like :func:`choose_model`, but also return a short reason string.
+
+    Returns ``(light_model, "trivial")`` for a clearly-trivial turn, otherwise
+    ``(None, <reason>)`` where reason names the gate that forced the strong model
+    (or ``"light-disabled"`` when no light model is configured).
+    """
+    if not light_model:
+        return None, "light-disabled"
+    if has_attachments:
+        return None, "has-attachments"  # an image or voice note deserves the strong model
+    stripped = text.strip()
+    if len(stripped) > trivial_max_chars:
+        return None, "too-long"
+    if "```" in text:
+        return None, "code-fence"
+    if "?" in text and len(stripped) > 60:
+        return None, "long-question"
+    lowered = stripped.lower()
+    for hint in _HEAVY_HINTS:
+        if hint in lowered:
+            return None, f"heavy-hint:{hint}"
+    return light_model, "trivial"
+
+
 def choose_model(
     text: str,
     *,
@@ -36,22 +67,13 @@ def choose_model(
 ) -> Optional[str]:
     """Return ``light_model`` for a clearly-trivial turn, else ``None``.
 
-    ``None`` means "use the driver's default (strong) model". The router only
-    ever downgrades: a turn is sent to ``light_model`` only when it is short,
-    carries no attachment, has no code fence, and contains none of the "this
-    needs thinking" hints. Anything else (and the no-light-model case) returns
-    ``None``, so the default model is used.
+    ``None`` means "use the driver's default (strong) model". Thin wrapper over
+    :func:`choose_model_explained` that drops the reason, for back-compat.
     """
-    if not light_model:
-        return None
-    if has_attachments:
-        return None  # an image or voice note deserves the strong model
-    stripped = text.strip()
-    if len(stripped) > trivial_max_chars:
-        return None
-    if "```" in text or ("?" in text and len(stripped) > 60):
-        return None
-    lowered = stripped.lower()
-    if any(hint in lowered for hint in _HEAVY_HINTS):
-        return None
-    return light_model
+    model, _ = choose_model_explained(
+        text,
+        light_model=light_model,
+        has_attachments=has_attachments,
+        trivial_max_chars=trivial_max_chars,
+    )
+    return model
