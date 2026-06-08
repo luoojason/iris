@@ -66,12 +66,14 @@ class Agent:
         compact_at_tokens: int = 0,
         light_model: str = "",
         metrics_file: str = "",
+        trivial_max_chars: int = 140,
     ):
         self.driver = driver
         self.store = store
         # When set, trivial turns are routed to this lighter model to save credit;
         # everything else uses the driver's default (strong) model.
         self.light_model = light_model
+        self.trivial_max_chars = trivial_max_chars
         self.metrics_file = metrics_file
         # Compact a conversation after this many turns on one session (0 = never).
         # A coarse backstop; the token threshold below is the accurate trigger.
@@ -120,6 +122,7 @@ class Agent:
                 text,
                 light_model=self.light_model or None,
                 has_attachments=has_attachments,
+                trivial_max_chars=self.trivial_max_chars,
             )
             routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
         with self._lock_for(conversation_id):
@@ -255,4 +258,5 @@ class Agent:
             compact_at_tokens=config.compact_at_tokens,
             light_model=config.light_model,
             metrics_file=config.metrics_file,
+            trivial_max_chars=config.trivial_max_chars,
         )

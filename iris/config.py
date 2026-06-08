@@ -58,6 +58,9 @@ class Config:
     model: Optional[str] = None
     # Optional lighter model for trivial turns (enables per-turn routing when set).
     light_model: str = ""
+    # A message at or under this many characters can be routed to the light model
+    # (if it also clears the other trivial checks). Raise to route more aggressively.
+    trivial_max_chars: int = 140
     persona_file: Optional[str] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
@@ -110,6 +113,7 @@ class Config:
             claude_bin=os.environ.get("IRIS_CLAUDE_BIN", "claude"),
             model=os.environ.get("IRIS_MODEL") or None,
             light_model=os.environ.get("IRIS_MODEL_LIGHT", ""),
+            trivial_max_chars=int(os.environ.get("IRIS_TRIVIAL_MAX_CHARS", "140")),
             persona_file=os.environ.get("IRIS_PERSONA_FILE") or None,
             mcp_config=os.environ.get("IRIS_MCP_CONFIG") or None,
             permission_mode=os.environ.get("IRIS_PERMISSION_MODE", "default"),
