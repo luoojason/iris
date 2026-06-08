@@ -12,7 +12,8 @@ import threading
 
 from .config import Config
 from .driver import ClaudeDriver, ClaudeResult
-from .router import choose_model
+from .metrics import emit_turn
+from .router import choose_model_explained
 from .sessions import SessionStore
 
 log = logging.getLogger("iris.agent")
@@ -63,12 +64,14 @@ class Agent:
         compact_every: int = 0,
         compact_at_tokens: int = 0,
         light_model: str = "",
+        metrics_file: str = "",
     ):
         self.driver = driver
         self.store = store
         # When set, trivial turns are routed to this lighter model to save credit;
         # everything else uses the driver's default (strong) model.
         self.light_model = light_model
+        self.metrics_file = metrics_file
         # Compact a conversation after this many turns on one session (0 = never).
         # A coarse backstop; the token threshold below is the accurate trigger.
         self.compact_every = compact_every
@@ -93,11 +96,12 @@ class Agent:
         Turns for the same conversation are serialized so two messages arriving
         at once do not run concurrent --resume turns and fork the transcript.
         """
-        model = choose_model(
+        model, reason = choose_model_explained(
             text,
             light_model=self.light_model or None,
             has_attachments=has_attachments,
         )
+        routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
         with self._lock_for(conversation_id):
             session_id = self.store.get(conversation_id)
             result = self.driver.run(text, session_id, model)
@@ -111,6 +115,10 @@ class Agent:
                 result = self.driver.run(text, None, model)
             if result.session_id:
                 self.store.set(conversation_id, result.session_id)
+            emit_turn(
+                self.metrics_file, conversation_id, result, routed, reason,
+                has_attachments, self.store.turns(conversation_id),
+            )
             due_to_compact = not result.is_error and self._should_compact(conversation_id, result)
         # Outside the lock: the user already has their reply. Compaction runs on
         # its own and re-acquires the lock, so it never delays this turn.
@@ -198,4 +206,5 @@ class Agent:
             compact_every=config.compact_every,
             compact_at_tokens=config.compact_at_tokens,
             light_model=config.light_model,
+            metrics_file=config.metrics_file,
         )
