@@ -133,10 +133,11 @@ is **not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even
 claim it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that
 tool too. Note `IRIS_ALLOWED_TOOLS` is an approval list, not an exclusive
 boundary: on its own it does not stop the host's built-in tools (Bash, Write,
-WebFetch, ...) from running, since your `~/.claude/settings.json` may pre-approve
-them. Iris therefore denies the dangerous built-ins by default
-(`IRIS_RESTRICT_BUILTIN_TOOLS=true`); Read stays available for attachments. Set
-it to `false` to give the agent host shell, file, and web reach.
+Edit, ...) from running, since your `~/.claude/settings.json` may pre-approve
+them. Iris therefore denies the high-reach built-ins by default (shell, file
+writes, subagents: `IRIS_RESTRICT_BUILTIN_TOOLS=true`); Read, Glob, Grep, and web
+search/fetch stay available. Set it to `false`, or use an explicit
+`IRIS_DISALLOWED_TOOLS`, to take full control.
 
 To turn on the bundled memory tool (`remember`, `recall`, `forget`):
 

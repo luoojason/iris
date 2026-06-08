@@ -153,8 +153,10 @@ def test_default_denylist_blocks_dangerous_builtins():
     cmd = d.build_command()
     i = cmd.index("--disallowedTools")
     denied = cmd[i + 1:]
-    assert "Bash" in denied and "Write" in denied and "WebFetch" in denied
-    assert "Read" not in denied  # kept so the brain can still open attachments
+    assert "Bash" in denied and "Write" in denied and "Task" in denied
+    # read-only and advertised web tools stay available; only reach is denied
+    assert "Read" not in denied
+    assert "WebFetch" not in denied and "WebSearch" not in denied
 
 
 def test_explicit_disallowed_tools_take_over():

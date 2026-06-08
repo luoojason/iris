@@ -24,9 +24,9 @@ availability list. Under ``--permission-mode default`` the host
 ``~/.claude/settings.json`` ``permissions.allow`` still pre-approves built-in
 tools (Bash, Write, Edit, WebFetch, ...), so allowlisting only the MCP memory
 tool does not actually keep the agent from running a shell. Iris closes that gap
-by defaulting a ``--disallowedTools`` denylist of the dangerous built-ins (deny
-rules outrank allow rules, even host settings ones). Set
-``restrict_builtin_tools=False`` to opt out, or pass an explicit
+by defaulting a ``--disallowedTools`` denylist of the dangerous built-ins (shell,
+file writes, subagents; deny rules outrank allow rules, even host settings ones).
+Set ``restrict_builtin_tools=False`` to opt out, or pass an explicit
 ``disallowed_tools`` to take full control.
 """
 
@@ -71,20 +71,17 @@ class ClaudeResult:
 # The default uses subprocess; tests inject a fake.
 Runner = Callable[[Sequence[str], float, str], "subprocess.CompletedProcess[str]"]
 
-# Built-in tools that give the agent real reach (shell, file writes, network,
-# subagents). Denied by default so IRIS_ALLOWED_TOOLS is an actual boundary.
-# Read is deliberately kept available so the brain can still open downloaded
-# attachments (images, files) via add_dirs.
+# Built-in tools that give the agent real reach: a shell, file writes, and
+# subagent spawning. Denied by default so IRIS_ALLOWED_TOOLS is an actual
+# boundary and the prompt-injection-to-shell chain is closed. Read/Glob/Grep
+# (read-only) and WebFetch/WebSearch (advertised features) stay available; deny
+# them too with an explicit IRIS_DISALLOWED_TOOLS if you want defense-in-depth.
 DANGEROUS_BUILTINS = (
     "Bash",
     "Write",
     "Edit",
     "NotebookEdit",
-    "WebFetch",
-    "WebSearch",
     "Task",
-    "Glob",
-    "Grep",
     "KillShell",
     "BashOutput",
 )
