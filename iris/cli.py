@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import logging
 import shutil
 import subprocess
 import sys
@@ -54,8 +55,8 @@ class _Spinner:
             sys.stdout.flush()
 
 
-def doctor(config: Config) -> int:
-    """Verify the claude binary is present and signed in."""
+def doctor(config: Config, probe: bool = True) -> int:
+    """Verify the claude binary is present and actually signed in."""
     path = shutil.which(config.claude_bin)
     if not path:
         print(f"claude binary not found: {config.claude_bin!r}")
@@ -68,6 +69,29 @@ def doctor(config: Config) -> int:
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"could not run claude --version: {exc}")
         return 1
+    # --version is a local check that passes even when logged out, so do one tiny
+    # real turn to actually confirm the subscription is signed in and has credit.
+    if probe:
+        from .driver import ClaudeDriver, ClaudeError
+
+        print("checking sign-in (one small metered call)...")
+        prober = ClaudeDriver(
+            claude_bin=config.claude_bin,
+            model=config.model,
+            timeout=60,
+            max_retries=0,
+            timeout_max_retries=0,
+        )
+        try:
+            res = prober.run("Reply with just: ok")
+        except ClaudeError as exc:
+            print(f"  sign-in check FAILED: {exc}")
+            return 1
+        if res.is_error:
+            print(f"  sign-in check FAILED: {res.error}")
+            print("  Run 'claude' once to sign in, and claim your monthly agent credit.")
+            return 1
+        print(f"  signed in (model: {res.model or 'claude default'})")
     print(f"model: {config.model or '(claude default)'}")
     print(f"persona: {config.persona_file or '(none)'}")
     print(f"mcp tools: {config.mcp_config or '(none)'}")
@@ -87,6 +111,10 @@ def doctor(config: Config) -> int:
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
         print("  skipped (it may even claim it acted). Allowlist the tools you want,")
         print("  e.g. IRIS_ALLOWED_TOOLS=mcp__memory__recall,mcp__memory__remember")
+    if not config.allowed_user_ids:
+        print("WARNING: IRIS_ALLOWED_USER_IDS is empty, so a network transport will")
+        print("  answer ANYONE who can reach it (any DM sender, any group member).")
+        print("  A personal subscription is single-user only; set it to your own id.")
     print("Run 'python -m iris chat' to talk to it, or 'python -m iris' for Discord.")
     return 0
 
@@ -169,10 +197,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("telegram", help="run the Telegram bot")
     sub.add_parser("tui", help="full-screen terminal UI")
     sub.add_parser("chat", help="plain terminal REPL")
-    sub.add_parser("doctor", help="check that claude is installed and signed in")
+    doctor_parser = sub.add_parser("doctor", help="check that claude is installed and signed in")
+    doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
     args = parser.parse_args(argv)
+
+    # Configure logging once here so every command (chat, tui, reminders-tick,
+    # not just the network adapters) surfaces agent warnings.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
 
     config = Config.from_env()
     # Make any configured skills discoverable before a bot/chat run starts.
@@ -182,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command or "discord"
 
     if command == "doctor":
-        return doctor(config)
+        return doctor(config, probe=not getattr(args, "no_probe", False))
     if command == "chat":
         return chat(config)
     if command == "skills":

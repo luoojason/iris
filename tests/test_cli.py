@@ -23,3 +23,12 @@ def test_module_help_runs():
     assert result.returncode == 0, result.stderr
     for command in ("discord", "telegram", "chat", "doctor"):
         assert command in result.stdout
+
+
+def test_doctor_reports_missing_binary():
+    from iris.cli import doctor
+    from iris.config import Config
+
+    # A bogus binary name: doctor must fail cleanly without any network call.
+    rc = doctor(Config(claude_bin="iris-no-such-claude-binary"), probe=False)
+    assert rc == 1

@@ -76,7 +76,12 @@ async def _save_attachments(attachments, base_dir: str, conversation_id: str) ->
 
 def build_client(config: Config, agent: Agent):
     """Build (but do not start) the Discord client. Returns the client."""
-    import discord  # lazy: only needed when actually running on Discord
+    try:
+        import discord  # lazy: only needed when actually running on Discord
+    except ImportError as exc:
+        raise SystemExit(
+            "Discord support needs the extra: pip install 'iris-agent[discord]'"
+        ) from exc
 
     intents = discord.Intents.default()
     intents.message_content = True
@@ -148,6 +153,12 @@ def run(config: Optional[Config] = None) -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    if not config.allowed_user_ids:
+        log.warning(
+            "IRIS_ALLOWED_USER_IDS is empty: this bot will answer ANYONE who can "
+            "reach it (any DM, any allowed channel). A personal subscription is "
+            "single-user only; set it to your id."
+        )
     agent = Agent.from_config(config)
     client = build_client(config, agent)
     client.run(config.discord_token, log_handler=None)

@@ -22,6 +22,20 @@ log = logging.getLogger("iris.telegram")
 TELEGRAM_LIMIT = 4096
 
 
+def is_allowed_update(update, config: Config) -> bool:
+    """Whether this Telegram update is from an allowed user. Pure, so it is testable.
+
+    The single-user gate: with IRIS_ALLOWED_USER_IDS set, only those ids are
+    answered; empty means anyone (the operator's choice, warned about at startup).
+    """
+    user = getattr(update, "effective_user", None)
+    if not user:
+        return False
+    if config.allowed_user_ids and str(user.id) not in config.allowed_user_ids:
+        return False
+    return True
+
+
 async def _save_attachments(message, context, base_dir: str, conversation_id: str) -> list[str]:
     """Download a Telegram photo/document and return its absolute path."""
     paths: list[str] = []
@@ -59,23 +73,23 @@ async def _save_attachments(message, context, base_dir: str, conversation_id: st
 
 def build_app(config: Config, agent: Agent):
     """Build (but do not start) the Telegram application. Returns the app."""
-    from telegram.ext import (  # lazy
-        ApplicationBuilder,
-        CommandHandler,
-        MessageHandler,
-        filters,
-    )
+    try:
+        from telegram.ext import (  # lazy
+            ApplicationBuilder,
+            CommandHandler,
+            MessageHandler,
+            filters,
+        )
+    except ImportError as exc:
+        raise SystemExit(
+            "Telegram support needs the extra: pip install 'iris-agent[telegram]'"
+        ) from exc
 
     app = ApplicationBuilder().token(config.telegram_token).build()
     transcriber = build_transcriber(config)  # None unless IRIS_VOICE is on
 
     def _allowed(update) -> bool:
-        user = update.effective_user
-        if not user:
-            return False
-        if config.allowed_user_ids and str(user.id) not in config.allowed_user_ids:
-            return False
-        return True
+        return is_allowed_update(update, config)
 
     async def reset_cmd(update, context):
         if not _allowed(update):
@@ -114,7 +128,22 @@ def build_app(config: Config, agent: Agent):
         if not prompt:
             return
 
-        await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+        # Telegram's typing indicator lapses after ~5s, but a turn can take far
+        # longer, so refresh it until the reply is ready.
+        typing_stop = asyncio.Event()
+
+        async def _keep_typing() -> None:
+            while not typing_stop.is_set():
+                try:
+                    await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+                except Exception:  # a transient send failure must not sink the turn
+                    pass
+                try:
+                    await asyncio.wait_for(typing_stop.wait(), timeout=4.0)
+                except asyncio.TimeoutError:
+                    pass
+
+        typing_task = asyncio.create_task(_keep_typing())
         try:
             result = await asyncio.to_thread(
                 agent.respond, conversation_id, prompt, bool(attach_paths)
@@ -123,6 +152,9 @@ def build_app(config: Config, agent: Agent):
             log.error("claude unavailable: %s", exc)
             await message.reply_text(f"I can't reach my brain right now: {exc}")
             return
+        finally:
+            typing_stop.set()
+            await typing_task
 
         if result.is_error:
             log.warning("turn errored: %s", result.error)
@@ -154,6 +186,11 @@ def run(config: Optional[Config] = None) -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    if not config.allowed_user_ids:
+        log.warning(
+            "IRIS_ALLOWED_USER_IDS is empty: this bot will answer ANYONE who can "
+            "reach it. A personal subscription is single-user only; set it to your id."
+        )
     agent = Agent.from_config(config)
     app = build_app(config, agent)
     app.run_polling()
