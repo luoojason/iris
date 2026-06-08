@@ -128,10 +128,15 @@ Out of the box Iris is a plain chat bot, which runs anywhere `claude` is
 installed. Tools are opt-in, exposed the way Claude Code already understands them:
 MCP servers launched through `--mcp-config`.
 
-One rule trips people up: under the `default` permission mode, any tool that is
-**not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even claim
-it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that tool
-too.
+One rule trips people up: under the `default` permission mode, an MCP tool that
+is **not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even
+claim it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that
+tool too. Note `IRIS_ALLOWED_TOOLS` is an approval list, not an exclusive
+boundary: on its own it does not stop the host's built-in tools (Bash, Write,
+WebFetch, ...) from running, since your `~/.claude/settings.json` may pre-approve
+them. Iris therefore denies the dangerous built-ins by default
+(`IRIS_RESTRICT_BUILTIN_TOOLS=true`); Read stays available for attachments. Set
+it to `false` to give the agent host shell, file, and web reach.
 
 To turn on the bundled memory tool (`remember`, `recall`, `forget`):
 
@@ -146,6 +151,16 @@ To turn on the bundled memory tool (`remember`, `recall`, `forget`):
    ```
 
 4. Tell the persona to use it (the example persona notes where).
+
+Token-bearing MCP servers (the bundled Discord, tts, and publish ones) do **not**
+inherit your `IRIS_*` variables: the driver strips them from the `claude` child so
+a tool cannot read your bot token. Give such a server its secret by putting it in
+that server's own `"env"` block in the mcp config file, for example:
+
+```json
+{ "mcpServers": { "discord": { "command": "...", "args": ["..."],
+  "env": { "IRIS_DISCORD_TOKEN": "your-token" } } } }
+```
 
 Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
@@ -237,8 +252,10 @@ where usage numbers are missing. Either at `0` disables that trigger.
 To compact, Iris asks the current session for a summary, then carries the summary
 onto a **fresh** session and continues there. The summary runs while the old
 session is still inside its limit, so the summarization itself never overflows,
-and it happens in a background thread **after** your reply is sent, so it never
-adds latency to a message. If a turn ever does hit a context-overflow error
+and it happens in a background thread **after** your reply is sent, so the turn
+that triggers it is never slowed. It briefly holds that one conversation's lock
+for the summary call, so the very next message on the same conversation can wait
+for it; the fresh-session seeding then runs lock-free. If a turn ever does hit a context-overflow error
 anyway, Iris treats it like a dead session: it starts fresh and retries, so the
 bot recovers instead of wedging (that path does drop history, which is why the
 token trigger is set to fire well before it). Compaction trades a little deep
@@ -265,9 +282,9 @@ agent maps cleanly onto the official client:
 
 Early, and honest about what is proven. The core (the driver, sessions, the agent
 loop, and the bundled memory tool) is verified end to end against the real
-`claude` binary and covered by unit tests. The Discord and Telegram message loops
-are wired and unit-tested in isolation, but have **not** yet been exercised
-against a live bot connection. Start with `python -m iris chat` to try the brain,
+`claude` binary and covered by unit tests. The Discord and Telegram message
+loops are wired and their gating (who and where the bot answers) is unit-tested,
+but the full loops have **not** yet been exercised against a live bot connection. Start with `python -m iris chat` to try the brain,
 then wire up a transport.
 
 Roadmap: live-testing the wired transports end to end, and a documented
