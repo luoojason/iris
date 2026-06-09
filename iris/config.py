@@ -87,6 +87,14 @@ class Config:
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
     metrics_file: str = ""
+
+    # Proactive notifications (iris watch). notify_channel is the Discord channel
+    # or DM to ping; watch_min_seconds is the success-ping threshold so quick
+    # commands stay silent; notify_persona is an optional voice for proactive
+    # messages (falls back to persona_file).
+    notify_channel: str = ""
+    watch_min_seconds: float = 30.0
+    notify_persona: Optional[str] = None
     turn_timeout: float = 300.0
     # Transient (rate-limit / overload) retries, with exponential backoff.
     max_retries: int = 2
@@ -134,6 +142,9 @@ class Config:
             timeout_max_retries=int(os.environ.get("IRIS_TIMEOUT_RETRIES", "0")),
             compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
+            notify_channel=os.environ.get("IRIS_NOTIFY_CHANNEL", ""),
+            watch_min_seconds=float(os.environ.get("IRIS_WATCH_MIN_SECONDS", "30")),
+            notify_persona=os.environ.get("IRIS_NOTIFY_PERSONA") or None,
         )
 
 

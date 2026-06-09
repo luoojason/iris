@@ -201,6 +201,11 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    watch_parser = sub.add_parser("watch", help="run a command and ping you when it finishes")
+    watch_parser.add_argument("--name", default=None, help="label for the notification")
+    watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
+    watch_parser.add_argument("--quiet", action="store_true", help="suppress the ping for this run")
+    watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
     args = parser.parse_args(argv)
 
     # Configure logging once here so every command (chat, tui, reminders-tick,
@@ -229,6 +234,15 @@ def main(argv: list[str] | None = None) -> int:
         from .tui import run as run_tui
         run_tui(config)
         return 0
+    if command == "watch":
+        from .notify.watch_cmd import watch as run_watch
+        cmd = list(args.argv)
+        if cmd and cmd[0] == "--":
+            cmd = cmd[1:]
+        if not cmd:
+            print("usage: iris watch [--name N] [--always] [--quiet] -- <command>")
+            return 2
+        return run_watch(cmd, config, name=args.name, force=args.always, quiet=args.quiet)
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)

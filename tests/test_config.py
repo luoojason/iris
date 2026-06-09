@@ -90,3 +90,23 @@ def test_metrics_file_from_env(monkeypatch):
     monkeypatch.setenv("IRIS_METRICS_FILE", "/tmp/iris-metrics.jsonl")
     cfg = Config.from_env(dotenv="/nonexistent.env")
     assert cfg.metrics_file == "/tmp/iris-metrics.jsonl"
+
+
+def test_from_env_reads_notify_fields(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_NOTIFY_CHANNEL", "999")
+    monkeypatch.setenv("IRIS_WATCH_MIN_SECONDS", "10")
+    monkeypatch.setenv("IRIS_NOTIFY_PERSONA", "notify.md")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.notify_channel == "999"
+    assert cfg.watch_min_seconds == 10.0
+    assert cfg.notify_persona == "notify.md"
+
+
+def test_notify_defaults():
+    cfg = Config()
+    assert cfg.notify_channel == ""
+    assert cfg.watch_min_seconds == 30.0
+    assert cfg.notify_persona is None
