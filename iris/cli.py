@@ -206,6 +206,20 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
     watch_parser.add_argument("--quiet", action="store_true", help="suppress the ping for this run")
     watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
+    add_p = sub.add_parser("watch-add", help="register a change-watch")
+    add_p.add_argument("--name", required=True)
+    src_group = add_p.add_mutually_exclusive_group(required=True)
+    src_group.add_argument("--url")
+    src_group.add_argument("--cmd")
+    ext_group = add_p.add_mutually_exclusive_group()
+    ext_group.add_argument("--json", dest="json")
+    ext_group.add_argument("--match")
+    ext_group.add_argument("--status", action="store_true")
+    add_p.add_argument("--every", type=float, default=0.0)
+    sub.add_parser("watch-list", help="list change-watches")
+    rm_p = sub.add_parser("watch-rm", help="remove a change-watch")
+    rm_p.add_argument("name")
+    sub.add_parser("watch-tick", help="check due change-watches (run from cron/timer)")
     args = parser.parse_args(argv)
 
     # Configure logging once here so every command (chat, tui, reminders-tick,
@@ -243,6 +257,18 @@ def main(argv: list[str] | None = None) -> int:
             print("usage: iris watch [--name N] [--always] [--quiet] -- <command>")
             return 2
         return run_watch(cmd, config, name=args.name, force=args.always, quiet=args.quiet)
+    if command == "watch-add":
+        from .notify.watch_tick import cli_add
+        return cli_add(args)
+    if command == "watch-list":
+        from .notify.watch_tick import cli_list
+        return cli_list(args)
+    if command == "watch-rm":
+        from .notify.watch_tick import cli_rm
+        return cli_rm(args)
+    if command == "watch-tick":
+        from .notify.watch_tick import cli_tick
+        return cli_tick(config)
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)
