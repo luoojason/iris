@@ -40,6 +40,11 @@ class WatchStore:
             try:
                 self._data = json.loads(self.path.read_text("utf-8")) or {}
             except (json.JSONDecodeError, OSError):
+                # Keep the bad file around for inspection, like SessionStore.
+                try:
+                    self.path.replace(self.path.with_suffix(self.path.suffix + ".corrupt"))
+                except OSError:
+                    pass
                 self._data = {}
 
     def _flush(self) -> None:
