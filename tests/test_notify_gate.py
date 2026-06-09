@@ -34,3 +34,13 @@ def test_quiet_flag_forces_drop():
 def test_needs_model_only_on_failure():
     assert needs_model(ev(exit_code=1)) is True
     assert needs_model(ev(exit_code=0)) is False
+
+
+def test_watch_event_notifies():
+    e = Event(source="watch", kind="changed", title="blog", exit_code=0, duration_s=0.0)
+    assert decide(e, 30) == "notify"
+
+
+def test_watch_event_quiet_drops():
+    e = Event(source="watch", kind="changed", title="blog", exit_code=0, duration_s=0.0)
+    assert decide(e, 30, quiet=True) == "drop"
