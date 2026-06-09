@@ -64,3 +64,10 @@ def test_falls_back_to_print_when_no_delivery(capsys):
                          driver_factory=lambda: None)
     assert rc == 1
     assert "failed: job exited 1 after 5s" in capsys.readouterr().out
+
+
+def test_run_command_runs_a_real_subprocess():
+    rc, duration_s, tail = watch_cmd.run_command(["sh", "-c", "printf hello; exit 3"])
+    assert rc == 3
+    assert "hello" in tail
+    assert duration_s >= 0

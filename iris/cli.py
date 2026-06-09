@@ -205,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser.add_argument("--name", default=None, help="label for the notification")
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
     watch_parser.add_argument("--quiet", action="store_true", help="suppress the ping for this run")
-    watch_parser.add_argument("command", nargs=argparse.REMAINDER, help="-- then the command to run")
+    watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
     args = parser.parse_args(argv)
 
     # Configure logging once here so every command (chat, tui, reminders-tick,
@@ -220,10 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     if config.skills_dir:
         from .skills import link_skills
         link_skills(config.skills_dir)
-    # When the watch subcommand is parsed, its REMAINDER positional (also named
-    # "command") overwrites the subparser dest in the namespace, so args.command
-    # becomes a list instead of the string "watch".  Detect that case by type.
-    command = "watch" if isinstance(args.command, list) else (args.command or "discord")
+    command = args.command or "discord"
 
     if command == "doctor":
         return doctor(config, probe=not getattr(args, "no_probe", False))
@@ -239,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "watch":
         from .notify.watch_cmd import watch as run_watch
-        cmd = list(args.command)
+        cmd = list(args.argv)
         if cmd and cmd[0] == "--":
             cmd = cmd[1:]
         if not cmd:

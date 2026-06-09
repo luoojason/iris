@@ -9,6 +9,7 @@ most once, only on a gated failure.
 from __future__ import annotations
 
 import collections
+import signal
 import subprocess
 import sys
 import time
@@ -33,15 +34,35 @@ def run_command(argv, runner=None, clock=time.monotonic):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     )
     tail = collections.deque(maxlen=50)
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        tail.append(line)
-    proc.wait()
+    # Forward SIGTERM to the child so it is not orphaned if iris is killed. The
+    # child already shares our process group, so a terminal Ctrl-C reaches it too.
+    prev_term = None
+    try:
+        prev_term = signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
+    except (ValueError, OSError):
+        prev_term = None  # not the main thread; rely on the shared process group
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            tail.append(line)
+        proc.wait()
+    except KeyboardInterrupt:
+        # The child already got SIGINT via the shared group; reap it and keep its
+        # exit code instead of letting the traceback escape and drop the code.
+        proc.wait()
+    finally:
+        if prev_term is not None:
+            try:
+                signal.signal(signal.SIGTERM, prev_term)
+            except (ValueError, OSError):
+                pass
     return proc.returncode, clock() - start, "".join(tail)
 
 
