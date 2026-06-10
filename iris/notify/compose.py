@@ -21,6 +21,10 @@ def _fmt(seconds: float) -> str:
 
 def _template(event: Event) -> str:
     if event.source == "job":
+        if event.kind == "interrupted":
+            # exit_code is nonzero so the gate always pings, but a restart is
+            # not a failure of the work itself; say what actually happened.
+            return f"job interrupted: {event.title} (the bot restarted mid-run)"
         if event.exit_code == 0:
             return f"job done: {event.title} in {_fmt(event.duration_s)}"
         return f"job failed: {event.title} exited {event.exit_code} after {_fmt(event.duration_s)}"

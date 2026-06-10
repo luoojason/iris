@@ -556,6 +556,14 @@ class JobRunner:
         with self._state_lock:
             self._turns[jid] = turn
         self.turn_registered.set()
+        # A cancel that landed between claim and registration was invisible to
+        # the cancel pass (it only walks registered turns) and nothing later
+        # re-reads the flag; honor it now.
+        record = self.store.get(jid)
+        if record and record.get("cancel_requested"):
+            with self._state_lock:
+                self._cancel_flagged.add(jid)
+            turn.cancel()
         # The stream watchdog enforces the real ceilings; these bounds are a
         # backstop so a broken turn can never wedge the worker thread forever.
         bound = total + self.idle_timeout + 30.0

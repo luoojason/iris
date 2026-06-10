@@ -99,6 +99,13 @@ def test_failure_uses_model_and_passes_tail():
     assert "ERROR: relation does not exist" in driver.calls[0]  # tail reached the prompt
 
 
+def test_interrupted_job_template_names_the_restart():
+    # Recovery pings carry exit_code=1 but a restart is not a failure of the
+    # work; the template must say what actually happened.
+    out = compose.render(job_ev(exit_code=1, kind="interrupted"), None)
+    assert out == "job interrupted: refactor parser (the bot restarted mid-run)"
+
+
 def test_model_error_falls_back_to_template():
     driver = FakeDriver(FakeResult("", is_error=True))
     assert compose.render(ev(exit_code=1, duration_s=40), driver) == "failed: npm test exited 1 after 40s"

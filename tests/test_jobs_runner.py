@@ -502,6 +502,34 @@ def test_an_undeliverable_spine_ping_is_logged(tmp_path, caplog):
     assert any("undeliverable" in r.getMessage() for r in caplog.records)
 
 
+def test_cancel_landing_between_claim_and_registration_is_honored(tmp_path):
+    # request_cancel can arrive while the worker is mid-spawn: the record is
+    # already running but the turn is not yet registered, so the cancel pass
+    # cannot see it and no later store change re-triggers it. The worker must
+    # re-read the record once the turn registers.
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("long work", "long work")
+    turn = FakeTurn(ok_result(), hold=True)
+
+    def racing_factory(job_driver, *, idle_timeout, total_timeout):
+        sd = FakeStreamDriver([turn])
+        orig = sd.start
+
+        def start(prompt, session_id=None, model=None):
+            store.request_cancel(jid)  # owner cancels during the spawn window
+            return orig(prompt, session_id, model)
+
+        sd.start = start
+        return sd
+
+    runner = JobRunner(store, ClaudeDriver(), stream_driver_factory=racing_factory,
+                       sync=True)
+    runner.check_now()
+
+    assert turn.killed
+    assert store.get(jid)["status"] == "cancelled"
+
+
 # -- start / recovery / watcher -----------------------------------------------
 
 
