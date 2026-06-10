@@ -15,7 +15,13 @@ import threading
 import pytest
 
 from iris.driver import ClaudeDriver, ClaudeResult
-from iris.jobs import JobRunner, JobStore
+from iris.jobs import (
+    JOB_PREAMBLE,
+    MAX_ARTIFACT_BYTES,
+    MAX_ARTIFACTS,
+    JobRunner,
+    JobStore,
+)
 
 
 def ok_result(text="all done", sid="job-sess"):
@@ -177,6 +183,83 @@ def test_grant_ceiling_and_timeouts_flow_into_the_stream_factory(tmp_path):
     assert "Bash" in job_driver.disallowed_tools
 
 
+# -- workspaces ----------------------------------------------------------------
+# Resolution is the runner's job: spawn surfaces record a NAME, and only the
+# owner-bound WorkspaceStore on this box turns it into a path.
+
+
+def make_workspace_store(tmp_path, **bindings):
+    from iris.workspaces import WorkspaceStore
+
+    ws = WorkspaceStore(tmp_path / "workspaces.json")
+    for name, path in bindings.items():
+        ws.add(name, str(path))
+    return ws
+
+
+def test_a_bound_workspace_resolves_into_the_job_drivers_cwd(tmp_path):
+    repo = tmp_path / "geosql"
+    repo.mkdir()
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("fix the flaky test", "flaky", workspace="geosql")
+    captured = []
+    runner, _ = make_runner(store, [FakeTurn(ok_result())], captured=captured,
+                            sender=collect_sender([]),
+                            workspace_store=make_workspace_store(tmp_path, geosql=repo))
+
+    runner.check_now()
+
+    job_driver, _, _ = captured[0]
+    assert job_driver.cwd == str(repo.resolve())
+    assert store.get(jid)["status"] == "done"
+
+
+def test_a_job_without_a_workspace_keeps_cwd_none(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("plain work", "plain")
+    captured = []
+    runner, _ = make_runner(store, [FakeTurn(ok_result())], captured=captured,
+                            sender=collect_sender([]),
+                            workspace_store=make_workspace_store(tmp_path))
+
+    runner.check_now()
+
+    assert captured[0][0].cwd is None
+
+
+def test_an_unknown_workspace_fails_the_job_at_start_with_the_bind_hint(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("doomed work", "doomed", workspace="ghost")
+    captured, sent = [], []
+    runner, _ = make_runner(store, [], captured=captured,
+                            sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path))
+
+    runner.check_now()
+
+    job = store.get(jid)
+    assert job["status"] == "failed"
+    assert job["result"]["error"] == ("unknown workspace 'ghost'; bind it with: "
+                                      "iris workspaces add ghost <path>")
+    assert captured == []  # no driver built, no turn started, no model call
+    assert len(sent) == 1  # the failed-to-start path still pings the spine
+    assert sent[0][1].startswith("job failed: doomed")
+
+
+def test_a_workspace_name_without_a_store_fails_the_same_way(tmp_path):
+    # A runner wired without any workspace registry cannot resolve names at
+    # all; a job that asks for one must fail loudly, not run in the bot's cwd.
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("doomed work", "doomed", workspace="geosql")
+    runner, _ = make_runner(store, [], sender=collect_sender([]))
+
+    runner.check_now()
+
+    job = store.get(jid)
+    assert job["status"] == "failed"
+    assert "unknown workspace 'geosql'" in job["result"]["error"]
+
+
 # -- delivery ----------------------------------------------------------------
 
 
@@ -310,6 +393,253 @@ def test_failure_tail_is_clamped_to_the_last_25_lines(tmp_path):
 
     assert "line 39" in prompts[0] and "line 15" in prompts[0]
     assert "line 14\n" not in prompts[0]
+
+
+# -- artifacts -----------------------------------------------------------------
+# Convention, not magic: a DONE job's report may end in "ARTIFACT: <path>"
+# lines; the runner uploads only files that really live inside the job's
+# resolved workspace (or the attachments dir), capped in count and size.
+
+
+def collect_uploader(uploads, ok=True):
+    def uploader(channel_id, path, token):
+        uploads.append((channel_id, path, token))
+        return ok
+    return uploader
+
+
+def make_workspace_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    return repo
+
+
+def artifact_job(tmp_path, store, workspace="repo"):
+    """One stamped job whose fold-back delivery succeeds, so the spine only
+    ever carries the artifact summary line in these tests."""
+    return store.add("export the data", "export", workspace=workspace,
+                     channel_id="42", conversation_id="discord:42")
+
+
+def test_job_preamble_teaches_the_artifact_convention():
+    assert "ARTIFACT: <absolute path>" in JOB_PREAMBLE
+    assert "one per line" in JOB_PREAMBLE
+
+
+def test_artifact_caps_are_module_constants():
+    assert MAX_ARTIFACTS == 5
+    assert MAX_ARTIFACT_BYTES == 8 * 1024 * 1024
+
+
+def test_done_job_uploads_its_artifacts_in_listed_order(tmp_path):
+    repo = make_workspace_repo(tmp_path)
+    (repo / "report.csv").write_text("a,b\n")
+    (repo / "shot.png").write_bytes(b"\x89PNG")
+    store = JobStore(tmp_path / "jobs.json")
+    artifact_job(tmp_path, store)
+    text = (f"Exported both files.\nARTIFACT: {repo / 'report.csv'}\n"
+            f"ARTIFACT: {repo / 'shot.png'}")
+    uploads, sent = [], []
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=text))],
+                            deliver=lambda *a: True, sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == [("42", str(repo / "report.csv"), "tok"),
+                       ("42", str(repo / "shot.png"), "tok")]
+    assert sent == []  # nothing skipped: no summary line
+
+
+def test_unstamped_done_job_uploads_to_the_notify_channel(tmp_path):
+    repo = make_workspace_repo(tmp_path)
+    (repo / "out.txt").write_text("x")
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("export", "export", workspace="repo")  # never stamped
+    uploads = []
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=f"ARTIFACT: {repo / 'out.txt'}"))],
+                            sender=collect_sender([]),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == [("999", str(repo / "out.txt"), "tok")]
+
+
+def test_artifact_traversal_and_symlink_escapes_are_rejected(tmp_path):
+    repo = make_workspace_repo(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("the bot's .env")
+    sneaky = repo / "sneaky.txt"
+    sneaky.symlink_to(secret)  # inside the workspace lexically, outside really
+    text = (f"ARTIFACT: {repo}/../secret.txt\n"
+            f"ARTIFACT: {sneaky}")
+    store = JobStore(tmp_path / "jobs.json")
+    jid = artifact_job(tmp_path, store)
+    uploads, sent = [], []
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=text))],
+                            deliver=lambda *a: True, sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == []
+    assert len(sent) == 1  # ONE templated summary line for all the skips
+    channel, summary, _ = sent[0]
+    assert channel == "42"
+    assert summary.startswith(f"job #{jid} artifacts:")
+    assert "secret.txt" in summary and "sneaky.txt" in summary
+    assert "outside" in summary
+
+
+def test_oversize_artifact_is_skipped_while_the_cap_edge_uploads(tmp_path):
+    repo = make_workspace_repo(tmp_path)
+    big, edge = repo / "big.bin", repo / "edge.bin"
+    with open(big, "wb") as handle:
+        handle.truncate(MAX_ARTIFACT_BYTES + 1)  # sparse: no real 8MB write
+    with open(edge, "wb") as handle:
+        handle.truncate(MAX_ARTIFACT_BYTES)
+    store = JobStore(tmp_path / "jobs.json")
+    artifact_job(tmp_path, store)
+    uploads, sent = [], []
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=f"ARTIFACT: {big}\nARTIFACT: {edge}"))],
+                            deliver=lambda *a: True, sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == [("42", str(edge), "tok")]
+    assert len(sent) == 1
+    assert "big.bin" in sent[0][1] and "8MB" in sent[0][1]
+
+
+def test_missing_artifact_is_skipped_with_a_note(tmp_path):
+    repo = make_workspace_repo(tmp_path)
+    store = JobStore(tmp_path / "jobs.json")
+    artifact_job(tmp_path, store)
+    uploads, sent = [], []
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=f"ARTIFACT: {repo / 'gone.txt'}"))],
+                            deliver=lambda *a: True, sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == []
+    assert len(sent) == 1
+    assert "gone.txt" in sent[0][1] and "missing" in sent[0][1]
+
+
+def test_excess_artifacts_past_the_cap_are_noted_not_uploaded(tmp_path):
+    repo = make_workspace_repo(tmp_path)
+    paths = []
+    for n in range(MAX_ARTIFACTS + 1):
+        p = repo / f"part{n}.txt"
+        p.write_text(str(n))
+        paths.append(p)
+    store = JobStore(tmp_path / "jobs.json")
+    artifact_job(tmp_path, store)
+    uploads, sent = [], []
+    text = "\n".join(f"ARTIFACT: {p}" for p in paths)
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=text))],
+                            deliver=lambda *a: True, sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert [u[1] for u in uploads] == [str(p) for p in paths[:MAX_ARTIFACTS]]
+    assert len(sent) == 1
+    assert f"past the {MAX_ARTIFACTS}-artifact cap" in sent[0][1]
+
+
+def test_artifact_in_the_attachments_dir_is_inside_the_boundary(tmp_path):
+    # Screenshots and downloads land in the attachments dir, not the repo;
+    # when configured it is a second allowed root next to the workspace.
+    repo = make_workspace_repo(tmp_path)
+    attach = tmp_path / "attach"
+    attach.mkdir()
+    shot = attach / "shot.png"
+    shot.write_bytes(b"\x89PNG")
+    store = JobStore(tmp_path / "jobs.json")
+    artifact_job(tmp_path, store)
+    uploads, sent = [], []
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=f"ARTIFACT: {shot}"))],
+                            deliver=lambda *a: True, sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            attachments_dir=str(attach),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == [("42", str(shot), "tok")]
+    assert sent == []
+
+
+def test_a_job_without_a_workspace_uploads_nothing_and_notes_it(tmp_path):
+    # No workspace = no boundary to check against, so the upload path stays
+    # closed even for files that exist (the attachments dir alone is not a
+    # ticket in: it only widens a workspace-bound job's boundary).
+    loose = tmp_path / "loose.txt"
+    loose.write_text("x")
+    store = JobStore(tmp_path / "jobs.json")
+    jid = artifact_job(tmp_path, store, workspace="")
+    uploads, sent = [], []
+    runner, _ = make_runner(store, [FakeTurn(ok_result(text=f"ARTIFACT: {loose}"))],
+                            deliver=lambda *a: True, sender=collect_sender(sent),
+                            workspace_store=make_workspace_store(tmp_path),
+                            attachments_dir=str(tmp_path),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == []
+    assert len(sent) == 1
+    assert sent[0][1].startswith(f"job #{jid} artifacts:")
+    assert "no bound workspace" in sent[0][1]
+
+
+def test_failed_jobs_never_parse_or_upload_artifacts(tmp_path):
+    repo = make_workspace_repo(tmp_path)
+    (repo / "out.txt").write_text("x")
+    store = JobStore(tmp_path / "jobs.json")
+    artifact_job(tmp_path, store)
+    failed = ClaudeResult(text=f"ARTIFACT: {repo / 'out.txt'}", session_id=None,
+                          is_error=True, error="boom")
+    uploads = []
+    runner, _ = make_runner(store, [FakeTurn(failed)],
+                            deliver=lambda *a: True, sender=collect_sender([]),
+                            workspace_store=make_workspace_store(tmp_path, repo=repo),
+                            uploader=collect_uploader(uploads))
+
+    runner.check_now()
+
+    assert uploads == []
+
+
+def test_artifact_upload_failure_is_logged_never_raised_never_rerun(tmp_path, caplog):
+    repo = make_workspace_repo(tmp_path)
+    (repo / "out.txt").write_text("x")
+    store = JobStore(tmp_path / "jobs.json")
+    jid = artifact_job(tmp_path, store)
+    uploads = []
+    runner, sd = make_runner(store, [FakeTurn(ok_result(text=f"ARTIFACT: {repo / 'out.txt'}"))],
+                             deliver=lambda *a: True, sender=collect_sender([]),
+                             workspace_store=make_workspace_store(tmp_path, repo=repo),
+                             uploader=collect_uploader(uploads, ok=False))
+
+    with caplog.at_level(logging.WARNING, logger="iris.jobs"):
+        runner.check_now()
+        runner.check_now()  # a later pass must not re-claim or re-upload
+
+    assert any("artifact" in r.getMessage() for r in caplog.records)
+    assert store.get(jid)["status"] == "done"  # the outcome is untouched
+    assert len(sd.calls) == 1                  # the job never re-ran
+    assert len(uploads) == 1                   # and the upload was not retried
 
 
 # -- cancel --------------------------------------------------------------

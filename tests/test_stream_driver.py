@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import json
 import queue
+import subprocess
 import threading
+from dataclasses import replace
 
 import pytest
 
-from iris.stream_driver import StreamTurn
+from iris.driver import ClaudeDriver
+from iris.stream_driver import StreamDriver, StreamTurn, _default_spawn
 
 
 _EOF = object()
@@ -203,3 +206,59 @@ def test_total_cap_kills_even_without_an_idle_hang():
     assert turn.wait_finished(timeout=3)
     assert proc.killed is True
     assert res is not None and res.is_error is True
+
+
+# -- workspace cwd ----------------------------------------------------------
+
+
+def make_spawn(calls, proc):
+    """A fake spawn with the real seam's signature: (cmd, env, *, cwd=None)."""
+
+    def spawn(cmd, env, *, cwd=None):
+        calls.append({"cmd": list(cmd), "env": env, "cwd": cwd})
+        return proc
+
+    return spawn
+
+
+def _run_one_turn(driver):
+    """Start a StreamDriver turn on a fake spawn, finish it, return the calls."""
+    proc = FakeProcess()
+    calls = []
+    sd = StreamDriver(driver=driver, spawn=make_spawn(calls, proc))
+    turn = sd.start("work")
+    proc.stdout.push(_ok("done"))
+    _finish(proc)
+    assert turn.wait_primary(timeout=2).text == "done"
+    assert turn.wait_finished(timeout=2)
+    return calls
+
+
+def test_stream_driver_threads_cwd_to_spawn():
+    calls = _run_one_turn(ClaudeDriver(cwd="/srv/checkout"))
+    assert calls[0]["cwd"] == "/srv/checkout"
+
+
+def test_stream_driver_default_cwd_is_none():
+    calls = _run_one_turn(ClaudeDriver())
+    assert calls[0]["cwd"] is None  # no workspace = today's behavior
+
+
+def test_replace_cwd_flows_through_stream_transport():
+    # The job runner resolves a workspace and carries it via dataclasses.replace.
+    calls = _run_one_turn(replace(ClaudeDriver(), cwd="/srv/checkout"))
+    assert calls[0]["cwd"] == "/srv/checkout"
+
+
+def test_default_spawn_passes_cwd_to_popen(monkeypatch):
+    recorded = []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            recorded.append(kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    _default_spawn(["claude"], {}, cwd="/srv/checkout")
+    _default_spawn(["claude"], {})
+    assert recorded[0]["cwd"] == "/srv/checkout"
+    assert recorded[1]["cwd"] is None

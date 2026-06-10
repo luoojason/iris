@@ -124,3 +124,18 @@ def test_building_a_job_driver_leaves_the_base_driver_untouched():
     assert base.timeout == 300.0
     assert base.append_system_prompt is None
     assert "Task" in denied_tools(base.build_command())
+
+
+def test_workspace_cwd_passes_through_to_the_job_driver():
+    # The runner resolves a workspace NAME to a path and hands it here; the
+    # base (chat) driver keeps inheriting the bot's own cwd.
+    base = ClaudeDriver()
+    d = build_job_driver(base, make_job(), grant_ceiling=("Task",),
+                         cwd="/checkouts/geosql")
+    assert d.cwd == "/checkouts/geosql"
+    assert base.cwd is None
+
+
+def test_no_cwd_keeps_the_job_driver_on_the_bots_directory():
+    d = build_job_driver(ClaudeDriver(), make_job(), grant_ceiling=("Task",))
+    assert d.cwd is None

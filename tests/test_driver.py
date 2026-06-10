@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from iris.driver import ClaudeDriver, ClaudeResult
 
@@ -241,3 +242,49 @@ def test_context_tokens_absent_when_no_usage():
     d = ClaudeDriver(runner=make_runner([FakeProc(0, success_json())]))
     result = d.run("hello")
     assert result.context_tokens is None
+
+
+# -- workspace cwd ----------------------------------------------------------
+
+
+def record_popen(monkeypatch, recorded):
+    """Swap subprocess.Popen for a recorder that answers one successful turn."""
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            recorded.append({"cmd": list(cmd), "kwargs": kwargs})
+            self.returncode = 0
+            self.pid = -1  # keeps _kill_tree away from os.killpg
+
+        def communicate(self, input=None, timeout=None):
+            return (success_json(), "")
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+
+def test_subprocess_run_passes_cwd_to_popen(monkeypatch, tmp_path):
+    recorded = []
+    record_popen(monkeypatch, recorded)
+    d = ClaudeDriver(cwd=str(tmp_path))
+    proc = d._subprocess_run(["claude", "-p"], 5.0, "hi")
+    assert recorded[0]["kwargs"]["cwd"] == str(tmp_path)
+    assert proc.returncode == 0
+
+
+def test_subprocess_run_default_cwd_is_none(monkeypatch):
+    recorded = []
+    record_popen(monkeypatch, recorded)
+    ClaudeDriver()._subprocess_run(["claude", "-p"], 5.0, "hi")
+    assert recorded[0]["kwargs"]["cwd"] is None  # no workspace = today's behavior
+
+
+def test_replace_cwd_flows_through_one_shot_transport(monkeypatch, tmp_path):
+    # The job runner carries a resolved workspace via dataclasses.replace; the
+    # one-shot transport must hand that cwd to the real subprocess.
+    recorded = []
+    record_popen(monkeypatch, recorded)
+    monkeypatch.setattr(shutil, "which", lambda _bin: "/usr/local/bin/claude")
+    d = replace(ClaudeDriver(), cwd=str(tmp_path))
+    result = d.run("hello")
+    assert result.is_error is False
+    assert recorded[0]["kwargs"]["cwd"] == str(tmp_path)

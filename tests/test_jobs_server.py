@@ -62,6 +62,20 @@ def test_spawn_job_rejects_unknown_grants_listing_valid_names(store):
     assert store.all() == []  # nothing queued
 
 
+def test_spawn_job_records_the_workspace_name_without_resolving_it(store):
+    # Request by NAME only; the server never validates against the workspace
+    # registry (it may live on another box). Resolution is the runner's job
+    # at spawn, where an unknown name fails the job at start.
+    out = srv.spawn_job("fix the flaky test", title="flaky", workspace="geosql")
+    assert out == "Job #1 queued: flaky"
+    assert store.get(1)["workspace"] == "geosql"
+
+
+def test_spawn_job_defaults_to_no_workspace(store):
+    srv.spawn_job("plain work", title="plain")
+    assert store.get(1)["workspace"] == ""
+
+
 def test_spawn_job_refuses_a_near_duplicate_inside_the_window(store, monkeypatch):
     first = srv.spawn_job("audit deps", title="deps")
     assert first == "Job #1 queued: deps"

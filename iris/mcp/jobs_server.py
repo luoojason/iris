@@ -47,7 +47,8 @@ def _fmt_age(seconds: float) -> str:
 
 @mcp.tool()
 def spawn_job(prompt: str, title: str = "", model: str = "",
-              timeout_minutes: int = 0, grants: str = "") -> str:
+              timeout_minutes: int = 0, grants: str = "",
+              workspace: str = "") -> str:
     """Queue a background job: a fresh, autonomous claude run tracked by the bot.
 
     Delegate any work expected to take more than a minute or so (research,
@@ -65,6 +66,10 @@ def spawn_job(prompt: str, title: str = "", model: str = "",
         grants: Comma-separated normally-denied tools to request, e.g. 'Task'
             (or its alias 'Agent') so the job can fan out into subagents.
             Subject to the operator's grant ceiling.
+        workspace: Optional workspace NAME the job runs inside (its working
+            directory, e.g. a repo checkout). Request by name only; the owner
+            binds names to paths with 'iris workspaces add'. Unknown names
+            fail the job at start.
     """
     if not (prompt or "").strip():
         return "Job needs a prompt; nothing queued."
@@ -82,7 +87,8 @@ def spawn_job(prompt: str, title: str = "", model: str = "",
                 and now - float(job.get("created_at") or 0.0) < DUPLICATE_WINDOW_S):
             return f"Job #{job['id']} already queued: {label}"
     job_id = STORE.add(prompt, label, model=(model or "").strip(),
-                       timeout_s=timeout_s, grants=granted)
+                       timeout_s=timeout_s, grants=granted,
+                       workspace=(workspace or "").strip())
     if granted:
         # This server cannot see IRIS_JOB_GRANTS, so it must not pretend the
         # grant is effective; the runner applies the ceiling at spawn.

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .workspaces import DEFAULT_WORKSPACES_FILE
+
 
 def load_dotenv(path: str | os.PathLike[str] = ".env") -> None:
     """Minimal .env reader: KEY=VALUE lines, ``#`` comments, no interpolation.
@@ -138,6 +140,9 @@ class Config:
     # Ceiling on the normally-denied tools a job may be granted. Default Task
     # only (subagent fan-out); Bash/Write/Edit stay denied unless widened.
     job_grants: list[str] = field(default_factory=lambda: ["Task"])
+    # Owner-bound workspace registry (iris workspaces add NAME PATH). Jobs may
+    # only request a workspace by NAME; this file is where names resolve.
+    workspaces_file: str = DEFAULT_WORKSPACES_FILE
 
     # Credit guard. monthly_credit is the agent-credit pool in USD; 0/unset
     # turns the whole guard off. Spend is read from metrics_file; threshold
@@ -196,6 +201,8 @@ class Config:
             # The unset default is "Task"; an explicitly empty value is a
             # deliberate no-grants-at-all ceiling, so only None falls back.
             job_grants=_split(os.environ.get("IRIS_JOB_GRANTS", "Task")),
+            workspaces_file=os.environ.get("IRIS_WORKSPACES_FILE",
+                                           DEFAULT_WORKSPACES_FILE),
             # `or` so a blank value (as shipped in .env.example) means default.
             monthly_credit=float(os.environ.get("IRIS_MONTHLY_CREDIT") or 0),
             budget_state=os.environ.get("IRIS_BUDGET_STATE", "iris-budget.json"),

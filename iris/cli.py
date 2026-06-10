@@ -156,6 +156,22 @@ def doctor(config: Config, probe: bool = True) -> int:
             print("  so spawned jobs would never be claimed. Point both at one path:")
             print(f"  bot (IRIS_JOBS_FILE in .env):    {config.jobs_file}")
             print(f"  jobs server's mcp-config env:    {server_jobs_file}")
+    if config.jobs_enabled:
+        from .jobs import JobStore
+        from .workspaces import WorkspaceStore
+
+        # A queued job naming an unbound workspace is a guaranteed failure at
+        # spawn (the runner resolves names against this store, nothing else);
+        # surface it while there is still time to bind the name.
+        workspace_store = WorkspaceStore(config.workspaces_file)
+        for job in JobStore(config.jobs_file).all():
+            if job.get("status") not in ("pending", "running"):
+                continue
+            name = (job.get("workspace") or "").strip()
+            if name and workspace_store.get(name) is None:
+                print(f"WARNING: job #{job['id']} ({job.get('title') or 'untitled'}) names "
+                      f"workspace '{name}', which is not bound, so it will fail at start.")
+                print(f"  Bind it with: iris workspaces add {name} <path>")
     if "usage" in servers and config.metrics_file:
         import os as _os
 
@@ -346,9 +362,12 @@ def jobs(config: Config, args) -> int:
                 return 2
         minutes = min(int(args.timeout_minutes or 0), MAX_TIMEOUT_MINUTES)
         title = (args.title or "").strip() or prompt.splitlines()[0][:60]
+        # The workspace NAME is recorded unresolved: the runner's box owns
+        # the workspace registry, so resolution happens there at spawn.
         job_id = store.add(prompt, title, model=(args.model or "").strip(),
                            timeout_s=minutes * 60 if minutes > 0 else None,
-                           grants=grants)
+                           grants=grants,
+                           workspace=(args.workspace or "").strip())
         print(f"Job #{job_id} queued: {title}")
         if not config.jobs_enabled:
             print("(note: IRIS_JOBS is off, so no runner will pick this up)")
@@ -398,6 +417,48 @@ def jobs(config: Config, args) -> int:
         return 0
 
     print("usage: iris jobs {list,show,cancel,spawn} ...")
+    return 2
+
+
+def workspaces(config: Config, args) -> int:
+    """Bind, unbind, and list the workspace names background jobs may run in.
+
+    The security boundary from the workspaces design spec: the model only
+    ever speaks a workspace NAME, and this command (a local shell, so the
+    owner by construction) is the only writer of the name -> path registry.
+    """
+    from .workspaces import WorkspaceStore
+
+    store = WorkspaceStore(config.workspaces_file)
+    command = getattr(args, "workspaces_command", None)
+
+    if command == "add":
+        try:
+            entry = store.add(args.name, args.path)
+        except ValueError as exc:
+            print(exc)
+            return 2
+        print(f"Workspace '{args.name}' -> {entry['path']}")
+        return 0
+
+    if command == "remove":
+        if store.remove(args.name):
+            print(f"Removed workspace '{args.name}'.")
+            return 0
+        print(f"No workspace '{args.name}'.")
+        return 1
+
+    if command == "list":
+        entries = store.all()
+        if not entries:
+            print("No workspaces bound.")
+            print("Bind one with: iris workspaces add NAME PATH")
+            return 0
+        for name, entry in entries.items():
+            print(f"{name} -> {entry['path']}")
+        return 0
+
+    print("usage: iris workspaces {add,remove,list} ...")
     return 2
 
 
@@ -452,6 +513,18 @@ def main(argv: list[str] | None = None) -> int:
                             help="time budget in minutes (0 = default 30)")
     jobs_spawn.add_argument("--grants", default="",
                             help="comma-separated normally-denied tools, e.g. Task")
+    jobs_spawn.add_argument("--workspace", default="",
+                            help="owner-bound workspace NAME the job runs inside "
+                                 "(bind names with 'iris workspaces add')")
+    ws_parser = sub.add_parser("workspaces",
+                               help="bind the checkouts background jobs may run inside")
+    ws_sub = ws_parser.add_subparsers(dest="workspaces_command")
+    ws_add = ws_sub.add_parser("add", help="bind NAME to an existing directory")
+    ws_add.add_argument("name", help="lowercase slug jobs request the workspace by")
+    ws_add.add_argument("path", help="the directory (e.g. a repo checkout)")
+    ws_remove = ws_sub.add_parser("remove", help="unbind NAME")
+    ws_remove.add_argument("name")
+    ws_sub.add_parser("list", help="list bound workspaces")
     watch_parser = sub.add_parser("watch", help="run a command and ping you when it finishes")
     watch_parser.add_argument("--name", default=None, help="label for the notification")
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
@@ -485,6 +558,8 @@ def main(argv: list[str] | None = None) -> int:
         return usage(config, args)
     if command == "jobs":
         return jobs(config, args)
+    if command == "workspaces":
+        return workspaces(config, args)
     if command == "tui":
         from .tui import run as run_tui
         run_tui(config)

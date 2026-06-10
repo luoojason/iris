@@ -60,7 +60,9 @@ def _user_message(text: str) -> str:
 Process = "subprocess.Popen[str]"
 
 
-def _default_spawn(cmd: Sequence[str], env: dict) -> "subprocess.Popen[str]":
+def _default_spawn(
+    cmd: Sequence[str], env: dict, *, cwd: Optional[str] = None
+) -> "subprocess.Popen[str]":
     kwargs = {}
     if os.name == "posix":
         # Own process group so the watchdog can kill claude's whole child tree
@@ -77,6 +79,7 @@ def _default_spawn(cmd: Sequence[str], env: dict) -> "subprocess.Popen[str]":
         errors="replace",
         bufsize=1,
         env=env,
+        cwd=cwd,
         **kwargs,
     )
 
@@ -336,7 +339,9 @@ class StreamDriver:
     driver: ClaudeDriver
     idle_timeout: float = 300.0
     total_timeout: float = 1800.0
-    spawn: Callable[[Sequence[str], dict], object] = _default_spawn
+    # Signature: (cmd, env, *, cwd=None) -> process. cwd follows the driver's,
+    # so a workspace set via dataclasses.replace reaches both transports.
+    spawn: Callable[..., object] = _default_spawn
 
     def start(
         self,
@@ -350,7 +355,7 @@ class StreamDriver:
                 "Install Claude Code and sign in to your subscription first."
             )
         cmd = self.driver.build_command(session_id, model, stream=True)
-        proc = self.spawn(cmd, _child_env(self.driver.disable_auto_memory))
+        proc = self.spawn(cmd, _child_env(self.driver.disable_auto_memory), cwd=self.driver.cwd)
         turn = StreamTurn(
             proc,
             fallback_session_id=session_id,

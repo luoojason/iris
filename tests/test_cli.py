@@ -100,6 +100,18 @@ def test_jobs_spawn_defaults_the_title_to_the_prompts_first_line(monkeypatch, tm
     assert job["timeout_s"] == 1800  # store default budget
 
 
+def test_jobs_spawn_records_the_workspace_name_without_resolving_it(monkeypatch, tmp_path, capsys):
+    # The spawn surface never validates the name against the workspace store
+    # (the registry may live on another box); the runner resolves at spawn.
+    rc = run_jobs(monkeypatch, tmp_path, [
+        "spawn", "fix the flaky test", "--workspace", "geosql",
+    ])
+
+    assert rc == 0
+    assert "Job #1 queued" in capsys.readouterr().out
+    assert jobs_store(tmp_path).get(1)["workspace"] == "geosql"
+
+
 def test_jobs_spawn_rejects_an_unknown_grant(monkeypatch, tmp_path, capsys):
     rc = run_jobs(monkeypatch, tmp_path, ["spawn", "work", "--grants", "Sudo"])
 
@@ -167,6 +179,93 @@ def test_jobs_cancel_pending_job(monkeypatch, tmp_path, capsys):
 
 def test_jobs_without_a_subcommand_prints_usage(monkeypatch, tmp_path, capsys):
     assert run_jobs(monkeypatch, tmp_path, []) == 2
+    assert "usage" in capsys.readouterr().out.lower()
+
+
+# -- iris workspaces ------------------------------------------------------------
+# Owner-only binding of workspace names to checkouts: local shell, no model.
+
+
+def run_workspaces(monkeypatch, tmp_path, argv):
+    from iris.cli import main
+
+    monkeypatch.setenv("IRIS_WORKSPACES_FILE", str(tmp_path / "workspaces.json"))
+    return main(["workspaces", *argv])
+
+
+def workspace_store(tmp_path):
+    from iris.workspaces import WorkspaceStore
+
+    return WorkspaceStore(tmp_path / "workspaces.json")
+
+
+def test_workspaces_add_binds_a_name_and_prints_the_resolved_path(monkeypatch, tmp_path, capsys):
+    repo = tmp_path / "geosql"
+    repo.mkdir()
+
+    rc = run_workspaces(monkeypatch, tmp_path, ["add", "geosql", str(repo)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "geosql" in out
+    assert str(repo.resolve()) in out
+    assert workspace_store(tmp_path).get("geosql")["path"] == str(repo.resolve())
+
+
+def test_workspaces_add_rejects_a_bad_name_with_the_store_message(monkeypatch, tmp_path, capsys):
+    rc = run_workspaces(monkeypatch, tmp_path, ["add", "Bad_Name", str(tmp_path)])
+
+    assert rc == 2
+    assert "a-z" in capsys.readouterr().out  # the store's friendly ValueError
+    assert workspace_store(tmp_path).all() == {}
+
+
+def test_workspaces_add_rejects_a_missing_directory(monkeypatch, tmp_path, capsys):
+    rc = run_workspaces(monkeypatch, tmp_path, ["add", "repo", str(tmp_path / "gone")])
+
+    assert rc == 2
+    assert "directory" in capsys.readouterr().out
+    assert workspace_store(tmp_path).all() == {}
+
+
+def test_workspaces_remove_unbinds_then_reports_missing(monkeypatch, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workspace_store(tmp_path).add("repo", str(repo))
+
+    assert run_workspaces(monkeypatch, tmp_path, ["remove", "repo"]) == 0
+    assert "repo" in capsys.readouterr().out
+    assert workspace_store(tmp_path).get("repo") is None
+
+    assert run_workspaces(monkeypatch, tmp_path, ["remove", "repo"]) == 1
+    assert "No workspace 'repo'." in capsys.readouterr().out
+
+
+def test_workspaces_list_prints_names_with_paths_sorted(monkeypatch, tmp_path, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = workspace_store(tmp_path)
+    store.add("zeta", str(repo))
+    store.add("alpha", str(repo))
+
+    rc = run_workspaces(monkeypatch, tmp_path, ["list"])
+
+    assert rc == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if "->" in l]
+    assert lines == [f"alpha -> {repo.resolve()}", f"zeta -> {repo.resolve()}"]
+
+
+def test_workspaces_list_empty_points_at_add(monkeypatch, tmp_path, capsys):
+    rc = run_workspaces(monkeypatch, tmp_path, ["list"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "No workspaces" in out
+    assert "iris workspaces add" in out
+
+
+def test_workspaces_without_a_subcommand_prints_usage(monkeypatch, tmp_path, capsys):
+    assert run_workspaces(monkeypatch, tmp_path, []) == 2
     assert "usage" in capsys.readouterr().out.lower()
 
 
@@ -459,6 +558,65 @@ def test_doctor_no_jobs_warnings_when_everything_lines_up(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "cannot spawn jobs" not in out
+
+
+def test_doctor_warns_when_a_queued_job_names_an_unbound_workspace(tmp_path, capsys):
+    # A pending or running job whose workspace name has no binding will fail
+    # at start; doctor must say so while there is still time to bind it.
+    from iris.cli import doctor
+    from iris.jobs import JobStore
+
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("fix the flaky test", "flaky", workspace="ghost")
+    running = store.add("long haul", "long", workspace="phantom")
+    store.update(running, status="running")
+    config = doctor_config(tmp_path, jobs_enabled=True)
+    config.jobs_file = str(tmp_path / "jobs.json")
+    config.workspaces_file = str(tmp_path / "ws.json")
+
+    rc = doctor(config, probe=False)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ghost" in out and "phantom" in out
+    assert "iris workspaces add ghost" in out
+
+
+def test_doctor_workspace_check_ignores_bound_and_finished_jobs(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.jobs import JobStore
+    from iris.workspaces import WorkspaceStore
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    WorkspaceStore(tmp_path / "ws.json").add("geosql", str(repo))
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("fix it", "fix", workspace="geosql")     # bound: fine
+    done = store.add("old work", "old", workspace="ghost")
+    store.update(done, status="done")                  # finished: ignored
+    config = doctor_config(tmp_path, jobs_enabled=True)
+    config.jobs_file = str(tmp_path / "jobs.json")
+    config.workspaces_file = str(tmp_path / "ws.json")
+
+    doctor(config, probe=False)
+
+    out = capsys.readouterr().out
+    assert "ghost" not in out
+    assert "iris workspaces add" not in out
+
+
+def test_doctor_skips_the_workspace_check_when_jobs_are_off(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.jobs import JobStore
+
+    JobStore(tmp_path / "jobs.json").add("fix it", "fix", workspace="ghost")
+    config = doctor_config(tmp_path, jobs_enabled=False)
+    config.jobs_file = str(tmp_path / "jobs.json")
+    config.workspaces_file = str(tmp_path / "ws.json")
+
+    doctor(config, probe=False)
+
+    assert "ghost" not in capsys.readouterr().out
 
 
 def test_jobs_spawn_clamps_the_timeout_like_the_server(monkeypatch, tmp_path, capsys):

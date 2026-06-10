@@ -147,6 +147,20 @@ def test_jobs_fields_from_env(tmp_path, monkeypatch):
     assert cfg.job_grants == ["Task", "Bash"]
 
 
+def test_workspaces_file_defaults_to_the_store_constant(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.workspaces_file == "iris-workspaces.json"
+
+
+def test_workspaces_file_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("IRIS_WORKSPACES_FILE", "/tmp/ws.json")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.workspaces_file == "/tmp/ws.json"
+
+
 def test_budget_defaults(tmp_path, monkeypatch):
     for key in list(__import__("os").environ):
         if key.startswith("IRIS_"):

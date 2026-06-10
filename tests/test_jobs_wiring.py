@@ -98,6 +98,19 @@ def test_from_config_passes_deliver_and_sender_through(tmp_path):
     assert runner.sender is sender
 
 
+def test_from_config_wires_the_workspace_store_and_attachments_dir(tmp_path):
+    # The runner is the resolution point for workspace NAMES and the boundary
+    # owner for artifact uploads, so both knobs must arrive from Config.
+    config = jobs_config(tmp_path, workspaces_file=str(tmp_path / "ws.json"),
+                         attachments_dir=str(tmp_path / "attach"))
+
+    runner = JobRunner.from_config(config, ClaudeDriver())
+
+    assert str(runner.workspace_store.path) == str(tmp_path / "ws.json")
+    assert runner.attachments_dir == str(tmp_path / "attach")
+    assert runner.uploader is None  # production: reminders.send_discord_file
+
+
 # -- make_job_deliver ---------------------------------------------------------
 
 

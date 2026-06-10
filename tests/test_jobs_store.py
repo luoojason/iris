@@ -41,6 +41,16 @@ def test_jobs_survive_reinstantiation_on_the_same_path(tmp_path):
     assert job["conversation_id"] == "discord:c7"
 
 
+def test_add_records_the_workspace_name_defaulting_empty(tmp_path):
+    # The record carries the NAME only; resolution to a path is the runner's
+    # job at spawn (the registry may live on another box than the workspaces).
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("fix the flaky test", "flaky", workspace="geosql")
+    store.add("plain work", "plain")
+    assert store.get(1)["workspace"] == "geosql"
+    assert store.get(2)["workspace"] == ""
+
+
 def test_corrupt_or_missing_file_reads_as_empty_and_ids_restart(tmp_path):
     path = tmp_path / "jobs.json"
     store = JobStore(path)

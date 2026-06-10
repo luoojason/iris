@@ -172,3 +172,54 @@ def send_discord_message(channel_id: str, content: str, token: str) -> bool:
             return True
     except (urllib.error.HTTPError, OSError):
         return False
+
+
+def _default_file_poster(url: str, body: bytes, headers: dict) -> int:
+    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.status
+
+
+def send_discord_file(channel_id: str, path: str, token: str, *, poster=None) -> bool:
+    """Upload one file to a Discord channel via REST. Returns success.
+
+    stdlib urllib has no multipart support, so the body is built by hand: one
+    part, Discord's documented ``files[0]``, then the closing delimiter. The
+    boundary is random per call (a fixed ``iris`` prefix plus os.urandom hex);
+    tests assert the body structurally against the boundary they read back
+    out of the Content-Type header, so no injectable boundary is needed.
+
+    ``poster`` is the test seam: a callable ``(url, body_bytes, headers) ->
+    HTTP status int``. Never raises on the failure paths the runner cares
+    about: a missing/unreadable file or any HTTPError/OSError is just False,
+    matching :func:`send_discord_message`'s contract.
+    """
+    try:
+        file_path = Path(path)
+        payload = file_path.read_bytes()
+    except OSError:
+        return False
+    boundary = "iris" + os.urandom(16).hex()
+    # CR/LF or a double quote in a filename would corrupt the part header.
+    filename = re.sub(r'[\r\n"]', "_", file_path.name)
+    body = (
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'
+            "Content-Type: application/octet-stream\r\n"
+            "\r\n"
+        ).encode("utf-8")
+        + payload
+        + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    )
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "User-Agent": "iris (https://github.com/luoojason/iris, 0.1)",
+    }
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    try:
+        status = (poster or _default_file_poster)(url, body, headers)
+    except (urllib.error.HTTPError, OSError):
+        return False
+    return 200 <= int(status) < 300

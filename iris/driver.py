@@ -172,6 +172,10 @@ class ClaudeDriver:
     # Keep native auto-memory off so the bundled MCP memory tool is the store.
     disable_auto_memory: bool = True
     add_dirs: Optional[Sequence[str]] = None
+    # Working directory for the claude child. None = inherit the bot's cwd
+    # (exactly today's behavior). The job runner sets this from an owner-bound
+    # workspace; the model itself never names a path, only a workspace name.
+    cwd: Optional[str] = None
     timeout: float = 300.0
     # Transient failures (rate limit, overload, in-flight execution errors).
     max_retries: int = 2
@@ -321,6 +325,7 @@ class ClaudeDriver:
             encoding="utf-8",
             errors="replace",
             env=_child_env(self.disable_auto_memory),
+            cwd=self.cwd,
             **kwargs,
         )
         try:

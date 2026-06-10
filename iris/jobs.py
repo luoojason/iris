@@ -42,6 +42,7 @@ from .notify.compose import render
 from .notify.deliver import send as _notify_send
 from .notify.events import Event
 from .notify.gate import decide, needs_model
+from .reminders import send_discord_file
 from .stream_driver import StreamDriver
 
 try:
@@ -63,8 +64,15 @@ JOB_PREAMBLE = (
     "No one is watching the run and no one will answer questions, so make "
     "reasonable decisions yourself and see the job through. Your final message "
     "is the report delivered to the owner: state what you did, what you found, "
-    "and anything left undone."
+    "and anything left undone. If the owner should receive files you produced, "
+    "list them at the end of the report, one per line, as "
+    "ARTIFACT: <absolute path>."
 )
+
+# Artifact hand-back caps (module constants until proven to need knobs): at
+# most this many files per job, each at most this many bytes.
+MAX_ARTIFACTS = 5
+MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 
 
 class JobStore:
@@ -111,6 +119,7 @@ class JobStore:
         grants: Optional[list[str]] = None,
         channel_id: str = "",
         conversation_id: str = "",
+        workspace: str = "",
     ) -> int:
         with self._locked():
             items = self._load()
@@ -128,6 +137,9 @@ class JobStore:
                 "model": model,
                 "timeout_s": int(timeout_s) if timeout_s else 1800,
                 "grants": list(grants or []),
+                # Workspace NAME only, never a path: resolution is the
+                # runner's job at spawn, against the owner-bound store.
+                "workspace": workspace,
                 "cancel_requested": False,
                 "result": None,
             })
@@ -231,6 +243,7 @@ def build_job_driver(
     job: dict,
     *,
     grant_ceiling: Sequence[str],
+    cwd: Optional[str] = None,
 ) -> ClaudeDriver:
     """Derive the driver for one background job from the chat driver.
 
@@ -247,6 +260,9 @@ def build_job_driver(
     (it runs unattended with web reach) into queueing descendants without
     bound. Internal fan-out is the Task grant, only: the jobs tools are
     stripped from the allowlist and the whole server is denied outright.
+
+    ``cwd`` is the resolved workspace path (the runner already turned the
+    job's workspace NAME into it); None keeps the bot's own directory.
     """
     granted = _expand_subagent_alias(job.get("grants") or ()) & _expand_subagent_alias(
         grant_ceiling
@@ -256,6 +272,7 @@ def build_job_driver(
         allowed = tuple(t for t in allowed if not _is_jobs_tool(t))
     return dataclasses.replace(
         base_driver,
+        cwd=cwd,
         timeout=float(job.get("timeout_s") or base_driver.timeout),
         model=job.get("model") or base_driver.model,
         append_system_prompt=JOB_PREAMBLE,
@@ -282,6 +299,7 @@ class JobRunner:
         base_driver: ClaudeDriver,
         *,
         grant_ceiling: Sequence[str] = ("Task",),
+        workspace_store=None,
         concurrency: int = 2,
         idle_timeout: float = 300.0,
         poll_seconds: float = 2.0,
@@ -289,6 +307,8 @@ class JobRunner:
         sender=None,
         notify_channel: str = "",
         discord_token: str = "",
+        attachments_dir: str = "",
+        uploader=None,
         notify_driver_factory=None,
         watch_min_seconds: float = 30.0,
         metrics_path: str = "",
@@ -303,6 +323,9 @@ class JobRunner:
         self.store = store
         self.base_driver = base_driver
         self.grant_ceiling = tuple(grant_ceiling)
+        # Where workspace NAMES resolve to paths (owner-bound, local CLI).
+        # None means no registry on this box: every named workspace is unknown.
+        self.workspace_store = workspace_store
         self.concurrency = int(concurrency)
         self.idle_timeout = float(idle_timeout)
         self.poll_seconds = float(poll_seconds)
@@ -310,6 +333,11 @@ class JobRunner:
         self.sender = sender
         self.notify_channel = notify_channel
         self.discord_token = discord_token
+        # Artifact hand-back: the attachments dir is a second allowed root
+        # next to the workspace; uploader is the test seam over
+        # reminders.send_discord_file ((channel_id, path, token) -> bool).
+        self.attachments_dir = attachments_dir
+        self.uploader = uploader
         self.notify_driver_factory = notify_driver_factory
         self.watch_min_seconds = float(watch_min_seconds)
         self.metrics_path = metrics_path
@@ -354,6 +382,7 @@ class JobRunner:
         is built lazily per failure, exactly like ``iris watch``'s triage path.
         """
         from .notify.watch_cmd import build_notify_driver
+        from .workspaces import WorkspaceStore
 
         base = base_driver
         if config.job_model:
@@ -362,6 +391,8 @@ class JobRunner:
             JobStore(config.jobs_file),
             base,
             grant_ceiling=tuple(config.job_grants),
+            workspace_store=WorkspaceStore(config.workspaces_file),
+            attachments_dir=config.attachments_dir,
             concurrency=config.job_concurrency,
             idle_timeout=config.job_idle_timeout,
             poll_seconds=config.job_poll_seconds,
@@ -629,7 +660,24 @@ class JobRunner:
             self._sem.release()
 
     def _run_job(self, jid: int, job: dict) -> None:
-        job_driver = build_job_driver(self.base_driver, job, grant_ceiling=self.grant_ceiling)
+        # Workspace resolution happens here, bot-side, never in a spawn
+        # surface: the model only ever named a workspace, and only the
+        # owner's registry may turn that name into a path. Unknown names
+        # fail before any driver is built, so the failure costs no model call.
+        cwd = None
+        workspace = (job.get("workspace") or "").strip()
+        if workspace:
+            entry = self.workspace_store.get(workspace) if self.workspace_store else None
+            if entry is None:
+                self._finish_job(jid, job, ClaudeResult(
+                    text="", session_id=None, is_error=True,
+                    error=(f"unknown workspace '{workspace}'; bind it with: "
+                           f"iris workspaces add {workspace} <path>"),
+                ))
+                return
+            cwd = entry["path"]
+        job_driver = build_job_driver(self.base_driver, job,
+                                      grant_ceiling=self.grant_ceiling, cwd=cwd)
         total = float(job.get("timeout_s") or 1800)
         factory = self.stream_driver_factory
         if factory is None:
@@ -704,6 +752,14 @@ class JobRunner:
             # (which may mention credit) returned above and never reaches this.
             self._maybe_park(result)
         self._deliver_result(jid, job, result, status, finished_at)
+        if status == "done":
+            # After delivery only, and fenced: an artifact problem must never
+            # bubble into the worker's crash handler, which would overwrite
+            # the done outcome with a failure and re-ping the owner.
+            try:
+                self._deliver_artifacts(jid, job, result)
+            except Exception:
+                log.warning("job %s artifact delivery failed", jid, exc_info=True)
 
     # -- credit guard ----------------------------------------------------------
 
@@ -772,6 +828,80 @@ class JobRunner:
             tail=_tail_lines(result.text if ok else (result.error or result.text or "")),
             channel=channel_id,
         )
+
+    def _deliver_artifacts(self, jid: int, job: dict, result: ClaudeResult) -> None:
+        """Hand the report's listed files back to the owner (done jobs only).
+
+        Convention, not magic: the preamble teaches workers to end the report
+        with ``ARTIFACT: <absolute path>`` lines. Everything here is
+        deterministic post-delivery file work, no model call: a count cap, a
+        size cap, and a realpath boundary check against the job's resolved
+        workspace (plus the attachments dir when configured). A job with no
+        workspace has no boundary at all, so it uploads nothing; the
+        attachments dir alone is never a ticket in. Skips collapse into ONE
+        templated spine line so the owner knows what did not arrive; upload
+        failures only warn and never re-run the job.
+        """
+        listed = []
+        for line in (result.text or "").splitlines():
+            line = line.strip()
+            if line.startswith("ARTIFACT:"):
+                path = line[len("ARTIFACT:"):].strip()
+                if path:
+                    listed.append(path)
+        if not listed:
+            return
+        # Re-read like _deliver_result: a stamp may have landed mid-run.
+        current = self.store.get(jid) or job
+        channel = current.get("channel_id") or self.notify_channel
+        workspace = (current.get("workspace") or "").strip()
+        entry = (self.workspace_store.get(workspace)
+                 if workspace and self.workspace_store else None)
+        if entry is None:
+            self._artifact_note(jid, channel,
+                                f"{len(listed)} listed, but the job has no bound "
+                                "workspace, so nothing was uploaded")
+            return
+        roots = [os.path.realpath(entry["path"])]
+        if self.attachments_dir:
+            roots.append(os.path.realpath(self.attachments_dir))
+        skipped: list[str] = []
+        upload = self.uploader or send_discord_file
+        for path in listed[:MAX_ARTIFACTS]:
+            real = os.path.realpath(path)
+            if not any(real == root or real.startswith(root + os.sep)
+                       for root in roots):
+                # Boundary first: never even stat() a file outside it. This
+                # rejects .. traversal and symlinks pointing out alike.
+                skipped.append(f"{path} (outside the workspace)")
+                continue
+            if not os.path.isfile(real):
+                skipped.append(f"{path} (missing)")
+                continue
+            if os.path.getsize(real) > MAX_ARTIFACT_BYTES:
+                skipped.append(f"{path} (over the 8MB cap)")
+                continue
+            try:
+                ok = upload(channel, path, self.discord_token)
+            except Exception:
+                log.warning("job %s artifact upload raised for %s", jid, path,
+                            exc_info=True)
+                continue
+            if not ok:
+                log.warning("job %s artifact upload failed for %s", jid, path)
+        if len(listed) > MAX_ARTIFACTS:
+            skipped.append(f"{len(listed) - MAX_ARTIFACTS} more past the "
+                           f"{MAX_ARTIFACTS}-artifact cap")
+        if skipped:
+            self._artifact_note(jid, channel, "skipped " + "; ".join(skipped))
+
+    def _artifact_note(self, jid: int, channel: str, detail: str) -> None:
+        # Templated by rule, like the budget pings: file-driven, no model.
+        text = f"job #{jid} artifacts: {detail}"
+        if not _notify_send(text, token=self.discord_token, channel=channel,
+                            sender=self.sender):
+            log.warning("artifact note undeliverable (channel=%r): %s",
+                        channel, text)
 
     def _spine_notify(self, *, kind: str, title: str, exit_code: int,
                       duration_s: float, tail: str, channel: str,
