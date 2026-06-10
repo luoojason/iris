@@ -1,13 +1,19 @@
-"""Background job coordination: the job registry and per-job driver policy.
+"""Background job coordination: registry, per-job driver policy, and runner.
 
 JobStore is a file-backed registry shaped like ReminderStore (fcntl sidecar
 lock, atomic tempfile+os.replace writes, corrupt-tolerant load) so the MCP
 jobs server subprocess and the bot process can share it safely, and every
 state change hits disk before returning. build_job_driver derives a per-job
-ClaudeDriver from the chat driver without ever mutating it.
+ClaudeDriver from the chat driver without ever mutating it. JobRunner is the
+bot-side lifecycle owner: it claims pending jobs, runs each through a per-job
+StreamDriver, persists outcomes, and delivers (fold-back first, notify spine
+fallback).
 
 Faking seams: stores take a path (tests use tmp_path); the drivers built here
-are pure dataclasses whose build_command output is asserted directly.
+are pure dataclasses whose build_command output is asserted directly; the
+runner takes stream_driver_factory / deliver / sender / notify_driver_factory
+fakes and a sync=True inline mode, and exposes workers + turn_registered as
+joinable handles.
 """
 
 from __future__ import annotations
@@ -16,12 +22,19 @@ import dataclasses
 import json
 import os
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
-from .driver import DANGEROUS_BUILTINS, ClaudeDriver
+from .driver import DANGEROUS_BUILTINS, ClaudeDriver, ClaudeResult
+from .metrics import emit_turn
+from .notify.compose import render
+from .notify.deliver import send as _notify_send
+from .notify.events import Event
+from .notify.gate import decide, needs_model
+from .stream_driver import StreamDriver
 
 try:
     import fcntl
@@ -217,3 +230,343 @@ def build_job_driver(
         append_system_prompt=JOB_PREAMBLE,
         disallowed_tools=tuple(t for t in DANGEROUS_BUILTINS if t not in granted),
     )
+
+
+class JobRunner:
+    """Bot-side job lifecycle owner: claim pending jobs, run each one through a
+    per-job StreamDriver on a worker thread, persist the outcome, and deliver.
+
+    Test seams: ``stream_driver_factory`` replaces the real StreamDriver,
+    ``sync=True`` runs workers inline and skips the watcher thread,
+    ``deliver``/``sender`` capture both delivery paths, and ``workers`` (a
+    joinable dict of threads) plus ``turn_registered`` (set whenever a worker
+    registers its live turn) bound every test-side wait.
+    """
+
+    def __init__(
+        self,
+        store: JobStore,
+        base_driver: ClaudeDriver,
+        *,
+        grant_ceiling: Sequence[str] = ("Task",),
+        concurrency: int = 2,
+        idle_timeout: float = 300.0,
+        poll_seconds: float = 2.0,
+        deliver: Optional[Callable[[str, str, str], bool]] = None,
+        sender=None,
+        notify_channel: str = "",
+        discord_token: str = "",
+        notify_driver_factory=None,
+        watch_min_seconds: float = 30.0,
+        metrics_path: str = "",
+        stream_driver_factory=None,
+        clock: Callable[[], float] = time.monotonic,
+        sync: bool = False,
+    ) -> None:
+        self.store = store
+        self.base_driver = base_driver
+        self.grant_ceiling = tuple(grant_ceiling)
+        self.concurrency = int(concurrency)
+        self.idle_timeout = float(idle_timeout)
+        self.poll_seconds = float(poll_seconds)
+        self.deliver = deliver
+        self.sender = sender
+        self.notify_channel = notify_channel
+        self.discord_token = discord_token
+        self.notify_driver_factory = notify_driver_factory
+        self.watch_min_seconds = float(watch_min_seconds)
+        self.metrics_path = metrics_path
+        self.stream_driver_factory = stream_driver_factory
+        self.clock = clock
+        self.sync = bool(sync)
+
+        # Joinable handles for tests; workers are daemon threads keyed by job id.
+        self.workers: dict[int, threading.Thread] = {}
+        self.turn_registered = threading.Event()
+        self.watcher: Optional[threading.Thread] = None
+
+        self._turns: dict[int, object] = {}      # live StreamTurn per running job
+        self._cancel_flagged: set[int] = set()   # ids whose turn we cancelled
+        self._windows: dict[str, tuple[str, float]] = {}  # cid -> (channel, t0)
+        self._ambiguous: set[int] = set()        # ids born under overlapping windows
+        self._state_lock = threading.Lock()
+        self._check_lock = threading.Lock()
+        self._sem = threading.Semaphore(self.concurrency)
+        self._stop_event = threading.Event()
+
+    # -- lifecycle -------------------------------------------------------------
+
+    def start(self) -> None:
+        """Recover orphans, then watch the registry file (skipped when sync)."""
+        self._recover_interrupted()
+        if self.sync:
+            return
+        self._stop_event.clear()
+        self.watcher = threading.Thread(target=self._watch_loop,
+                                        name="job-watcher", daemon=True)
+        self.watcher.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        watcher = self.watcher
+        if watcher is not None and watcher.is_alive():
+            watcher.join(timeout=2.0)
+
+    def _recover_interrupted(self) -> None:
+        # A job stored as running with no live handle here was killed mid-run
+        # by a restart. Template-only forced ping: recovery happens on a clock
+        # (process start), so it must never spend a model call.
+        for job in self.store.all(status="running"):
+            jid = int(job["id"])
+            with self._state_lock:
+                if jid in self._turns:
+                    continue
+            self.store.update(jid, status="interrupted")
+            started_at = job.get("started_at") or time.time()
+            self._spine_notify(
+                kind="interrupted",
+                title=job.get("title") or f"job #{jid}",
+                exit_code=1,
+                duration_s=max(0.0, time.time() - started_at),
+                tail="",
+                channel=job.get("channel_id") or "",
+                allow_model=False,
+            )
+
+    def _watch_loop(self) -> None:
+        # Pure file I/O on the clock: stat the registry and re-read only when
+        # its mtime moved. The None baseline makes the first sighting of the
+        # file count as a change, so jobs queued while the bot was down are
+        # picked up within one poll.
+        last_mtime = None
+        while not self._stop_event.wait(self.poll_seconds):
+            try:
+                mtime = os.stat(self.store.path).st_mtime
+            except OSError:
+                continue
+            if mtime != last_mtime:
+                last_mtime = mtime
+                self.check_now()
+
+    # -- attribution -----------------------------------------------------------
+
+    def turn_started(self, conversation_id: str, channel_id: str = "") -> None:
+        """Open a stamping window: a chat turn for this conversation is live.
+
+        Wall-clock (time.time()) on purpose: window edges are compared against
+        JobStore's created_at, which is wall-clock too.
+        """
+        with self._state_lock:
+            self._windows[conversation_id] = (channel_id, time.time())
+
+    def turn_finished(self, conversation_id: str) -> None:
+        """Close the window, stamp jobs born inside exactly it, nudge a check.
+
+        MCP tools cannot see their calling conversation, so attribution is by
+        time: an unstamped job whose created_at falls inside exactly one
+        active window belongs to that conversation. A job inside two windows
+        is ambiguous forever (remembered), so a later turn_finished cannot
+        adopt it once the competing window is gone.
+        """
+        closed_at = time.time()
+        with self._state_lock:
+            window = self._windows.pop(conversation_id, None)
+            other_starts = [t0 for (_, t0) in self._windows.values()]
+        if window is not None:
+            channel_id, opened_at = window
+            for job in self.store.all():
+                if job.get("conversation_id"):
+                    continue
+                jid = int(job["id"])
+                created = job.get("created_at") or 0.0
+                if not (opened_at <= created <= closed_at):
+                    continue
+                with self._state_lock:
+                    ambiguous = jid in self._ambiguous
+                # Any other still-open window that opened before the job was
+                # created also contains it: overlapping claims, stamp nobody.
+                if ambiguous or any(created >= t0 for t0 in other_starts):
+                    with self._state_lock:
+                        self._ambiguous.add(jid)
+                    continue
+                self.store.update(jid, conversation_id=conversation_id,
+                                  channel_id=channel_id)
+        self.check_now()
+
+    # -- discovery -----------------------------------------------------------
+
+    def check_now(self) -> None:
+        """Honor cancel requests on owned turns, then claim into the free slots."""
+        with self._check_lock:
+            self._cancel_pass()
+            claimed = self._claim_pass()
+        for job in claimed:
+            if self.sync:
+                self._worker(job)
+            else:
+                thread = threading.Thread(
+                    target=self._worker, args=(job,),
+                    name=f"job-worker:{job['id']}", daemon=True,
+                )
+                self.workers[int(job["id"])] = thread
+                thread.start()
+
+    def _cancel_pass(self) -> None:
+        # Only the runner owns process handles, so request_cancel left the
+        # record running with cancel_requested set; kill the turn here and let
+        # the worker (the single status writer) record the final state. An ok
+        # primary that landed before the kill still wins as "done".
+        with self._state_lock:
+            owned = dict(self._turns)
+        for jid, turn in owned.items():
+            record = self.store.get(jid)
+            if not record or record.get("status") != "running":
+                continue
+            if not record.get("cancel_requested"):
+                continue
+            with self._state_lock:
+                self._cancel_flagged.add(jid)
+            turn.cancel()
+
+    def _claim_pass(self) -> list[dict]:
+        # Count the free slots by draining the semaphore non-blocking; permits
+        # for jobs we failed to claim go straight back. Each claimed job keeps
+        # its permit until its worker releases it.
+        free = 0
+        while free < self.concurrency and self._sem.acquire(blocking=False):
+            free += 1
+        if not free:
+            return []
+        claimed = self.store.claim_pending(free)
+        for _ in range(free - len(claimed)):
+            self._sem.release()
+        return claimed
+
+    # -- worker ---------------------------------------------------------------
+
+    def _worker(self, job: dict) -> None:
+        jid = int(job["id"])
+        try:
+            self._run_job(jid, job)
+        finally:
+            with self._state_lock:
+                self._turns.pop(jid, None)
+                self._cancel_flagged.discard(jid)
+            self._sem.release()
+
+    def _run_job(self, jid: int, job: dict) -> None:
+        job_driver = build_job_driver(self.base_driver, job, grant_ceiling=self.grant_ceiling)
+        total = float(job.get("timeout_s") or 1800)
+        factory = self.stream_driver_factory
+        if factory is None:
+            def factory(d, *, idle_timeout, total_timeout):
+                return StreamDriver(d, idle_timeout=idle_timeout, total_timeout=total_timeout)
+        sd = factory(job_driver, idle_timeout=self.idle_timeout, total_timeout=total)
+        try:
+            turn = sd.start(job["prompt"], None, job.get("model") or None)
+        except Exception as exc:
+            self._finish_job(jid, job, ClaudeResult(
+                text="", session_id=None, is_error=True,
+                error=f"job failed to start: {exc}",
+            ))
+            return
+        with self._state_lock:
+            self._turns[jid] = turn
+        self.turn_registered.set()
+        # The stream watchdog enforces the real ceilings; these bounds are a
+        # backstop so a broken turn can never wedge the worker thread forever.
+        bound = total + self.idle_timeout + 30.0
+        result = turn.wait_primary(bound)
+        turn.wait_finished(bound)
+        if result is None:
+            result = ClaudeResult(text="", session_id=None, is_error=True,
+                                  error="job turn ended without a result")
+        self._finish_job(jid, job, result)
+
+    def _finish_job(self, jid: int, job: dict, result: ClaudeResult) -> None:
+        with self._state_lock:
+            was_cancelled = jid in self._cancel_flagged
+        if not result.is_error:
+            # Per the cancel contract a reply that landed before the kill is
+            # preserved, so an ok primary means the job finished its work.
+            status = "done"
+        elif was_cancelled or "cancelled" in (result.error or ""):
+            status = "cancelled"
+        else:
+            status = "failed"
+        finished_at = time.time()
+        self.store.update(jid, status=status, finished_at=finished_at, result={
+            "text": result.text,
+            "session_id": result.session_id,
+            "is_error": result.is_error,
+            "error": result.error,
+            "cost_usd": result.cost_usd,
+            "duration_ms": result.duration_ms,
+            "context_tokens": result.context_tokens,
+        })
+        if self.metrics_path:
+            # Outside any runner lock: telemetry file I/O must never stall the
+            # cancel/claim passes or other workers.
+            emit_turn(self.metrics_path, f"job:{jid}", result, None, "job", False, 1)
+        if status == "cancelled":
+            return  # the owner asked for the cancel; no ping either way
+        self._deliver_result(jid, job, result, status, finished_at)
+
+    # -- delivery -------------------------------------------------------------
+
+    def _deliver_result(self, jid: int, job: dict, result: ClaudeResult,
+                        status: str, finished_at: float) -> None:
+        ok = status == "done"
+        title = job.get("title") or ""
+        if ok:
+            text = f'[background job #{jid} "{title}" finished]\n{result.text}'
+        else:
+            text = f'[background job #{jid} "{title}" failed: {result.error}]'
+        # Re-read the record: turn_finished may have stamped it after the claim.
+        current = self.store.get(jid) or job
+        conversation_id = current.get("conversation_id") or ""
+        channel_id = current.get("channel_id") or ""
+        if conversation_id and channel_id and self.deliver is not None:
+            try:
+                if self.deliver(channel_id, conversation_id, text):
+                    return  # fold-back delivered: never both paths for one job
+            except Exception:
+                pass
+        started_at = job.get("started_at") or finished_at
+        self._spine_notify(
+            kind="finished" if ok else "failed",
+            title=title or f"job #{jid}",
+            exit_code=0 if ok else 1,
+            duration_s=max(0.0, finished_at - started_at),
+            tail=_tail_lines(result.text if ok else (result.error or result.text or "")),
+            channel=channel_id,
+        )
+
+    def _spine_notify(self, *, kind: str, title: str, exit_code: int,
+                      duration_s: float, tail: str, channel: str,
+                      allow_model: bool = True) -> None:
+        # Exactly watch_cmd.watch's shape: event -> gate -> compose -> deliver.
+        # force=True because the owner explicitly asked for the job, so even a
+        # quick success is worth the (free, templated) ping.
+        event = Event(
+            source="job",
+            kind=kind,
+            title=title,
+            exit_code=exit_code,
+            duration_s=duration_s,
+            tail=tail,
+            urgency="high" if exit_code != 0 else "normal",
+        )
+        if decide(event, self.watch_min_seconds, force=True) != "notify":
+            return
+        driver = None
+        if allow_model and needs_model(event) and self.notify_driver_factory is not None:
+            driver = self.notify_driver_factory()
+        text = render(event, driver)
+        _notify_send(text, token=self.discord_token,
+                     channel=channel or self.notify_channel, sender=self.sender)
+
+
+def _tail_lines(text: str, limit: int = 25) -> str:
+    """The last ``limit`` lines, for failure triage prompts and event tails."""
+    return "\n".join((text or "").splitlines()[-limit:])
