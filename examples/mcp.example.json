@@ -21,6 +21,13 @@
         "IRIS_METRICS_FILE": "iris-metrics.jsonl",
         "IRIS_MONTHLY_CREDIT": "0"
       }
+    },
+    "wiki": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.wiki_server"],
+      "env": {
+        "IRIS_WIKI_DIR": "/path/to/your/vault"
+      }
     }
   }
 }

@@ -263,6 +263,32 @@ one "jobs resumed" ping follows expiry. Past 80% of the credit, jobs without
 an explicit model pin run on `IRIS_MODEL_LIGHT` when it is set; a pinned model
 is always honored, and chat routing is untouched.
 
+### The owner's wiki
+
+If you keep an Obsidian vault (or any folder of markdown) as your source of
+truth for project status, the read-only `wiki` server
+(`iris/mcp/wiki_server.py`) lets the agent answer "where does X stand?" from
+the vault instead of from stale memory: `search_wiki` finds pages,
+`read_wiki_page` reads one, and `recent_wiki_changes` shows what moved
+lately. Keep a git clone of the vault on the bot's box (a cron `git pull`
+keeps it fresh); the server never writes to it. Point `IRIS_WIKI_DIR` at the
+checkout in the server's **own** `"env"` block and allowlist the three tools:
+
+```json
+{ "mcpServers": { "wiki": { "command": "python",
+  "args": ["-m", "iris.mcp.wiki_server"],
+  "env": { "IRIS_WIKI_DIR": "/home/bot/wiki" } } } }
+```
+
+```
+IRIS_ALLOWED_TOOLS=mcp__wiki__search_wiki,mcp__wiki__read_wiki_page,mcp__wiki__recent_wiki_changes
+```
+
+Reads are fenced to the vault: every requested path is resolved and must
+land inside `IRIS_WIKI_DIR` (no `..` hops, no absolute paths, no symlinks
+that point out), and only `.md` files are served, so the server stays safe
+even when the vault lives next to secrets.
+
 ### Voice messages
 
 Iris can transcribe inbound voice notes locally and for free, so you can talk to
