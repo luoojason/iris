@@ -19,7 +19,13 @@ def _fmt(seconds: float) -> str:
     return f"{total // 60}m{total % 60:02d}s"
 
 
+def _short(text: str, limit: int = 120) -> str:
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
 def _template(event: Event) -> str:
+    if event.source == "watch":
+        return f"changed: {event.title} is now {_short(event.detail)} (was {_short(event.tail)})"
     if event.exit_code == 0:
         return f"done: {event.title} passed in {_fmt(event.duration_s)}"
     return f"failed: {event.title} exited {event.exit_code} after {_fmt(event.duration_s)}"

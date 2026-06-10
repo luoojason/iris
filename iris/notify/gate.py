@@ -13,6 +13,8 @@ def decide(event: Event, min_seconds: float, force: bool = False, quiet: bool = 
     """Return "notify" or "drop" for this event."""
     if quiet:
         return "drop"
+    if event.source == "watch":
+        return "notify"  # a watch event only exists when its value actually changed
     if force:
         return "notify"
     if event.exit_code != 0:

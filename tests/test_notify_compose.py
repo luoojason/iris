@@ -45,3 +45,18 @@ def test_failure_uses_model_and_passes_tail():
 def test_model_error_falls_back_to_template():
     driver = FakeDriver(FakeResult("", is_error=True))
     assert compose.render(ev(exit_code=1, duration_s=40), driver) == "failed: npm test exited 1 after 40s"
+
+
+def test_watch_change_template():
+    e = Event(source="watch", kind="changed", title="api-version",
+              exit_code=0, duration_s=0.0, tail="4.1", detail="4.2")
+    assert compose.render(e, None) == "changed: api-version is now 4.2 (was 4.1)"
+
+
+def test_watch_change_truncates_long_values():
+    e = Event(source="watch", kind="changed", title="page",
+              exit_code=0, duration_s=0.0, tail="old", detail="x" * 300)
+    out = compose.render(e, None)
+    assert out.startswith("changed: page is now ")
+    assert "..." in out
+    assert len(out) < 200

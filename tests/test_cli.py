@@ -54,3 +54,12 @@ def test_doctor_reports_missing_binary():
     # A bogus binary name: doctor must fail cleanly without any network call.
     rc = doctor(Config(claude_bin="iris-no-such-claude-binary"), probe=False)
     assert rc == 1
+
+
+def test_watch_add_list_rm_roundtrip(tmp_path, monkeypatch):
+    from iris.cli import main
+    monkeypatch.setenv("IRIS_WATCHES_FILE", str(tmp_path / "w.json"))
+    assert main(["watch-add", "--name", "blog", "--url", "http://x"]) == 0
+    assert main(["watch-list"]) == 0
+    assert main(["watch-rm", "blog"]) == 0
+    assert main(["watch-rm", "blog"]) == 1  # already gone

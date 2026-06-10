@@ -3,6 +3,7 @@ iris-sessions.json
 iris-memory.json
 iris-social.json
 iris-reminders.json
+iris-watches.json
 *.corrupt
 .env
 
