@@ -147,6 +147,38 @@ def test_jobs_fields_from_env(tmp_path, monkeypatch):
     assert cfg.job_grants == ["Task", "Bash"]
 
 
+def test_budget_defaults(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.monthly_credit == 0.0  # guard off unless a credit is set
+    assert cfg.budget_state == "iris-budget.json"
+    assert cfg.budget_park_minutes == 60.0
+
+
+def test_budget_fields_from_env(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_MONTHLY_CREDIT", "100.5")
+    monkeypatch.setenv("IRIS_BUDGET_STATE", "/tmp/budget.json")
+    monkeypatch.setenv("IRIS_BUDGET_PARK_MINUTES", "15")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.monthly_credit == 100.5
+    assert cfg.budget_state == "/tmp/budget.json"
+    assert cfg.budget_park_minutes == 15.0
+
+
+def test_budget_blank_values_fall_back_to_defaults(tmp_path, monkeypatch):
+    # .env files ship these keys blank; blank must parse as the default, not crash.
+    monkeypatch.setenv("IRIS_MONTHLY_CREDIT", "")
+    monkeypatch.setenv("IRIS_BUDGET_PARK_MINUTES", "")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.monthly_credit == 0.0
+    assert cfg.budget_park_minutes == 60.0
+
+
 def test_job_grants_explicitly_empty_means_no_grants(tmp_path, monkeypatch):
     # Setting the ceiling to an empty string is a deliberate "no grants at
     # all", distinct from leaving it unset (which defaults to Task).

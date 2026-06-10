@@ -121,18 +121,31 @@ def _default_runner(cmd: Sequence[str], timeout: float, prompt: str):
 # Rate-limit / overload responses: worth retrying after a backoff.
 _RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "429", "overloaded", "529")
 
+# Credit-pool exhaustion: the subscription itself pushed back, as opposed to a
+# per-request defect (auth, bad request). Split out so the job runner can park
+# on these without parking on one malformed job's failure.
+_CREDIT_MARKERS = ("credit balance", "insufficient", "quota")
+
 # Permanent failures: retrying only wastes time and credit. Auth, bad request,
 # and credit exhaustion all surface immediately instead of being hidden behind
 # minutes of backoff.
-_TERMINAL_MARKERS = (
-    "credit balance",
-    "insufficient",
-    "quota",
+_TERMINAL_MARKERS = _CREDIT_MARKERS + (
     "authentication_error",
     "permission_error",
     "invalid_request_error",
     "not_found_error",
 )
+
+
+def is_credit_or_rate_pushback(error_text: Optional[str]) -> bool:
+    """True when an error text is the credit pool or a rate limit pushing back.
+
+    The job runner parks claiming on these. Reuses the retry classifiers'
+    marker tuples; per-request defects (auth, bad request) stay out so one
+    broken job cannot park the whole fleet.
+    """
+    blob = (error_text or "").lower()
+    return any(marker in blob for marker in _CREDIT_MARKERS + _RATE_LIMIT_MARKERS)
 
 
 @dataclass

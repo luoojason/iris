@@ -176,12 +176,53 @@ def chat(config: Config) -> int:
         print(f"iris > {result.text.strip()}\n")
 
 
-def reminders_tick(config: Config) -> int:
+def budget_tick(config: Config, *, now: float | None = None, sender=None) -> None:
+    """Budget threshold pings and park expiry, ridden on the reminders tick.
+
+    Clock-driven, therefore template-only by rule: pure file arithmetic and
+    f-strings, no driver anywhere near this path. A failed send is not
+    recorded, so the ping is retried on the next tick. ``sender`` is the
+    notify-deliver test seam.
+    """
+    import time as _time
+
+    from . import budget
+    from .notify.deliver import send as notify_send
+
+    now = _time.time() if now is None else now
+    state = budget.BudgetState(config.budget_state)
+    if 0 < state.park_until <= now:
+        state.set_park_until(0.0)  # expired: the job runner reads the same state
+    if config.monthly_credit <= 0 or not config.metrics_file:
+        return
+    records = budget.read_metrics(config.metrics_file, budget.window(now, "month"))
+    spent = budget.summarize(records)["total_cost"]
+    month = budget.month_key(now)
+    crossed = budget.thresholds_crossed(spent, config.monthly_credit, state.pinged(month))
+    if not crossed:
+        return
+    projected = budget.projection(records, now)
+    for threshold in crossed:
+        text = (f"budget: {threshold}% of the monthly agent credit used "
+                f"(${spent:.2f} of ${config.monthly_credit:.2f}; "
+                f"projecting ${projected:.2f} by month end)")
+        if notify_send(text, token=config.discord_token,
+                       channel=config.notify_channel, sender=sender):
+            state.record_pings(month, [threshold])
+
+
+def reminders_tick(config: Config, *, now: float | None = None, sender=None) -> int:
     """Deliver any reminders that are now due. Run from cron or a systemd timer."""
     import os
 
     from .reminders import ReminderStore, send_discord_message
 
+    try:
+        # Before the token guard: park expiry is pure file arithmetic and must
+        # clear even on a host that only runs the tick for the budget check.
+        budget_tick(config, now=now, sender=sender)
+    except Exception:
+        logging.getLogger("iris.cli").warning("budget tick failed", exc_info=True)
     if not config.discord_token:
         print("reminders-tick: IRIS_DISCORD_TOKEN is not set")
         return 1
@@ -194,6 +235,37 @@ def reminders_tick(config: Config) -> int:
         else:
             store.add(job["due_ts"], job["text"], job["channel_id"])  # re-queue on failure
     print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    return 0
+
+
+def usage(config: Config, args, *, now: float | None = None) -> int:
+    """Render the spend summary from the metrics file: pure file arithmetic.
+
+    The credit/projection lines only make sense against the calendar month
+    (the credit is monthly), so they render for the month period alone.
+    """
+    import json
+    import time as _time
+    from pathlib import Path
+
+    from . import budget
+
+    if not config.metrics_file:
+        print("No metrics file is configured, so no spend is recorded.")
+        print("Set IRIS_METRICS_FILE to a JSONL path; Iris logs one line per turn.")
+        return 0
+    if not Path(config.metrics_file).exists():
+        print(f"No metrics recorded yet at {config.metrics_file}.")
+        return 0
+    now = _time.time() if now is None else now
+    records = budget.read_metrics(config.metrics_file, budget.window(now, args.period))
+    summary = budget.summarize(records)
+    if args.as_json:
+        print(json.dumps(summary))
+        return 0
+    credit = config.monthly_credit if args.period == "month" else 0.0
+    proj = budget.projection(records, now) if credit > 0 else None
+    print(budget.format_summary(summary, credit=credit, projection=proj))
     return 0
 
 
@@ -319,6 +391,10 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    usage_parser = sub.add_parser("usage", help="spend summary from the metrics file (no model call)")
+    usage_parser.add_argument("--period", choices=["day", "week", "month"], default="month")
+    usage_parser.add_argument("--json", action="store_true", dest="as_json",
+                              help="dump the summary dict as JSON")
     jobs_parser = sub.add_parser("jobs", help="inspect and queue background jobs")
     jobs_sub = jobs_parser.add_subparsers(dest="jobs_command")
     jobs_list = jobs_sub.add_parser("list", help="list jobs, newest first")
@@ -365,6 +441,8 @@ def main(argv: list[str] | None = None) -> int:
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
+    if command == "usage":
+        return usage(config, args)
     if command == "jobs":
         return jobs(config, args)
     if command == "tui":

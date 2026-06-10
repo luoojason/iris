@@ -139,6 +139,14 @@ class Config:
     # only (subagent fan-out); Bash/Write/Edit stay denied unless widened.
     job_grants: list[str] = field(default_factory=lambda: ["Task"])
 
+    # Credit guard. monthly_credit is the agent-credit pool in USD; 0/unset
+    # turns the whole guard off. Spend is read from metrics_file; threshold
+    # pings and job parking share the budget_state JSON file.
+    monthly_credit: float = 0.0
+    budget_state: str = "iris-budget.json"
+    # How long the job runner stops claiming after credit/rate-limit pushback.
+    budget_park_minutes: float = 60.0
+
     @classmethod
     def from_env(cls, *, dotenv: str | os.PathLike[str] = ".env") -> "Config":
         load_dotenv(dotenv)
@@ -188,6 +196,10 @@ class Config:
             # The unset default is "Task"; an explicitly empty value is a
             # deliberate no-grants-at-all ceiling, so only None falls back.
             job_grants=_split(os.environ.get("IRIS_JOB_GRANTS", "Task")),
+            # `or` so a blank value (as shipped in .env.example) means default.
+            monthly_credit=float(os.environ.get("IRIS_MONTHLY_CREDIT") or 0),
+            budget_state=os.environ.get("IRIS_BUDGET_STATE", "iris-budget.json"),
+            budget_park_minutes=float(os.environ.get("IRIS_BUDGET_PARK_MINUTES") or 60),
         )
 
 

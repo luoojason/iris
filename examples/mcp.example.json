@@ -13,6 +13,14 @@
       "env": {
         "IRIS_JOBS_FILE": "iris-jobs.json"
       }
+    },
+    "usage": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.usage_server"],
+      "env": {
+        "IRIS_METRICS_FILE": "iris-metrics.jsonl",
+        "IRIS_MONTHLY_CREDIT": "0"
+      }
     }
   }
 }

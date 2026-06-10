@@ -26,10 +26,17 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from .driver import DANGEROUS_BUILTINS, ClaudeDriver, ClaudeResult
+from . import budget
+from .driver import (
+    DANGEROUS_BUILTINS,
+    ClaudeDriver,
+    ClaudeResult,
+    is_credit_or_rate_pushback,
+)
 from .metrics import emit_turn
 from .notify.compose import render
 from .notify.deliver import send as _notify_send
@@ -281,6 +288,10 @@ class JobRunner:
         notify_driver_factory=None,
         watch_min_seconds: float = 30.0,
         metrics_path: str = "",
+        budget_state_path: str = "",
+        monthly_credit: float = 0.0,
+        light_model: str = "",
+        park_minutes: float = 60.0,
         stream_driver_factory=None,
         clock: Callable[[], float] = time.monotonic,
         sync: bool = False,
@@ -298,6 +309,12 @@ class JobRunner:
         self.notify_driver_factory = notify_driver_factory
         self.watch_min_seconds = float(watch_min_seconds)
         self.metrics_path = metrics_path
+        # Credit guard: budget_state_path enables parking on credit/rate
+        # pushback; monthly_credit + light_model enable near-cap tightening.
+        self.budget_state_path = budget_state_path
+        self.monthly_credit = float(monthly_credit)
+        self.light_model = light_model
+        self.park_minutes = float(park_minutes)
         self.stream_driver_factory = stream_driver_factory
         self.clock = clock
         self.sync = bool(sync)
@@ -346,6 +363,10 @@ class JobRunner:
             notify_driver_factory=lambda: build_notify_driver(config),
             watch_min_seconds=config.watch_min_seconds,
             metrics_path=config.metrics_file,
+            budget_state_path=config.budget_state,
+            monthly_credit=config.monthly_credit,
+            light_model=config.light_model,
+            park_minutes=config.budget_park_minutes,
         )
 
     # -- lifecycle -------------------------------------------------------------
@@ -463,10 +484,15 @@ class JobRunner:
     # -- discovery -----------------------------------------------------------
 
     def check_now(self) -> None:
-        """Honor cancel requests on owned turns, then claim into the free slots."""
+        """Honor cancel requests on owned turns, then claim into the free slots.
+
+        While a budget park is live no claim happens: pending jobs stay
+        queued and the watcher keeps polling, so expiry is noticed on the
+        next file change or nudge.
+        """
         with self._check_lock:
             self._cancel_pass()
-            claimed = self._claim_pass()
+            claimed = [] if self._parked() else self._claim_pass()
         for job in claimed:
             if self.sync:
                 self._worker(job)
@@ -494,6 +520,24 @@ class JobRunner:
             with self._state_lock:
                 self._cancel_flagged.add(jid)
             turn.cancel()
+
+    def _parked(self) -> bool:
+        """True while a budget park is live; an expired park clears with one ping.
+
+        Wall-clock, like BudgetState's stored epoch. The reminders tick may
+        clear an expired park first (same state file); then no ping is owed.
+        """
+        if not self.budget_state_path:
+            return False
+        state = budget.BudgetState(self.budget_state_path)
+        until = state.park_until
+        if until <= 0:
+            return False
+        if time.time() < until:
+            return True
+        state.set_park_until(0.0)
+        self._budget_ping("jobs resumed: the budget park expired")
+        return False
 
     def _claim_pass(self) -> list[dict]:
         # Count the free slots by draining the semaphore non-blocking; permits
@@ -545,8 +589,11 @@ class JobRunner:
             def factory(d, *, idle_timeout, total_timeout):
                 return StreamDriver(d, idle_timeout=idle_timeout, total_timeout=total_timeout)
         sd = factory(job_driver, idle_timeout=self.idle_timeout, total_timeout=total)
+        # Near-cap tightening: an unpinned job runs on the light model once
+        # month spend reaches 80% of the credit. A pinned model always wins.
+        model = job.get("model") or ("" if not self._tightened() else self.light_model)
         try:
-            turn = sd.start(job["prompt"], None, job.get("model") or None)
+            turn = sd.start(job["prompt"], None, model or None)
         except Exception as exc:
             self._finish_job(jid, job, ClaudeResult(
                 text="", session_id=None, is_error=True,
@@ -605,7 +652,48 @@ class JobRunner:
             emit_turn(self.metrics_path, f"job:{jid}", result, None, "job", False, 1)
         if status == "cancelled":
             return  # the owner asked for the cancel; no ping either way
+        if status == "failed":
+            # Only a genuine failure parks: a cancel's free-form error text
+            # (which may mention credit) returned above and never reaches this.
+            self._maybe_park(result)
         self._deliver_result(jid, job, result, status, finished_at)
+
+    # -- credit guard ----------------------------------------------------------
+
+    def _tightened(self) -> bool:
+        """True once month spend has reached 80% of the monthly credit."""
+        if self.monthly_credit <= 0 or not self.light_model or not self.metrics_path:
+            return False
+        now = time.time()
+        records = budget.read_metrics(self.metrics_path, budget.window(now, "month"))
+        return budget.summarize(records)["total_cost"] >= 0.8 * self.monthly_credit
+
+    def _maybe_park(self, result: ClaudeResult) -> None:
+        # Credit or rate-limit pushback parks ALL claiming: every further run
+        # would burn a metered call into the same wall. Pending jobs stay
+        # queued; the watcher keeps running and notices expiry.
+        if not self.budget_state_path or self.park_minutes <= 0:
+            return
+        if not is_credit_or_rate_pushback(result.error):
+            return
+        state = budget.BudgetState(self.budget_state_path)
+        now = time.time()
+        if state.park_until > now:
+            return  # already parked: one ping per park
+        until = now + self.park_minutes * 60.0
+        state.set_park_until(until)
+        hhmm = datetime.fromtimestamp(until).strftime("%H:%M")
+        self._budget_ping(
+            f"jobs parked until ~{hhmm}: the credit pool or rate limit pushed back")
+
+    def _budget_ping(self, text: str) -> None:
+        # Park/resume pings are templated strings by rule (clock/failure
+        # driven), so they go straight to the deliver seam: no event, no gate,
+        # and never a model.
+        if not _notify_send(text, token=self.discord_token,
+                            channel=self.notify_channel, sender=self.sender):
+            log.warning("budget notify undeliverable (channel=%r): %s",
+                        self.notify_channel, text)
 
     # -- delivery -------------------------------------------------------------
 

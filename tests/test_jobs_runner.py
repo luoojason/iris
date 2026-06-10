@@ -530,6 +530,201 @@ def test_cancel_landing_between_claim_and_registration_is_honored(tmp_path):
     assert store.get(jid)["status"] == "cancelled"
 
 
+# -- credit guard: parking ------------------------------------------------------
+
+
+def budget_kw(tmp_path, **over):
+    kw = dict(budget_state_path=str(tmp_path / "budget.json"), park_minutes=60.0)
+    kw.update(over)
+    return kw
+
+
+def park_pings(sent):
+    return [text for _, text, _ in sent if text.startswith("jobs parked until ~")]
+
+
+def test_credit_pushback_parks_claiming_until_expiry(tmp_path):
+    import time as _time
+
+    from iris.budget import BudgetState
+
+    store = JobStore(tmp_path / "jobs.json")
+    doomed = store.add("doomed", "doomed")
+    sent = []
+    runner, sd = make_runner(
+        store, [FakeTurn(err_result("Credit balance is too low"))],
+        sender=collect_sender(sent), concurrency=1, **budget_kw(tmp_path))
+
+    runner.check_now()
+
+    assert store.get(doomed)["status"] == "failed"
+    state_path = tmp_path / "budget.json"
+    assert BudgetState(state_path).park_until > _time.time() + 3000  # ~60m out
+    pings = park_pings(sent)
+    assert len(pings) == 1
+    assert "the credit pool or rate limit pushed back" in pings[0]
+
+    # While parked: pending jobs stay queued, no claim happens (an attempted
+    # claim would pop the empty FakeStreamDriver queue and fail loudly).
+    queued = store.add("queued work", "queued")
+    runner.check_now()
+    assert store.get(queued)["status"] == "pending"
+
+    # Expiry: one templated resume ping, the park clears, claiming resumes.
+    BudgetState(state_path).set_park_until(_time.time() - 1)
+    sd.turns.append(FakeTurn(ok_result()))
+    runner.check_now()
+    assert store.get(queued)["status"] == "done"
+    resumes = [t for _, t, _ in sent if t.startswith("jobs resumed")]
+    assert len(resumes) == 1
+    assert BudgetState(state_path).park_until == 0.0
+
+
+def test_a_second_pushback_while_parked_pings_only_once(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("one", "one")
+    store.add("two", "two")
+    sent = []
+    runner, _ = make_runner(
+        store, [FakeTurn(err_result("rate_limit_error")),
+                FakeTurn(err_result("insufficient credits"))],
+        sender=collect_sender(sent), concurrency=2, **budget_kw(tmp_path))
+
+    runner.check_now()  # both claimed in one pass; both fail with pushback
+
+    assert len(park_pings(sent)) == 1
+
+
+def test_an_ordinary_failure_does_not_park(tmp_path):
+    from iris.budget import BudgetState
+
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("doomed", "doomed")
+    sent = []
+    runner, _ = make_runner(store, [FakeTurn(err_result("the worker crashed"))],
+                            sender=collect_sender(sent), **budget_kw(tmp_path))
+
+    runner.check_now()
+
+    assert BudgetState(tmp_path / "budget.json").park_until == 0.0
+    assert park_pings(sent) == []
+
+
+def test_a_cancel_with_pushback_text_does_not_park(tmp_path):
+    # The owner killed the job; the flag wins, so its free-form error text
+    # (which may mention credit) must not park the fleet.
+    from iris.budget import BudgetState
+
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("long haul", "long")
+    turn = FakeTurn(err_result("Credit balance is too low"), hold=True, landed=True)
+    sent = []
+    runner, _ = make_runner(store, [turn], sync=False,
+                            sender=collect_sender(sent), **budget_kw(tmp_path))
+
+    runner.check_now()
+    assert runner.turn_registered.wait(timeout=2)
+    store.request_cancel(jid)
+    runner.check_now()
+    runner.workers[jid].join(timeout=2)
+
+    assert store.get(jid)["status"] == "cancelled"
+    assert BudgetState(tmp_path / "budget.json").park_until == 0.0
+    assert park_pings(sent) == []
+
+
+def test_without_a_budget_state_path_pushback_changes_nothing(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("doomed", "doomed")
+    later = store.add("later", "later")
+    sent = []
+    runner, sd = make_runner(store, [FakeTurn(err_result("Credit balance is too low"))],
+                             sender=collect_sender(sent), concurrency=1)
+
+    runner.check_now()
+    sd.turns.append(FakeTurn(ok_result()))
+    runner.check_now()  # no guard configured: claiming continues
+
+    assert store.get(later)["status"] == "done"
+    assert park_pings(sent) == []
+
+
+# -- credit guard: near-cap tightening --------------------------------------------
+
+
+def write_month_spend(tmp_path, cost):
+    import json
+    import time as _time
+
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(json.dumps({"ts": _time.time(), "conversation_id": "discord:1",
+                                "cost_usd": cost}) + "\n", encoding="utf-8")
+    return path
+
+
+def test_tightening_routes_unpinned_jobs_to_the_light_model(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("work", "title")  # no model pin
+    metrics = write_month_spend(tmp_path, 80.0)  # exactly 80%: tight
+    runner, sd = make_runner(store, [FakeTurn(ok_result())], sender=collect_sender([]),
+                             metrics_path=str(metrics), monthly_credit=100.0,
+                             light_model="claude-haiku-4-5")
+
+    runner.check_now()
+
+    assert sd.calls == [("work", None, "claude-haiku-4-5")]
+
+
+def test_tightening_always_honors_a_pinned_model(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("work", "title", model="claude-opus-4-6")
+    metrics = write_month_spend(tmp_path, 95.0)
+    runner, sd = make_runner(store, [FakeTurn(ok_result())], sender=collect_sender([]),
+                             metrics_path=str(metrics), monthly_credit=100.0,
+                             light_model="claude-haiku-4-5")
+
+    runner.check_now()
+
+    assert sd.calls == [("work", None, "claude-opus-4-6")]
+
+
+def test_no_light_model_configured_means_no_tightening(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("work", "title")
+    metrics = write_month_spend(tmp_path, 95.0)
+    runner, sd = make_runner(store, [FakeTurn(ok_result())], sender=collect_sender([]),
+                             metrics_path=str(metrics), monthly_credit=100.0)
+
+    runner.check_now()
+
+    assert sd.calls == [("work", None, None)]
+
+
+def test_below_eighty_percent_keeps_the_default_model(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("work", "title")
+    metrics = write_month_spend(tmp_path, 79.99)
+    runner, sd = make_runner(store, [FakeTurn(ok_result())], sender=collect_sender([]),
+                             metrics_path=str(metrics), monthly_credit=100.0,
+                             light_model="claude-haiku-4-5")
+
+    runner.check_now()
+
+    assert sd.calls == [("work", None, None)]
+
+
+def test_no_monthly_credit_means_no_tightening(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("work", "title")
+    metrics = write_month_spend(tmp_path, 9999.0)
+    runner, sd = make_runner(store, [FakeTurn(ok_result())], sender=collect_sender([]),
+                             metrics_path=str(metrics), light_model="claude-haiku-4-5")
+
+    runner.check_now()
+
+    assert sd.calls == [("work", None, None)]
+
+
 # -- start / recovery / watcher -----------------------------------------------
 
 

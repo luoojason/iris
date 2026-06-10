@@ -234,6 +234,35 @@ to a different model than chat. The `iris jobs` subcommand
 (`list | show <id> | cancel <id> | spawn <prompt>`) gives you the same
 registry from the shell, no model involved; `iris doctor` checks the wiring.
 
+### Cost visibility and the credit guard
+
+Iris can log one JSON line of telemetry per turn (set `IRIS_METRICS_FILE`);
+the credit guard is pure arithmetic over that file, so none of it ever spends
+a model call. `iris usage [--period day|week|month] [--json]` prints spend,
+per-model and per-transport breakdowns (job spend separated), error rate, the
+top conversations by cost, and, when `IRIS_MONTHLY_CREDIT` is set, percent
+of the credit used plus a linear month-end projection. The agent gets the same
+summary through a read-only MCP tool: add the `usage` server to your mcp
+config and allowlist `mcp__usage__usage_summary`:
+
+```json
+{ "mcpServers": { "usage": { "command": "python",
+  "args": ["-m", "iris.mcp.usage_server"],
+  "env": { "IRIS_METRICS_FILE": "iris-metrics.jsonl",
+           "IRIS_MONTHLY_CREDIT": "100" } } } }
+```
+
+With `IRIS_MONTHLY_CREDIT` set, `iris reminders-tick` also checks the month's
+spend and pings you once each as it crosses 50/80/95% of the credit
+(templated strings, like every clock-driven path), re-arming monthly via the
+`IRIS_BUDGET_STATE` file. The job runner shares that state: when a job fails
+because the credit pool or a rate limit pushed back (the driver's own error
+classifier decides), it parks claiming for `IRIS_BUDGET_PARK_MINUTES`
+(default 60). Pending jobs stay queued, one "jobs parked" ping goes out, and
+one "jobs resumed" ping follows expiry. Past 80% of the credit, jobs without
+an explicit model pin run on `IRIS_MODEL_LIGHT` when it is set; a pinned model
+is always honored, and chat routing is untouched.
+
 ### Voice messages
 
 Iris can transcribe inbound voice notes locally and for free, so you can talk to

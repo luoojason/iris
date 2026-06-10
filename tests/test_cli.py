@@ -170,6 +170,166 @@ def test_jobs_without_a_subcommand_prints_usage(monkeypatch, tmp_path, capsys):
     assert "usage" in capsys.readouterr().out.lower()
 
 
+# -- iris usage -----------------------------------------------------------------
+# Pure file arithmetic over a tmp metrics JSONL: no model call, no network.
+
+
+def metric(ts, cost, conversation_id="discord:1", model="claude-sonnet-4-6", **over):
+    rec = {"ts": ts, "conversation_id": conversation_id, "model": model,
+           "cost_usd": cost, "context_tokens": 1000, "is_error": False}
+    rec.update(over)
+    return rec
+
+
+def write_metrics(path, records):
+    import json
+
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+
+def usage_args(**over):
+    import argparse
+
+    fields = dict(period="month", as_json=False)
+    fields.update(over)
+    return argparse.Namespace(**fields)
+
+
+def test_usage_without_a_metrics_file_is_friendly(capsys):
+    from iris.cli import usage
+    from iris.config import Config
+
+    rc = usage(Config(metrics_file=""), usage_args())
+    assert rc == 0
+    assert "IRIS_METRICS_FILE" in capsys.readouterr().out
+
+
+def test_usage_with_a_missing_file_is_friendly(tmp_path, capsys):
+    from iris.cli import usage
+    from iris.config import Config
+
+    rc = usage(Config(metrics_file=str(tmp_path / "absent.jsonl")), usage_args())
+    assert rc == 0
+    assert "No metrics recorded" in capsys.readouterr().out
+
+
+def test_usage_renders_the_shared_summary_for_the_month(tmp_path, capsys):
+    from datetime import datetime
+
+    from iris.cli import usage
+    from iris.config import Config
+
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [
+        metric(datetime(2026, 6, 5).timestamp(), 0.20, model="claude-opus-4-6"),
+        metric(datetime(2026, 6, 10).timestamp(), 0.05, conversation_id="job:3"),
+        metric(datetime(2026, 5, 20).timestamp(), 9.99),  # last month: excluded
+    ])
+    rc = usage(Config(metrics_file=str(path)), usage_args(),
+               now=datetime(2026, 6, 16).timestamp())
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "spend: $0.25 (2 turns)" in out
+    assert "claude-opus-4-6: $0.20" in out
+    assert "job: $0.05" in out  # job spend separated via the transport breakdown
+    assert "used" not in out    # no credit configured: no credit lines
+
+
+def test_usage_period_day_narrows_the_window(tmp_path, capsys):
+    from datetime import datetime
+
+    from iris.cli import usage
+    from iris.config import Config
+
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [
+        metric(datetime(2026, 6, 16, 1).timestamp(), 0.10),
+        metric(datetime(2026, 6, 15).timestamp(), 5.00),  # yesterday: excluded
+    ])
+    rc = usage(Config(metrics_file=str(path)), usage_args(period="day"),
+               now=datetime(2026, 6, 16, 12).timestamp())
+
+    assert rc == 0
+    assert "spend: $0.10 (1 turns)" in capsys.readouterr().out
+
+
+def test_usage_credit_and_projection_lines_when_a_credit_is_set(tmp_path, capsys):
+    from datetime import datetime
+
+    from iris.cli import usage
+    from iris.config import Config
+
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [metric(datetime(2026, 6, 5).timestamp(), 40.0)])
+    rc = usage(Config(metrics_file=str(path), monthly_credit=100.0), usage_args(),
+               now=datetime(2026, 6, 16).timestamp())  # half of June elapsed
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "credit: $40.00 of $100.00 (40.0% used)" in out
+    assert "projected month end: $80.00" in out
+
+
+def test_usage_credit_lines_stay_off_outside_the_month_period(tmp_path, capsys):
+    # Day spend against a monthly credit would mislead; month period only.
+    from datetime import datetime
+
+    from iris.cli import usage
+    from iris.config import Config
+
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [metric(datetime(2026, 6, 16, 1).timestamp(), 40.0)])
+    usage(Config(metrics_file=str(path), monthly_credit=100.0),
+          usage_args(period="day"), now=datetime(2026, 6, 16, 12).timestamp())
+
+    assert "used" not in capsys.readouterr().out
+
+
+def test_usage_json_dumps_the_summary_dict(tmp_path, capsys):
+    import json
+    from datetime import datetime
+
+    from iris.cli import usage
+    from iris.config import Config
+
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [
+        metric(datetime(2026, 6, 5).timestamp(), 0.20),
+        metric(datetime(2026, 6, 10).timestamp(), 0.05, conversation_id="job:3"),
+    ])
+    rc = usage(Config(metrics_file=str(path)), usage_args(as_json=True),
+               now=datetime(2026, 6, 16).timestamp())
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["turns"] == 2
+    assert abs(data["total_cost"] - 0.25) < 1e-9
+    assert abs(data["by_transport"]["job"] - 0.05) < 1e-9
+
+
+def test_usage_via_main_never_touches_network_or_subprocess(monkeypatch, tmp_path, capsys):
+    import socket
+    import subprocess as sp
+    import time
+
+    from iris.cli import main
+
+    def explode(*args, **kwargs):
+        raise AssertionError("iris usage must not open sockets or spawn processes")
+
+    monkeypatch.setattr(socket, "socket", explode)
+    monkeypatch.setattr(sp, "Popen", explode)
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [metric(time.time(), 0.30)])
+    monkeypatch.setenv("IRIS_METRICS_FILE", str(path))
+    monkeypatch.delenv("IRIS_MONTHLY_CREDIT", raising=False)
+    monkeypatch.delenv("IRIS_SKILLS_DIR", raising=False)
+
+    assert main(["usage"]) == 0
+    assert "spend: $0.30" in capsys.readouterr().out
+
+
 # -- doctor: jobs wiring warnings ----------------------------------------------
 
 
