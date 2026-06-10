@@ -7,15 +7,18 @@ new session id. That lives here, once, so adding a transport is just wiring.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 import time
+from typing import Optional
 
 from .config import Config
 from .driver import ClaudeDriver, ClaudeResult
 from .metrics import emit_turn
-from .router import choose_model_explained
+from .router import choose_model, choose_model_explained
 from .sessions import SessionStore
+from .stream_driver import StreamDriver, StreamTurn
 
 log = logging.getLogger("iris.agent")
 
@@ -67,9 +70,13 @@ class Agent:
         light_model: str = "",
         metrics_file: str = "",
         trivial_max_chars: int = 140,
+        stream_driver: Optional[StreamDriver] = None,
     ):
         self.driver = driver
         self.store = store
+        # Built only when live interrupt is enabled; the one-shot driver is always
+        # present and remains the fallback path.
+        self.stream_driver = stream_driver
         # When set, trivial turns are routed to this lighter model to save credit;
         # everything else uses the driver's default (strong) model.
         self.light_model = light_model
@@ -148,6 +155,25 @@ class Agent:
         if due_to_compact:
             self._launch_compaction(conversation_id)
         return result
+
+    def live_turn(self, conversation_id: str, text: str, has_attachments: bool = False) -> "LiveTurn":
+        """Begin a turn the user can redirect mid-flight (live interrupt).
+
+        Returns a :class:`LiveTurn` the caller drives: it injects follow-ups into
+        the running turn, awaits the reply, and on completion persists the session
+        and triggers compaction, exactly like :meth:`respond` but spread across the
+        life of a streaming turn. The model is routed from the opening message,
+        since the process is launched before any redirect can arrive.
+        """
+        if self.stream_driver is None:
+            raise RuntimeError("live_turn requires a stream_driver (live interrupt is off)")
+        model = choose_model(
+            text,
+            light_model=self.light_model or None,
+            has_attachments=has_attachments,
+            trivial_max_chars=self.trivial_max_chars,
+        )
+        return LiveTurn(self, conversation_id, text, model)
 
     def _should_compact(self, conversation_id: str, result: ClaudeResult) -> bool:
         """Whether this conversation is big enough to condense onto a fresh session."""
@@ -251,6 +277,13 @@ class Agent:
             timeout_max_retries=config.timeout_max_retries,
         )
         store = SessionStore(config.session_store_path)
+        stream_driver = None
+        if config.live_interrupt:
+            stream_driver = StreamDriver(
+                driver,
+                idle_timeout=config.stream_idle_timeout,
+                total_timeout=config.stream_total_timeout,
+            )
         return cls(
             driver,
             store,
@@ -259,4 +292,124 @@ class Agent:
             light_model=config.light_model,
             metrics_file=config.metrics_file,
             trivial_max_chars=config.trivial_max_chars,
+            stream_driver=stream_driver,
         )
+
+
+class LiveTurn:
+    """One streaming turn, driven across its life: launch, redirect, finish.
+
+    A live turn cannot be a single synchronous call the way :meth:`Agent.respond`
+    is, because the user keeps talking into it while it runs. So its lifecycle is
+    spread over a few awaits, but the invariants are the same as ``respond``:
+
+    * The conversation's lock is held from the moment the session is read until
+      the new session is written, for the *whole* turn. The runner already serializes
+      turns; this lock additionally keeps a background compaction from resuming the
+      same session in parallel and forking the transcript.
+    * A resumed session that is dead or has overflowed is dropped and the turn is
+      relaunched once on a fresh session, identically to ``respond``.
+    * Compaction is decided inside the lock but launched outside it, so the user's
+      reply is never delayed by it.
+
+    Drive order: :meth:`begin`, then :meth:`inject` any number of times while
+    :meth:`is_open`, then :meth:`result` for the reply, then :meth:`aftermath` for
+    any stray follow-ups. :meth:`close` is idempotent and always releases the lock.
+    """
+
+    def __init__(self, agent: "Agent", conversation_id: str, prompt: str, model: Optional[str]):
+        self._agent = agent
+        self._cid = conversation_id
+        self._prompt = prompt
+        self._model = model
+        self._lock = agent._lock_for(conversation_id)
+        self._have_lock = False
+        self._turn: Optional[StreamTurn] = None
+        self._final: Optional[ClaudeResult] = None
+        self._due_to_compact = False
+        self._done = False
+
+    async def begin(self) -> None:
+        """Acquire the conversation lock and launch the streaming process."""
+        await asyncio.to_thread(self._lock.acquire)
+        self._have_lock = True
+        try:
+            session_id = self._agent.store.get(self._cid)
+            self._turn = await asyncio.to_thread(
+                self._agent.stream_driver.start, self._prompt, session_id, self._model
+            )
+        except BaseException:
+            self.close()
+            raise
+
+    def is_open(self) -> bool:
+        return self._turn is not None and self._turn.open
+
+    async def inject(self, text: str) -> bool:
+        """Feed a follow-up into the running turn. False if it already closed."""
+        if self._turn is None:
+            return False
+        return await asyncio.to_thread(self._turn.inject, text)
+
+    async def result(self) -> ClaudeResult:
+        """Await the reply, retrying once on a dead or overflowed session."""
+        if self._final is not None:
+            return self._final
+        result = await asyncio.to_thread(self._resolve)
+        self._final = result
+        return result
+
+    def _resolve(self) -> ClaudeResult:
+        turn = self._turn
+        assert turn is not None
+        # A success result is sendable the instant it lands; an error must wait
+        # for the process to finish so stderr (the real cause) is folded in.
+        result = turn.wait_primary()
+        if result is None or result.is_error:
+            turn.wait_finished()
+            result = turn.wait_primary()
+
+        session_id = self._agent.store.get(self._cid)
+        if result is not None and result.is_error and session_id and (
+            _is_dead_session(result) or _is_overflow(result)
+        ):
+            if _is_overflow(result):
+                log.warning("conversation %s overflowed its context; starting fresh", self._cid)
+            self._agent.store.clear(self._cid)
+            turn = self._agent.stream_driver.start(self._prompt, None, self._model)
+            self._turn = turn
+            turn.wait_finished()
+            result = turn.wait_primary()
+
+        if result is None:
+            result = ClaudeResult(text="", session_id=session_id, is_error=True,
+                                  error="live turn ended without a result")
+        if result.session_id:
+            self._agent.store.set(self._cid, result.session_id)
+        self._due_to_compact = not result.is_error and self._agent._should_compact(self._cid, result)
+        return result
+
+    async def aftermath(self) -> list[ClaudeResult]:
+        """Wait out the process, release the lock, kick off compaction, return strays."""
+        try:
+            turn = self._turn
+            if turn is not None:
+                await asyncio.to_thread(turn.wait_finished)
+            strays = turn.strays if turn is not None else []
+        finally:
+            self.close()
+        if self._due_to_compact:
+            self._agent._launch_compaction(self._cid)
+        return strays
+
+    def close(self) -> None:
+        """Release the conversation lock if held. Safe to call more than once."""
+        if self._done:
+            return
+        self._done = True
+        if self._have_lock:
+            self._have_lock = False
+            try:
+                self._lock.release()
+            except RuntimeError:
+                pass

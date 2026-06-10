@@ -173,9 +173,29 @@ class ClaudeDriver:
             return DANGEROUS_BUILTINS
         return None
 
-    def build_command(self, session_id: Optional[str] = None, model: Optional[str] = None) -> list[str]:
-        """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin."""
-        cmd: list[str] = [self.claude_bin, "-p", "--output-format", "json"]
+    def build_command(
+        self,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+        stream: bool = False,
+    ) -> list[str]:
+        """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin.
+
+        With ``stream=True`` the command uses the realtime stream-json transport
+        (input and output), which is what the live-interrupt driver needs to feed
+        messages into a turn while it runs. Everything else (resume, model,
+        persona, tools, the built-in denylist) is identical, so the one-shot and
+        streaming transports stay in lockstep, including the security hardening.
+        """
+        if stream:
+            cmd: list[str] = [
+                self.claude_bin, "-p",
+                "--input-format", "stream-json",
+                "--output-format", "stream-json",
+                "--verbose",
+            ]
+        else:
+            cmd = [self.claude_bin, "-p", "--output-format", "json"]
         if session_id:
             cmd += ["--resume", session_id]
         chosen_model = model or self.model
@@ -319,39 +339,8 @@ class ClaudeDriver:
             )
 
         returncode = getattr(proc, "returncode", 0) or 0
-        is_error = (
-            bool(obj.get("is_error"))
-            or obj.get("subtype") not in (None, "success")
-            or returncode != 0
-        )
-        model = None
-        usage = obj.get("modelUsage")
-        if isinstance(usage, dict) and usage:
-            model = next(iter(usage))
-
-        context_tokens = _context_tokens(obj.get("usage"))
-
-        error = None
-        if is_error:
-            error = (
-                obj.get("error")
-                or obj.get("result")
-                or obj.get("subtype")
-                or f"claude exited {returncode}"
-            )
-
-        return ClaudeResult(
-            text=obj.get("result") or "",
-            session_id=obj.get("session_id") or session_id,
-            is_error=is_error,
-            error=error,
-            cost_usd=obj.get("total_cost_usd"),
-            model=model,
-            duration_ms=obj.get("duration_ms"),
-            num_turns=obj.get("num_turns"),
-            context_tokens=context_tokens,
-            raw=obj,
-        )
+        stderr = (getattr(proc, "stderr", "") or "").strip()
+        return parse_result_event(obj, session_id, returncode=returncode, stderr=stderr)
 
     def _is_rate_limited(self, result: ClaudeResult) -> bool:
         blob = f"{result.error or ''} {result.raw.get('api_error_status', '')}".lower()
@@ -380,6 +369,61 @@ class ClaudeDriver:
         if rate_limited:
             delay *= 4
         self.sleep(delay)
+
+
+def parse_result_event(
+    obj: dict,
+    fallback_session_id: Optional[str] = None,
+    *,
+    returncode: int = 0,
+    stderr: str = "",
+) -> ClaudeResult:
+    """Turn one ``result`` JSON object into a :class:`ClaudeResult`.
+
+    Shared by both transports: the one-shot driver parses the single result it
+    reads from stdout, and the streaming driver parses each ``result`` event off
+    its event stream. ``stderr`` is folded into the error because the stream
+    transport reports some failures (notably a dead ``--resume`` session, "No
+    conversation found ...") only on stderr while the result event carries an
+    empty error field; without the fold the dead-session and overflow retries
+    upstream would never recognize the failure.
+    """
+    is_error = (
+        bool(obj.get("is_error"))
+        or obj.get("subtype") not in (None, "success")
+        or returncode != 0
+    )
+    model = None
+    usage = obj.get("modelUsage")
+    if isinstance(usage, dict) and usage:
+        model = next(iter(usage))
+
+    context_tokens = _context_tokens(obj.get("usage"))
+
+    error = None
+    if is_error:
+        error = (
+            obj.get("error")
+            or obj.get("result")
+            or (stderr or None)
+            or obj.get("subtype")
+            or f"claude exited {returncode}"
+        )
+        if stderr and error and stderr not in error:
+            error = f"{error}: {stderr}"
+
+    return ClaudeResult(
+        text=obj.get("result") or "",
+        session_id=obj.get("session_id") or fallback_session_id,
+        is_error=is_error,
+        error=error,
+        cost_usd=obj.get("total_cost_usd"),
+        model=model,
+        duration_ms=obj.get("duration_ms"),
+        num_turns=obj.get("num_turns"),
+        context_tokens=context_tokens,
+        raw=obj,
+    )
 
 
 def _context_tokens(usage) -> Optional[int]:

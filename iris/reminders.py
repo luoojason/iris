@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None
 
 _REL = re.compile(r"^\+(\d+)\s*([mhd])$", re.IGNORECASE)
+_EVERY = re.compile(r"^(?:every\s+)?(\d+)\s*([mhd])$", re.IGNORECASE)
 _UNIT = {"m": 60, "h": 3600, "d": 86400}
 
 
@@ -47,6 +48,24 @@ def parse_when(when: str, now: Optional[float] = None) -> float:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.timestamp()
+
+
+def parse_every(every: str) -> int:
+    """Resolve a recurrence like 'every 1d' / '2h' / '30m' to a period in seconds.
+
+    A bare unit string ('1d') works too, so 'every' is optional sugar. Returns 0
+    for an empty spec (a one-shot reminder); raises on anything unparseable.
+    """
+    text = (every or "").strip()
+    if not text:
+        return 0
+    match = _EVERY.match(text)
+    if not match:
+        raise ValueError(f"could not parse recurrence {every!r}; use every 30m, every 2h, or every 1d")
+    seconds = int(match.group(1)) * _UNIT[match.group(2).lower()]
+    if seconds <= 0:
+        raise ValueError("a recurrence must be a positive interval")
+    return seconds
 
 
 def fmt_ts(ts: float) -> str:
@@ -87,11 +106,14 @@ class ReminderStore:
             json.dump(items, handle, indent=2, ensure_ascii=False)
         os.replace(tmp, self.path)
 
-    def add(self, due_ts: float, text: str, channel_id: str) -> int:
+    def add(self, due_ts: float, text: str, channel_id: str, repeat_secs: int = 0) -> int:
         with self._locked():
             items = self._load()
             new_id = max((int(i.get("id", 0)) for i in items), default=0) + 1
-            items.append({"id": new_id, "due_ts": due_ts, "text": text, "channel_id": channel_id})
+            items.append({
+                "id": new_id, "due_ts": due_ts, "text": text,
+                "channel_id": channel_id, "repeat_secs": int(repeat_secs or 0),
+            })
             self._save(items)
         return new_id
 
@@ -108,13 +130,28 @@ class ReminderStore:
             return True
 
     def pop_due(self, now: Optional[float] = None) -> list[dict]:
-        """Atomically remove and return all jobs due at or before ``now``."""
+        """Atomically take all jobs due at or before ``now`` and return them.
+
+        A one-shot job is removed. A recurring job (``repeat_secs`` > 0) is
+        rescheduled in place: it fires once now and its next ``due_ts`` is set
+        forward from ``now``, not from its old due time. So a tick that missed a
+        window (host asleep, cron skipped) delivers one reminder and resumes the
+        cadence, rather than replaying every occurrence it slept through.
+        """
         now = time.time() if now is None else now
         with self._locked():
             items = self._load()
             due = [i for i in items if i.get("due_ts", 0) <= now]
-            if due:
-                self._save([i for i in items if i.get("due_ts", 0) > now])
+            if not due:
+                return []
+            kept = [i for i in items if i.get("due_ts", 0) > now]
+            for job in due:
+                period = int(job.get("repeat_secs", 0) or 0)
+                if period > 0:
+                    nxt = dict(job)
+                    nxt["due_ts"] = now + period
+                    kept.append(nxt)
+            self._save(kept)
             return due
 
 
