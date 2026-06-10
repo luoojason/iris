@@ -103,6 +103,105 @@ class _LiveAdapterHandle:
         self._live.close()
 
 
+def bracket_run_turn(run_turn, job_runner, conversation_id: str, channel_id: str):
+    """Wrap a one-shot run_turn so the job runner sees the turn's window.
+
+    turn_started/turn_finished bracket every chat turn so a job spawned
+    mid-turn (the MCP tools cannot see their calling conversation) is stamped
+    with this conversation and channel. Pure and module-level, like
+    should_handle, so it is unit-testable without the Discord SDK. With no
+    job runner the turn is returned untouched.
+    """
+    if job_runner is None:
+        return run_turn
+
+    async def wrapped(prompt: str, has_attachments: bool):
+        job_runner.turn_started(conversation_id, channel_id)
+        try:
+            return await run_turn(prompt, has_attachments)
+        finally:
+            job_runner.turn_finished(conversation_id)
+
+    return wrapped
+
+
+class _BracketedLiveHandle:
+    """Bracket a live turn's window from begin() to close().
+
+    LiveConversationRunner calls close() on every exit path (including a
+    failed begin), so closing the window there can never leak it. The window
+    spans the whole live turn, injections included, and closes exactly once
+    however many times close() is called.
+    """
+
+    def __init__(self, handle, job_runner, conversation_id: str, channel_id: str):
+        self._handle = handle
+        self._job_runner = job_runner
+        self._conversation_id = conversation_id
+        self._channel_id = channel_id
+        self._window_open = False
+
+    async def begin(self) -> None:
+        self._job_runner.turn_started(self._conversation_id, self._channel_id)
+        self._window_open = True
+        await self._handle.begin()
+
+    def is_open(self) -> bool:
+        return self._handle.is_open()
+
+    async def inject(self, text: str) -> bool:
+        return await self._handle.inject(text)
+
+    async def result(self) -> Optional[str]:
+        return await self._handle.result()
+
+    async def aftermath(self) -> list[str]:
+        return await self._handle.aftermath()
+
+    def close(self) -> None:
+        if self._window_open:
+            self._window_open = False
+            self._job_runner.turn_finished(self._conversation_id)
+        self._handle.close()
+
+
+def make_job_deliver(loop_ref, resolve_channel, resolve_runner):
+    """Build the fold-back deliver(channel_id, conversation_id, text) -> bool.
+
+    Called by JobRunner from a worker thread, so the work is marshaled onto
+    the client's event loop with run_coroutine_threadsafe. Everything is
+    resolved AT DELIVERY TIME: ``loop_ref()`` returns the loop captured in
+    on_ready (None before the client connects), ``resolve_channel`` is an
+    async (channel_id) -> channel-or-None, and ``resolve_runner`` is the
+    adapter's (conversation_id, channel) -> ConversationRunner lookup, so a
+    stale runner popped by !reset is never reused. Any failure returns False
+    and the runner's notify-spine fallback fires instead.
+    """
+
+    def deliver(channel_id: str, conversation_id: str, text: str) -> bool:
+        loop = loop_ref()
+        if loop is None:
+            return False  # not connected yet; let the spine handle it
+
+        async def submit() -> bool:
+            channel = await resolve_channel(channel_id)
+            if channel is None:
+                return False
+            runner = resolve_runner(conversation_id, channel)
+            if runner is None:
+                return False
+            runner.submit(Turn(text=text))
+            return True
+
+        try:
+            return bool(asyncio.run_coroutine_threadsafe(submit(), loop).result(timeout=10))
+        except Exception:
+            log.warning("job fold-back delivery failed", exc_info=True)
+            return False
+
+    return deliver
+
+
 def should_handle(message, bot_user, config) -> bool:
     """Decide whether to answer a message. Pure, so it is unit-testable.
 
@@ -149,7 +248,7 @@ async def _save_attachments(attachments, base_dir: str, conversation_id: str) ->
     return paths
 
 
-def build_client(config: Config, agent: Agent):
+def build_client(config: Config, agent: Agent, job_runner=None):
     """Build (but do not start) the Discord client. Returns the client."""
     try:
         import discord  # lazy: only needed when actually running on Discord
@@ -167,6 +266,11 @@ def build_client(config: Config, agent: Agent):
     # that arrive while a turn is in flight, so the user can keep talking.
     runners: dict[str, ConversationRunner] = {}
 
+    # The client's event loop, captured in on_ready so the job deliver
+    # callback (called from worker threads) can marshal onto it. Before the
+    # client connects this stays None and delivery falls back to the spine.
+    loop_box: dict[str, object] = {"loop": None}
+
     def _clean_content(message) -> str:
         text = message.content or ""
         if client.user:
@@ -183,10 +287,17 @@ def build_client(config: Config, agent: Agent):
             for piece in chunk_text(text, DISCORD_LIMIT):
                 await channel.send(piece)
 
+        # For a thread channel this IS the thread's own id (the conversation
+        # key already uses it), so replies and job stamps stay in the thread.
+        channel_id = str(channel.id)
+
         if config.live_interrupt and agent.stream_driver is not None:
             # Live interrupt: a mid-turn message redirects the running turn.
-            def start_turn(prompt: str, has_attachments: bool) -> _LiveAdapterHandle:
-                return _LiveAdapterHandle(agent.live_turn(conversation_id, prompt, has_attachments))
+            def start_turn(prompt: str, has_attachments: bool):
+                handle = _LiveAdapterHandle(agent.live_turn(conversation_id, prompt, has_attachments))
+                if job_runner is None:
+                    return handle
+                return _BracketedLiveHandle(handle, job_runner, conversation_id, channel_id)
 
             runner = LiveConversationRunner(
                 start_turn=start_turn,
@@ -209,7 +320,7 @@ def build_client(config: Config, agent: Agent):
             return _reply_text(result, placeholder=True)
 
         runner = ConversationRunner(
-            run_turn=run_turn,
+            run_turn=bracket_run_turn(run_turn, job_runner, conversation_id, channel_id),
             send=send,
             ack_line=_ack_line,
             typing=channel.typing,
@@ -218,8 +329,28 @@ def build_client(config: Config, agent: Agent):
         runners[conversation_id] = runner
         return runner
 
+    async def _resolve_channel(channel_id: str):
+        try:
+            numeric_id = int(channel_id)
+        except (TypeError, ValueError):
+            return None
+        channel = client.get_channel(numeric_id)
+        if channel is not None:
+            return channel
+        try:
+            return await client.fetch_channel(numeric_id)
+        except Exception:
+            log.warning("could not resolve job channel %s", channel_id, exc_info=True)
+            return None
+
+    if job_runner is not None:
+        job_runner.deliver = make_job_deliver(
+            lambda: loop_box["loop"], _resolve_channel, _runner_for
+        )
+
     @client.event
     async def on_ready():
+        loop_box["loop"] = asyncio.get_running_loop()
         log.info("Connected to Discord as %s", client.user)
 
     @client.event
@@ -272,5 +403,19 @@ def run(config: Optional[Config] = None) -> None:
             "single-user only; set it to your id."
         )
     agent = Agent.from_config(config)
-    client = build_client(config, agent)
-    client.run(config.discord_token, log_handler=None)
+    job_runner = None
+    if config.jobs_enabled:
+        from .jobs import JobRunner
+
+        job_runner = JobRunner.from_config(config, agent.driver)
+    client = build_client(config, agent, job_runner=job_runner)
+    if job_runner is not None:
+        # start() recovers orphaned jobs and begins watching the registry; the
+        # watcher's first poll fires check_now, so jobs queued while the bot
+        # was down are claimed within one poll.
+        job_runner.start()
+    try:
+        client.run(config.discord_token, log_handler=None)
+    finally:
+        if job_runner is not None:
+            job_runner.stop()

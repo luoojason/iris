@@ -120,6 +120,25 @@ class Config:
     # case usage tokens are ever unavailable. 0 disables it.
     compact_every: int = 60
 
+    # Background jobs (the JobRunner). Opt-in: nothing job-related runs unless
+    # jobs_enabled is true. The registry file is shared with the jobs MCP
+    # server, which reads IRIS_JOBS_FILE from its own env block in the mcp
+    # config (the driver strips IRIS_* from the claude child).
+    jobs_enabled: bool = False
+    jobs_file: str = "iris-jobs.json"
+    # How many jobs may run at once; each is a full claude run, so keep this
+    # small to respect subscription rate limits.
+    job_concurrency: int = 2
+    # Per-job stream watchdog: seconds of silence before a job turn is hung.
+    job_idle_timeout: float = 300.0
+    # How often the watcher stat()s the registry file. Pure file I/O.
+    job_poll_seconds: float = 2.0
+    # Optional model override for job runs; empty uses the chat driver's model.
+    job_model: str = ""
+    # Ceiling on the normally-denied tools a job may be granted. Default Task
+    # only (subagent fan-out); Bash/Write/Edit stay denied unless widened.
+    job_grants: list[str] = field(default_factory=lambda: ["Task"])
+
     @classmethod
     def from_env(cls, *, dotenv: str | os.PathLike[str] = ".env") -> "Config":
         load_dotenv(dotenv)
@@ -160,6 +179,15 @@ class Config:
             notify_channel=os.environ.get("IRIS_NOTIFY_CHANNEL", ""),
             watch_min_seconds=float(os.environ.get("IRIS_WATCH_MIN_SECONDS", "30")),
             notify_persona=os.environ.get("IRIS_NOTIFY_PERSONA") or None,
+            jobs_enabled=_flag(os.environ.get("IRIS_JOBS"), False),
+            jobs_file=os.environ.get("IRIS_JOBS_FILE", "iris-jobs.json"),
+            job_concurrency=int(os.environ.get("IRIS_JOB_CONCURRENCY", "2")),
+            job_idle_timeout=float(os.environ.get("IRIS_JOB_IDLE_TIMEOUT", "300")),
+            job_poll_seconds=float(os.environ.get("IRIS_JOB_POLL_SECONDS", "2.0")),
+            job_model=os.environ.get("IRIS_JOB_MODEL", ""),
+            # The unset default is "Task"; an explicitly empty value is a
+            # deliberate no-grants-at-all ceiling, so only None falls back.
+            job_grants=_split(os.environ.get("IRIS_JOB_GRANTS", "Task")),
         )
 
 

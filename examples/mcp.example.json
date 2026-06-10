@@ -6,6 +6,13 @@
       "env": {
         "IRIS_MEMORY_FILE": "iris-memory.json"
       }
+    },
+    "jobs": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.jobs_server"],
+      "env": {
+        "IRIS_JOBS_FILE": "iris-jobs.json"
+      }
     }
   }
 }

@@ -110,3 +110,49 @@ def test_notify_defaults():
     assert cfg.notify_channel == ""
     assert cfg.watch_min_seconds == 30.0
     assert cfg.notify_persona is None
+
+
+def test_jobs_defaults(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.jobs_enabled is False  # the whole runner is opt-in
+    assert cfg.jobs_file == "iris-jobs.json"
+    assert cfg.job_concurrency == 2
+    assert cfg.job_idle_timeout == 300.0
+    assert cfg.job_poll_seconds == 2.0
+    assert cfg.job_model == ""
+    assert cfg.job_grants == ["Task"]
+
+
+def test_jobs_fields_from_env(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_JOBS", "true")
+    monkeypatch.setenv("IRIS_JOBS_FILE", "/tmp/jobs.json")
+    monkeypatch.setenv("IRIS_JOB_CONCURRENCY", "4")
+    monkeypatch.setenv("IRIS_JOB_IDLE_TIMEOUT", "120")
+    monkeypatch.setenv("IRIS_JOB_POLL_SECONDS", "0.5")
+    monkeypatch.setenv("IRIS_JOB_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("IRIS_JOB_GRANTS", "Task, Bash")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.jobs_enabled is True
+    assert cfg.jobs_file == "/tmp/jobs.json"
+    assert cfg.job_concurrency == 4
+    assert cfg.job_idle_timeout == 120.0
+    assert cfg.job_poll_seconds == 0.5
+    assert cfg.job_model == "claude-haiku-4-5"
+    assert cfg.job_grants == ["Task", "Bash"]
+
+
+def test_job_grants_explicitly_empty_means_no_grants(tmp_path, monkeypatch):
+    # Setting the ceiling to an empty string is a deliberate "no grants at
+    # all", distinct from leaving it unset (which defaults to Task).
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_JOB_GRANTS", "")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.job_grants == []

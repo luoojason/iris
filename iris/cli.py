@@ -55,6 +55,21 @@ class _Spinner:
             sys.stdout.flush()
 
 
+def _mcp_config_has_jobs_server(mcp_config: str | None) -> bool:
+    """True when the mcp config is readable JSON whose mcpServers has 'jobs'."""
+    if not mcp_config:
+        return False
+    import json
+
+    try:
+        with open(mcp_config, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return isinstance(servers, dict) and "jobs" in servers
+
+
 def doctor(config: Config, probe: bool = True) -> int:
     """Verify the claude binary is present and actually signed in."""
     path = shutil.which(config.claude_bin)
@@ -111,6 +126,17 @@ def doctor(config: Config, probe: bool = True) -> int:
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
         print("  skipped (it may even claim it acted). Allowlist the tools you want,")
         print("  e.g. IRIS_ALLOWED_TOOLS=mcp__memory__recall,mcp__memory__remember")
+    has_jobs_server = _mcp_config_has_jobs_server(config.mcp_config)
+    if has_jobs_server and not any(t.startswith("mcp__jobs__") for t in config.allowed_tools):
+        print("WARNING: the mcp config has a 'jobs' server but no mcp__jobs__ tool is")
+        print("  allowlisted, so the agent's job calls will be silently skipped.")
+        print("  Add the five jobs tools to IRIS_ALLOWED_TOOLS:")
+        print("  mcp__jobs__spawn_job, mcp__jobs__list_jobs, mcp__jobs__job_status,")
+        print("  mcp__jobs__cancel_job, mcp__jobs__job_result")
+    if config.jobs_enabled and not has_jobs_server:
+        print("WARNING: IRIS_JOBS is on but the mcp config has no 'jobs' server, so")
+        print("  the model cannot spawn jobs (only 'iris jobs spawn' can queue them).")
+        print("  Add the jobs entry from examples/mcp.example.json to your mcp config.")
     if not config.allowed_user_ids:
         print("WARNING: IRIS_ALLOWED_USER_IDS is empty, so a network transport will")
         print("  answer ANYONE who can reach it (any DM sender, any group member).")
@@ -171,6 +197,98 @@ def reminders_tick(config: Config) -> int:
     return 0
 
 
+def _fmt_age(seconds: float) -> str:
+    """Render an age like the jobs MCP server: whole hours past 60m, else minutes."""
+    seconds = max(0, int(seconds))
+    return f"{seconds // 3600}h" if seconds >= 3600 else f"{seconds // 60}m"
+
+
+def jobs(config: Config, args) -> int:
+    """Operate the background-job registry from the shell: pure file ops, no model.
+
+    The bot's runner (and the jobs MCP server, for the agent) share the same
+    registry file, so a job spawned here is claimed by a running bot within one
+    watcher poll. Formatting mirrors the MCP server's friendly strings without
+    importing it, so this surface works even without the mcp extra.
+    """
+    import time as _time
+
+    from .jobs import JobStore
+
+    store = JobStore(config.jobs_file)
+    command = getattr(args, "jobs_command", None)
+
+    if command == "spawn":
+        prompt = " ".join(args.prompt).strip()
+        if not prompt:
+            print("usage: iris jobs spawn PROMPT... [--title T] [--model M] "
+                  "[--timeout-minutes N] [--grants G]")
+            return 2
+        from .driver import DANGEROUS_BUILTINS
+
+        grants = [g.strip() for g in (args.grants or "").split(",") if g.strip()]
+        for name in grants:
+            if name not in DANGEROUS_BUILTINS:
+                print(f"Unknown grant {name!r}; valid grants: "
+                      f"{', '.join(DANGEROUS_BUILTINS)}.")
+                return 2
+        minutes = int(args.timeout_minutes or 0)
+        title = (args.title or "").strip() or prompt.splitlines()[0][:60]
+        job_id = store.add(prompt, title, model=(args.model or "").strip(),
+                           timeout_s=minutes * 60 if minutes > 0 else None,
+                           grants=grants)
+        print(f"Job #{job_id} queued: {title}")
+        if not config.jobs_enabled:
+            print("(note: IRIS_JOBS is off, so no runner will pick this up)")
+        return 0
+
+    if command == "list":
+        wanted = (args.status or "").strip().lower() or None
+        items = store.all(status=wanted)
+        if not items:
+            print(f"No {wanted} jobs." if wanted else "No jobs.")
+            return 0
+        now = _time.time()
+        for job in reversed(items):  # all() sorts by id, so newest first
+            stamp = job.get("started_at") or job.get("created_at") or now
+            print(f"#{job['id']} [{job.get('status')} {_fmt_age(now - stamp)}] "
+                  f"{job.get('title') or '(untitled)'}")
+        return 0
+
+    if command == "show":
+        job = store.get(args.id)
+        if job is None:
+            print(f"No job #{args.id}.")
+            return 1
+        now = _time.time()
+        print(f"Job #{job['id']}: {job.get('title') or '(untitled)'}")
+        print(f"status: {job.get('status')}")
+        for label, stamp in (("created", job.get("created_at")),
+                             ("started", job.get("started_at")),
+                             ("finished", job.get("finished_at"))):
+            if stamp is not None:
+                print(f"{label} {_fmt_age(now - float(stamp))} ago")
+        if job.get("model"):
+            print(f"model: {job['model']}")
+        if job.get("grants"):
+            print(f"grants: {', '.join(job['grants'])}")
+        if job.get("cancel_requested"):
+            print("cancel requested")
+        result = job.get("result") or {}
+        if job.get("status") == "failed" and result.get("error"):
+            print(f"error: {result['error']}")
+        elif (result.get("text") or "").strip():
+            print(f"result:\n{result['text'].strip()}")
+        return 0
+
+    if command == "cancel":
+        print(store.request_cancel(args.id))
+        return 0
+
+    print("usage: iris jobs {list,show,cancel,spawn} ...")
+    return 2
+
+
 def skills(config: Config) -> int:
     """List the skills the agent can use (and link IRIS_SKILLS_DIR if set)."""
     from .skills import discover, link_skills
@@ -201,6 +319,23 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    jobs_parser = sub.add_parser("jobs", help="inspect and queue background jobs")
+    jobs_sub = jobs_parser.add_subparsers(dest="jobs_command")
+    jobs_list = jobs_sub.add_parser("list", help="list jobs, newest first")
+    jobs_list.add_argument("--status", default="",
+                           help="filter: pending|running|done|failed|cancelled|interrupted")
+    jobs_show = jobs_sub.add_parser("show", help="one job's full detail")
+    jobs_show.add_argument("id", type=int)
+    jobs_cancel = jobs_sub.add_parser("cancel", help="cancel a pending or running job")
+    jobs_cancel.add_argument("id", type=int)
+    jobs_spawn = jobs_sub.add_parser("spawn", help="queue a background job")
+    jobs_spawn.add_argument("prompt", nargs="+", help="full instructions for the worker")
+    jobs_spawn.add_argument("--title", default="", help="short label for listings")
+    jobs_spawn.add_argument("--model", default="", help="model override for this job")
+    jobs_spawn.add_argument("--timeout-minutes", type=int, default=0,
+                            help="time budget in minutes (0 = default 30)")
+    jobs_spawn.add_argument("--grants", default="",
+                            help="comma-separated normally-denied tools, e.g. Task")
     watch_parser = sub.add_parser("watch", help="run a command and ping you when it finishes")
     watch_parser.add_argument("--name", default=None, help="label for the notification")
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
@@ -230,6 +365,8 @@ def main(argv: list[str] | None = None) -> int:
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
+    if command == "jobs":
+        return jobs(config, args)
     if command == "tui":
         from .tui import run as run_tui
         run_tui(config)

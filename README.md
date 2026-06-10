@@ -188,6 +188,50 @@ or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 
+### Background jobs
+
+A big ask normally means one long turn that blocks the conversation until it
+finishes. With jobs enabled, Iris can instead **delegate**: she breaks the work
+out into a tracked background `claude` run (a fresh session with its own
+timeout and tool policy) and keeps chatting with you while it executes. The
+agent calls `spawn_job` with full instructions, tells you it's queued, and you
+both move on; `list_jobs`, `job_status`, `cancel_job`, and `job_result` cover
+the rest of the lifecycle. When a job finishes, its report **folds back into
+the conversation it came from** as a regular turn, so Iris relays the outcome
+in her own voice with full context. If fold-back isn't possible (the job
+wasn't tied to a conversation, or delivery fails), the result falls back to
+the notify spine: a ping on the job's channel or `IRIS_NOTIFY_CHANNEL`, shaped
+like the `iris watch` notifications. Never both. Discovery is a file watcher
+(pure `stat()` polling), so the zero-idle-inference rule holds: no model call
+ever happens on a clock.
+
+It is opt-in. Set `IRIS_JOBS=true` to start the runner with the Discord bot,
+add the jobs server to your mcp config, and allowlist the five tools:
+
+```
+IRIS_ALLOWED_TOOLS=mcp__jobs__spawn_job,mcp__jobs__list_jobs,mcp__jobs__job_status,mcp__jobs__cancel_job,mcp__jobs__job_result
+```
+
+The jobs server reads `IRIS_JOBS_FILE` from its **own** `"env"` block (like
+every bundled server, it does not inherit your `IRIS_*` variables):
+
+```json
+{ "mcpServers": { "jobs": { "command": "python",
+  "args": ["-m", "iris.mcp.jobs_server"],
+  "env": { "IRIS_JOBS_FILE": "iris-jobs.json" } } } }
+```
+
+Jobs get their own tool policy, fenced by a grant ceiling. By default
+`IRIS_JOB_GRANTS=Task`: a job may request the `Task` tool (the `Agent` alias
+is covered automatically) so a single job can fan out into subagents, while
+`Bash`, `Write`, `Edit`, and the rest of the high-reach built-ins stay denied
+unless you widen the ceiling deliberately. The chat denylist is untouched
+either way. `IRIS_JOB_CONCURRENCY` (default 2) caps simultaneous runs to
+respect subscription rate limits, and `IRIS_JOB_MODEL` optionally routes jobs
+to a different model than chat. The `iris jobs` subcommand
+(`list | show <id> | cancel <id> | spawn <prompt>`) gives you the same
+registry from the shell, no model involved; `iris doctor` checks the wiring.
+
 ### Voice messages
 
 Iris can transcribe inbound voice notes locally and for free, so you can talk to

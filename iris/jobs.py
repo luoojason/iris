@@ -294,6 +294,38 @@ class JobRunner:
         self._sem = threading.Semaphore(self.concurrency)
         self._stop_event = threading.Event()
 
+    @classmethod
+    def from_config(cls, config, base_driver: ClaudeDriver, *,
+                    deliver: Optional[Callable[[str, str, str], bool]] = None,
+                    sender=None) -> "JobRunner":
+        """Build the runner the adapters use, mapped from Config's job fields.
+
+        The chat driver is reused as the job base (its tool/mcp/persona wiring
+        carries over); when ``job_model`` is set a replaced copy carries the
+        override so the chat driver itself is never touched. The notify driver
+        is built lazily per failure, exactly like ``iris watch``'s triage path.
+        """
+        from .notify.watch_cmd import build_notify_driver
+
+        base = base_driver
+        if config.job_model:
+            base = dataclasses.replace(base_driver, model=config.job_model)
+        return cls(
+            JobStore(config.jobs_file),
+            base,
+            grant_ceiling=tuple(config.job_grants),
+            concurrency=config.job_concurrency,
+            idle_timeout=config.job_idle_timeout,
+            poll_seconds=config.job_poll_seconds,
+            deliver=deliver,
+            sender=sender,
+            notify_channel=config.notify_channel,
+            discord_token=config.discord_token,
+            notify_driver_factory=lambda: build_notify_driver(config),
+            watch_min_seconds=config.watch_min_seconds,
+            metrics_path=config.metrics_file,
+        )
+
     # -- lifecycle -------------------------------------------------------------
 
     def start(self) -> None:
