@@ -1059,3 +1059,18 @@ def test_a_deliver_callback_that_raises_falls_back_to_the_spine(tmp_path):
     assert len(sent) == 1
     assert sent[0][0] == "42"
     assert sent[0][1].startswith("job done: title in")
+
+
+def test_dead_workers_are_pruned_on_the_next_check(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("quick work", "quick")
+    runner, _ = make_runner(store, [FakeTurn(ok_result())],
+                            sender=collect_sender([]), sync=False)
+
+    runner.check_now()
+    for thread in list(runner.workers.values()):
+        thread.join(2)
+    assert runner.workers  # finished but not yet pruned
+
+    runner.check_now()
+    assert runner.workers == {}

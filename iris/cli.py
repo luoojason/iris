@@ -297,7 +297,7 @@ def jobs(config: Config, args) -> int:
     """
     import time as _time
 
-    from .jobs import JobStore
+    from .jobs import MAX_TIMEOUT_MINUTES, JobStore
 
     store = JobStore(config.jobs_file)
     command = getattr(args, "jobs_command", None)
@@ -316,7 +316,7 @@ def jobs(config: Config, args) -> int:
                 print(f"Unknown grant {name!r}; valid grants: "
                       f"{', '.join(DANGEROUS_BUILTINS)}.")
                 return 2
-        minutes = int(args.timeout_minutes or 0)
+        minutes = min(int(args.timeout_minutes or 0), MAX_TIMEOUT_MINUTES)
         title = (args.title or "").strip() or prompt.splitlines()[0][:60]
         job_id = store.add(prompt, title, model=(args.model or "").strip(),
                            timeout_s=minutes * 60 if minutes > 0 else None,

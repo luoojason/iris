@@ -54,6 +54,10 @@ log = logging.getLogger("iris.jobs")
 # Appended on top of the chat persona so a job knows it is not the live
 # conversation: no one answers questions mid-run, and the closing message is
 # all the owner ever sees of the work.
+# One timeout ceiling for every spawn surface (MCP server and CLI alike), so
+# the two cannot drift apart.
+MAX_TIMEOUT_MINUTES = 240
+
 JOB_PREAMBLE = (
     "You are a background worker spawned by Iris to handle one job autonomously. "
     "No one is watching the run and no one will answer questions, so make "
@@ -335,6 +339,7 @@ class JobRunner:
         self._sem = threading.Semaphore(self.concurrency)
         self._stop_event = threading.Event()
         self._watch_mtime: Optional[float] = None  # registry mtime last seen
+        self._watch_stat_warned = False
         self._watch_park_until = 0.0               # live park seen on the last pass
 
     @classmethod
@@ -444,8 +449,14 @@ class JobRunner:
                 self._watch_park_until = 0.0
         try:
             mtime = os.stat(self.store.path).st_mtime
+            self._watch_stat_warned = False
         except OSError:
-            mtime = self._watch_mtime  # no registry yet: no change signal
+            # No registry yet is normal; a registry that WAS there going
+            # unreadable deserves one loud line per failure streak.
+            if self._watch_mtime is not None and not self._watch_stat_warned:
+                log.warning("jobs registry %s became unreadable", self.store.path)
+                self._watch_stat_warned = True
+            mtime = self._watch_mtime  # no change signal
         if mtime != self._watch_mtime:
             self._watch_mtime = mtime
             due = True
@@ -513,6 +524,12 @@ class JobRunner:
         queued, and the watcher's own pass tracks the park deadline so expiry
         is noticed within one poll even when nothing touches the registry.
         """
+        with self._state_lock:
+            # Finished worker threads otherwise accumulate forever; a job whose
+            # worker is gone is terminal, so its ambiguity marker is dead too.
+            for jid in [j for j, t in self.workers.items() if not t.is_alive()]:
+                self.workers.pop(jid, None)
+                self._ambiguous.discard(jid)
         with self._check_lock:
             self._cancel_pass()
             parked, resumed = self._parked()
@@ -744,7 +761,8 @@ class JobRunner:
                 if self.deliver(channel_id, conversation_id, text):
                     return  # fold-back delivered: never both paths for one job
             except Exception:
-                pass
+                log.warning("job %s fold-back delivery raised; using the spine",
+                            jid, exc_info=True)
         started_at = job.get("started_at") or finished_at
         self._spine_notify(
             kind="finished" if ok else "failed",

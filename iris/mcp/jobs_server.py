@@ -22,7 +22,7 @@ except ImportError as exc:  # pragma: no cover - depends on optional extra
     ) from exc
 
 from iris.driver import DANGEROUS_BUILTINS
-from iris.jobs import JobStore
+from iris.jobs import MAX_TIMEOUT_MINUTES, JobStore
 
 STORE = JobStore(os.environ.get("IRIS_JOBS_FILE", "iris-jobs.json"))
 
@@ -31,7 +31,6 @@ mcp = FastMCP("iris-jobs")
 # A driver retry can re-run a tool call's side effects, so an identical
 # pending title+prompt younger than this is treated as the same request.
 DUPLICATE_WINDOW_S = 5.0
-MAX_TIMEOUT_MINUTES = 240
 VALID_STATUSES = ("pending", "running", "done", "failed", "cancelled", "interrupted")
 
 
@@ -84,6 +83,11 @@ def spawn_job(prompt: str, title: str = "", model: str = "",
             return f"Job #{job['id']} already queued: {label}"
     job_id = STORE.add(prompt, label, model=(model or "").strip(),
                        timeout_s=timeout_s, grants=granted)
+    if granted:
+        # This server cannot see IRIS_JOB_GRANTS, so it must not pretend the
+        # grant is effective; the runner applies the ceiling at spawn.
+        return (f"Job #{job_id} queued: {label} (grants recorded; the runner "
+                f"applies the operator ceiling)")
     return f"Job #{job_id} queued: {label}"
 
 

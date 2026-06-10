@@ -226,7 +226,8 @@ def test_spawn_list_status_cancel_result_round_trip_on_one_file(tmp_path, monkey
     monkeypatch.setattr(srv, "STORE", real)
     assert srv.spawn_job("profile the importer", title="profile importer",
                          grants="Task", timeout_minutes=20) \
-        == "Job #1 queued: profile importer"
+        == ("Job #1 queued: profile importer (grants recorded; the runner "
+            "applies the operator ceiling)")
     assert "#1 [pending" in srv.list_jobs()
     assert "status: pending" in srv.job_status(1)
 
@@ -241,3 +242,14 @@ def test_spawn_list_status_cancel_result_round_trip_on_one_file(tmp_path, monkey
                         "error": "cancelled"})
     assert srv.job_result(1) == "partial notes survived"
     assert "status: cancelled" in srv.job_status(1)
+
+
+def test_spawn_with_grants_notes_the_operator_ceiling(store):
+    out = srv.spawn_job("fan out the analysis", grants="Task")
+    assert "queued" in out
+    assert "operator ceiling" in out
+
+
+def test_spawn_without_grants_keeps_the_plain_reply(store):
+    out = srv.spawn_job("plain work")
+    assert out == "Job #1 queued: plain work"

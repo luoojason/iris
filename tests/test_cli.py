@@ -459,3 +459,12 @@ def test_doctor_no_jobs_warnings_when_everything_lines_up(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "cannot spawn jobs" not in out
+
+
+def test_jobs_spawn_clamps_the_timeout_like_the_server(monkeypatch, tmp_path, capsys):
+    rc = run_jobs(monkeypatch, tmp_path, [
+        "spawn", "long haul", "--timeout-minutes", "999",
+    ])
+
+    assert rc == 0
+    assert jobs_store(tmp_path).get(1)["timeout_s"] == 240 * 60
