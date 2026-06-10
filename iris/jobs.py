@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -40,6 +41,8 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows
     fcntl = None
+
+log = logging.getLogger("iris.jobs")
 
 # Appended on top of the chat persona so a job knows it is not the live
 # conversation: no one answers questions mid-run, and the closing message is
@@ -196,12 +199,20 @@ class JobStore:
 # both or the leftover alias stays live.
 _SUBAGENT_NAMES = frozenset({"Task", "Agent"})
 
+# The jobs MCP server's permission-rule name; "mcp__jobs" alone denies every
+# tool the server exposes, present or future.
+_JOBS_SERVER = "mcp__jobs"
+
 
 def _expand_subagent_alias(names: Sequence[str]) -> set[str]:
     expanded = set(names)
     if expanded & _SUBAGENT_NAMES:
         expanded |= _SUBAGENT_NAMES
     return expanded
+
+
+def _is_jobs_tool(name: str) -> bool:
+    return name == _JOBS_SERVER or name.startswith(_JOBS_SERVER + "__")
 
 
 def build_job_driver(
@@ -219,16 +230,27 @@ def build_job_driver(
     (driver._effective_disallowed); hand-listing it would silently drift.
     Granted = the job's requested grants intersected with the operator ceiling,
     so a job can never talk itself into more reach than IRIS_JOB_GRANTS allows.
+
+    The jobs tools themselves never reach a worker: the chat allowlist carries
+    over, but a worker holding mcp__jobs__spawn_job could be prompt-injected
+    (it runs unattended with web reach) into queueing descendants without
+    bound. Internal fan-out is the Task grant, only: the jobs tools are
+    stripped from the allowlist and the whole server is denied outright.
     """
     granted = _expand_subagent_alias(job.get("grants") or ()) & _expand_subagent_alias(
         grant_ceiling
     )
+    allowed = base_driver.allowed_tools
+    if allowed:
+        allowed = tuple(t for t in allowed if not _is_jobs_tool(t))
     return dataclasses.replace(
         base_driver,
         timeout=float(job.get("timeout_s") or base_driver.timeout),
         model=job.get("model") or base_driver.model,
         append_system_prompt=JOB_PREAMBLE,
-        disallowed_tools=tuple(t for t in DANGEROUS_BUILTINS if t not in granted),
+        allowed_tools=allowed,
+        disallowed_tools=tuple(t for t in DANGEROUS_BUILTINS if t not in granted)
+        + (_JOBS_SERVER,),
     )
 
 
@@ -378,7 +400,13 @@ class JobRunner:
                 continue
             if mtime != last_mtime:
                 last_mtime = mtime
-                self.check_now()
+                try:
+                    self.check_now()
+                except Exception:
+                    # The watcher is the jobs system's heartbeat: one transient
+                    # registry error (disk full, permissions) must not kill the
+                    # thread and silently stop all claiming until restart.
+                    log.warning("job check failed; watcher continues", exc_info=True)
 
     # -- attribution -----------------------------------------------------------
 
@@ -404,26 +432,33 @@ class JobRunner:
         with self._state_lock:
             window = self._windows.pop(conversation_id, None)
             other_starts = [t0 for (_, t0) in self._windows.values()]
-        if window is not None:
-            channel_id, opened_at = window
-            for job in self.store.all():
-                if job.get("conversation_id"):
-                    continue
-                jid = int(job["id"])
-                created = job.get("created_at") or 0.0
-                if not (opened_at <= created <= closed_at):
-                    continue
-                with self._state_lock:
-                    ambiguous = jid in self._ambiguous
-                # Any other still-open window that opened before the job was
-                # created also contains it: overlapping claims, stamp nobody.
-                if ambiguous or any(created >= t0 for t0 in other_starts):
+        try:
+            if window is not None:
+                channel_id, opened_at = window
+                for job in self.store.all():
+                    if job.get("conversation_id"):
+                        continue
+                    jid = int(job["id"])
+                    created = job.get("created_at") or 0.0
+                    if not (opened_at <= created <= closed_at):
+                        continue
                     with self._state_lock:
-                        self._ambiguous.add(jid)
-                    continue
-                self.store.update(jid, conversation_id=conversation_id,
-                                  channel_id=channel_id)
-        self.check_now()
+                        ambiguous = jid in self._ambiguous
+                    # Any other still-open window that opened before the job was
+                    # created also contains it: overlapping claims, stamp nobody.
+                    if ambiguous or any(created >= t0 for t0 in other_starts):
+                        with self._state_lock:
+                            self._ambiguous.add(jid)
+                        continue
+                    self.store.update(jid, conversation_id=conversation_id,
+                                      channel_id=channel_id)
+            self.check_now()
+        except Exception:
+            # Stamping and the claim nudge ride the chat turn's exit path (the
+            # adapter brackets), so a registry I/O failure here must never
+            # sink the reply the model call already paid for.
+            log.warning("job stamping/check after turn %s failed",
+                        conversation_id, exc_info=True)
 
     # -- discovery -----------------------------------------------------------
 
@@ -462,16 +497,20 @@ class JobRunner:
 
     def _claim_pass(self) -> list[dict]:
         # Count the free slots by draining the semaphore non-blocking; permits
-        # for jobs we failed to claim go straight back. Each claimed job keeps
-        # its permit until its worker releases it.
+        # for jobs we failed to claim go straight back, even when the claim
+        # itself raises: a leaked permit is gone for the life of the process.
+        # Each claimed job keeps its permit until its worker releases it.
         free = 0
         while free < self.concurrency and self._sem.acquire(blocking=False):
             free += 1
         if not free:
             return []
-        claimed = self.store.claim_pending(free)
-        for _ in range(free - len(claimed)):
-            self._sem.release()
+        claimed: list[dict] = []
+        try:
+            claimed = self.store.claim_pending(free)
+        finally:
+            for _ in range(free - len(claimed)):
+                self._sem.release()
         return claimed
 
     # -- worker ---------------------------------------------------------------
@@ -480,6 +519,18 @@ class JobRunner:
         jid = int(job["id"])
         try:
             self._run_job(jid, job)
+        except Exception as exc:
+            # A worker must never die without recording an outcome: a job
+            # stuck "running" forever lies to list_jobs and can never be
+            # cancelled (the cancel pass only sees live turns).
+            log.warning("job %s worker crashed", jid, exc_info=True)
+            try:
+                self._finish_job(jid, job, ClaudeResult(
+                    text="", session_id=None, is_error=True,
+                    error=f"job worker crashed: {exc}",
+                ))
+            except Exception:
+                log.warning("job %s outcome write failed", jid, exc_info=True)
         finally:
             with self._state_lock:
                 self._turns.pop(jid, None)
@@ -522,7 +573,11 @@ class JobRunner:
             # Per the cancel contract a reply that landed before the kill is
             # preserved, so an ok primary means the job finished its work.
             status = "done"
-        elif was_cancelled or "cancelled" in (result.error or ""):
+        elif was_cancelled:
+            # The flag is authoritative: the cancel pass sets it under the
+            # state lock before the kill. The error text is free-form (model
+            # prose, folded stderr), so matching it would misfile a genuine
+            # failure that merely mentions "cancelled" and eat its ping.
             status = "cancelled"
         else:
             status = "failed"
@@ -595,8 +650,12 @@ class JobRunner:
         if allow_model and needs_model(event) and self.notify_driver_factory is not None:
             driver = self.notify_driver_factory()
         text = render(event, driver)
-        _notify_send(text, token=self.discord_token,
-                     channel=channel or self.notify_channel, sender=self.sender)
+        if not _notify_send(text, token=self.discord_token,
+                            channel=channel or self.notify_channel, sender=self.sender):
+            # The spine is the terminal fallback; the result is stored, but a
+            # ping the owner will never see must at least leave a trace.
+            log.warning("job notify undeliverable (channel=%r): %s",
+                        channel or self.notify_channel, text)
 
 
 def _tail_lines(text: str, limit: int = 25) -> str:

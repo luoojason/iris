@@ -226,7 +226,9 @@ Jobs get their own tool policy, fenced by a grant ceiling. By default
 is covered automatically) so a single job can fan out into subagents, while
 `Bash`, `Write`, `Edit`, and the rest of the high-reach built-ins stay denied
 unless you widen the ceiling deliberately. The chat denylist is untouched
-either way. `IRIS_JOB_CONCURRENCY` (default 2) caps simultaneous runs to
+either way, and workers never get the `mcp__jobs__*` tools themselves: only
+the chat agent and the CLI spawn jobs; a job fans out through `Task`, not by
+queueing more jobs. `IRIS_JOB_CONCURRENCY` (default 2) caps simultaneous runs to
 respect subscription rate limits, and `IRIS_JOB_MODEL` optionally routes jobs
 to a different model than chat. The `iris jobs` subcommand
 (`list | show <id> | cancel <id> | spawn <prompt>`) gives you the same

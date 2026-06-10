@@ -9,7 +9,10 @@ are local: no conftest.
 
 from __future__ import annotations
 
+import logging
 import threading
+
+import pytest
 
 from iris.driver import ClaudeDriver, ClaudeResult
 from iris.jobs import JobRunner, JobStore
@@ -354,6 +357,149 @@ def test_cancel_after_the_ok_primary_landed_keeps_done(tmp_path):
     assert job["status"] == "done"
     assert job["result"]["text"] == "the answer"
     assert len(sent) == 1  # a done job still delivers
+
+
+def test_runner_cancel_is_recorded_even_without_the_sentinel_error_text(tmp_path):
+    # PIN: the _cancel_flagged flag alone decides "cancelled"; the error text
+    # is free-form (model prose, folded stderr) and must not be load-bearing.
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("long haul", "long")
+    turn = FakeTurn(err_result("killed by signal"), hold=True, landed=True)
+    sent = []
+    runner, _ = make_runner(store, [turn], sync=False, sender=collect_sender(sent))
+
+    runner.check_now()
+    assert runner.turn_registered.wait(timeout=2)
+    store.request_cancel(jid)
+    runner.check_now()
+
+    runner.workers[jid].join(timeout=2)
+    job = store.get(jid)
+    assert job["status"] == "cancelled"
+    assert sent == []
+
+
+def test_a_failure_mentioning_cancelled_is_recorded_failed_and_pinged(tmp_path):
+    # An uncancelled failure whose error text happens to contain the word
+    # "cancelled" (e.g. folded stderr "request was cancelled by the server")
+    # is a real failure: the owner must get the ping, and the registry must
+    # not show a cancel nobody asked for.
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("deploy", "deploy")
+    sent = []
+    runner, _ = make_runner(
+        store, [FakeTurn(err_result("request was cancelled by the server"))],
+        sender=collect_sender(sent))
+
+    runner.check_now()
+
+    job = store.get(jid)
+    assert job["status"] == "failed"
+    assert len(sent) == 1
+    assert sent[0][1].startswith("job failed: deploy")
+
+
+# -- robustness ----------------------------------------------------------------
+
+
+def test_a_claim_pending_failure_releases_the_drained_permits(tmp_path):
+    # A transient registry write error (disk full, unwritable lock file) must
+    # not eat semaphore permits: a leaked permit is gone for the life of the
+    # process and silently shrinks the runner's capacity to zero.
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("work", "title")
+    runner, _ = make_runner(store, [FakeTurn(ok_result())], sender=collect_sender([]))
+    real = store.claim_pending
+    failed_once = []
+
+    def flaky(limit, now=None):
+        if not failed_once:
+            failed_once.append(1)
+            raise OSError("disk full")
+        return real(limit, now)
+
+    store.claim_pending = flaky
+    with pytest.raises(OSError):
+        runner.check_now()
+
+    runner.check_now()  # every permit came back: the job is claimed and runs
+
+    assert store.get(jid)["status"] == "done"
+
+
+def test_the_watcher_survives_a_check_now_that_raises(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    runner, _ = make_runner(store, [], sync=False, poll_seconds=0.01,
+                            sender=collect_sender([]))
+    first, second = threading.Event(), threading.Event()
+
+    def boom():
+        if not first.is_set():
+            first.set()
+            raise OSError("disk full")
+        second.set()
+
+    runner.check_now = boom
+    runner.start()
+    try:
+        store.add("one", "one")    # first mtime change: check raises
+        assert first.wait(timeout=2)
+        assert runner.watcher.is_alive()
+        store.add("two", "two")    # the watcher must still be checking
+        assert second.wait(timeout=2)
+    finally:
+        runner.stop()
+
+
+def test_a_registry_failure_in_turn_finished_never_raises(tmp_path):
+    # The adapter brackets call turn_finished on the chat turn's exit path; a
+    # raise there would replace the reply the model call already paid for.
+    store = JobStore(tmp_path / "jobs.json")
+    runner, _ = make_runner(store, [FakeTurn(ok_result())], sender=collect_sender([]))
+    runner.turn_started("discord:7", "7")
+    store.add("mid-turn work", "midturn")
+
+    def exploding_update(job_id, **fields):
+        raise OSError("disk full")
+
+    store.update = exploding_update
+    runner.turn_finished("discord:7")  # must not raise
+
+
+def test_a_crashing_worker_records_a_failed_outcome(tmp_path):
+    # An exception escaping _run_job (here: the stream factory) must never
+    # strand the job as "running" forever with a silently dead worker.
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("doomed", "doomed")
+    sent = []
+
+    def exploding_factory(job_driver, *, idle_timeout, total_timeout):
+        raise RuntimeError("factory exploded")
+
+    runner = JobRunner(store, ClaudeDriver(), stream_driver_factory=exploding_factory,
+                       sync=True, notify_channel="999", discord_token="tok",
+                       sender=collect_sender(sent))
+
+    runner.check_now()
+
+    job = store.get(jid)
+    assert job["status"] == "failed"
+    assert "factory exploded" in job["result"]["error"]
+    assert len(sent) == 1  # the failure still pings the spine
+
+
+def test_an_undeliverable_spine_ping_is_logged(tmp_path, caplog):
+    # The spine is the terminal fallback; when even it cannot deliver, the
+    # miss must leave a trace instead of evaporating.
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("work", "title")
+    runner, _ = make_runner(store, [FakeTurn(ok_result())],
+                            sender=lambda channel, text, token: False)
+
+    with caplog.at_level(logging.WARNING, logger="iris.jobs"):
+        runner.check_now()
+
+    assert any("undeliverable" in r.getMessage() for r in caplog.records)
 
 
 # -- start / recovery / watcher -----------------------------------------------

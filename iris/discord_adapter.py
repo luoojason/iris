@@ -12,8 +12,10 @@ depend on it.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import random
+import threading
 from typing import Optional
 
 from .agent import Agent, LiveTurn
@@ -159,13 +161,22 @@ class _BracketedLiveHandle:
         return await self._handle.aftermath()
 
     def close(self) -> None:
-        if self._window_open:
-            self._window_open = False
-            self._job_runner.turn_finished(self._conversation_id)
-        self._handle.close()
+        # The handle close MUST run whatever the window close does: it is the
+        # release of the per-conversation Agent lock, and turn_finished does
+        # real registry I/O (stamping, the claim nudge) that can fail. A
+        # registry error is logged and dropped; it can never wedge the chat.
+        try:
+            if self._window_open:
+                self._window_open = False
+                self._job_runner.turn_finished(self._conversation_id)
+        except Exception:
+            log.warning("job turn window close failed", exc_info=True)
+        finally:
+            self._handle.close()
 
 
-def make_job_deliver(loop_ref, resolve_channel, resolve_runner):
+def make_job_deliver(loop_ref, resolve_channel, resolve_runner, *,
+                     timeout: float = 10.0, grace: float = 0.5):
     """Build the fold-back deliver(channel_id, conversation_id, text) -> bool.
 
     Called by JobRunner from a worker thread, so the work is marshaled onto
@@ -176,12 +187,22 @@ def make_job_deliver(loop_ref, resolve_channel, resolve_runner):
     adapter's (conversation_id, channel) -> ConversationRunner lookup, so a
     stale runner popped by !reset is never reused. Any failure returns False
     and the runner's notify-spine fallback fires instead.
+
+    Giving up on a slow delivery must be atomic with the submit: an abandoned
+    coroutine that later ran runner.submit would deliver the job BOTH ways
+    (spine ping plus fold-back turn: two model calls for a failed job). So
+    on timeout the worker sets ``gave_up`` first; submit() checks it in the
+    same synchronous segment as runner.submit, a short ``grace`` re-wait
+    reports a submit that beat the flag as delivered, and anything still
+    pending after that is cancelled outright.
     """
 
     def deliver(channel_id: str, conversation_id: str, text: str) -> bool:
         loop = loop_ref()
         if loop is None:
             return False  # not connected yet; let the spine handle it
+
+        gave_up = threading.Event()
 
         async def submit() -> bool:
             channel = await resolve_channel(channel_id)
@@ -190,12 +211,30 @@ def make_job_deliver(loop_ref, resolve_channel, resolve_runner):
             runner = resolve_runner(conversation_id, channel)
             if runner is None:
                 return False
+            if gave_up.is_set():
+                # The worker already chose the spine; no await sits between
+                # this check and the submit, so the loop runs them atomically
+                # and a late turn can never slip in after the fallback.
+                return False
             runner.submit(Turn(text=text))
             return True
 
+        fut = asyncio.run_coroutine_threadsafe(submit(), loop)
         try:
-            return bool(asyncio.run_coroutine_threadsafe(submit(), loop).result(timeout=10))
+            return bool(fut.result(timeout=timeout))
+        except concurrent.futures.TimeoutError:
+            gave_up.set()
+            try:
+                # A submit that passed the check before the flag landed has
+                # already folded the result into the conversation: report it
+                # delivered so the spine stays quiet (never both).
+                return bool(fut.result(timeout=grace))
+            except Exception:
+                fut.cancel()
+                log.warning("job fold-back delivery timed out; falling back to the spine")
+                return False
         except Exception:
+            fut.cancel()
             log.warning("job fold-back delivery failed", exc_info=True)
             return False
 

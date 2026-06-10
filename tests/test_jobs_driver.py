@@ -51,7 +51,28 @@ def test_granting_either_subagent_name_carves_out_both():
 
 def test_empty_grants_keep_the_full_denylist():
     d = build_job_driver(ClaudeDriver(), make_job(grants=[]), grant_ceiling=("Task",))
-    assert tuple(denied_tools(d.build_command())) == DANGEROUS_BUILTINS
+    assert tuple(denied_tools(d.build_command())) == DANGEROUS_BUILTINS + ("mcp__jobs",)
+
+
+def test_job_driver_strips_the_jobs_tools_from_the_allowlist():
+    # The chat agent's allowlist carries over to workers, but the jobs tools
+    # must not: a prompt-injected worker with mcp__jobs__spawn_job could queue
+    # descendants without bound. Internal fan-out is the Task grant, only.
+    base = ClaudeDriver(allowed_tools=(
+        "mcp__jobs__spawn_job", "mcp__jobs__list_jobs", "mcp__jobs__job_status",
+        "mcp__jobs__cancel_job", "mcp__jobs__job_result",
+        "mcp__memory__save_memory", "WebSearch",
+    ))
+    d = build_job_driver(base, make_job(grants=["Task"]), grant_ceiling=("Task",))
+    assert d.allowed_tools == ("mcp__memory__save_memory", "WebSearch")
+    assert base.allowed_tools[0] == "mcp__jobs__spawn_job"  # base untouched
+
+
+def test_job_driver_denies_the_jobs_server_outright():
+    # Belt and braces beside the allowlist strip: the server-level deny rule
+    # covers any jobs tool, granted or not, however the operator allowlists.
+    d = build_job_driver(ClaudeDriver(), make_job(grants=["Task"]), grant_ceiling=("Task",))
+    assert "mcp__jobs" in denied_tools(d.build_command())
 
 
 def test_grants_beyond_the_operator_ceiling_are_ignored():

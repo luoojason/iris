@@ -200,6 +200,43 @@ def test_deliver_swallows_exceptions_into_false(loop_in_thread):
     assert deliver("42", "discord:42", "report") is False
 
 
+def test_a_timed_out_delivery_never_submits_a_late_turn(loop_in_thread):
+    # The give-up must not abandon a live coroutine: when channel resolution
+    # stalls past the timeout and then succeeds, a late runner.submit would
+    # deliver the job twice (spine ping AND fold-back turn), breaking the
+    # never-both rule and spending a second model call on a failed job.
+    runner = RecordingRunner()
+    resolved = threading.Event()
+
+    async def slow_resolve(channel_id):
+        await asyncio.sleep(0.2)
+        resolved.set()
+        return object()
+
+    deliver = make_job_deliver(lambda: loop_in_thread, slow_resolve,
+                               lambda cid, ch: runner, timeout=0.05, grace=2.0)
+
+    assert deliver("42", "discord:42", "report") is False
+    assert resolved.is_set()  # the stalled resolve did complete...
+    assert runner.turns == []  # ...but the abandoned submit was suppressed
+
+
+def test_a_delivery_hung_past_the_grace_window_is_cancelled(loop_in_thread):
+    # A resolve that never returns within timeout + grace is cancelled
+    # outright; the spine fallback owns the job from here.
+    runner = RecordingRunner()
+
+    async def hung_resolve(channel_id):
+        await asyncio.sleep(60)
+        return object()
+
+    deliver = make_job_deliver(lambda: loop_in_thread, hung_resolve,
+                               lambda cid, ch: runner, timeout=0.05, grace=0.05)
+
+    assert deliver("42", "discord:42", "report") is False
+    assert runner.turns == []
+
+
 # -- turn bracketing ----------------------------------------------------------
 
 
@@ -341,3 +378,28 @@ def test_close_without_begin_never_fires_turn_finished():
 
     assert job_runner.started == []
     assert job_runner.finished == []
+
+
+class ExplodingJobRunner(RecordingJobRunner):
+    """turn_finished raises, like a registry write hitting a full disk."""
+
+    def turn_finished(self, conversation_id):
+        super().turn_finished(conversation_id)
+        raise OSError("registry write failed")
+
+
+def test_bracketed_close_still_closes_the_handle_when_turn_finished_raises():
+    # close() MUST run on every exit path (conversation.py relies on it to
+    # release the per-conversation Agent lock); a job-registry I/O failure in
+    # the window close can never be allowed to leak the lock.
+    job_runner = ExplodingJobRunner()
+    inner = FakeLiveHandle()
+    handle = _BracketedLiveHandle(inner, job_runner, "discord:9", "9")
+
+    async def drive():
+        await handle.begin()
+        handle.close()  # must not raise, and must close the inner handle
+
+    asyncio.run(drive())
+    assert inner.closed == 1
+    assert job_runner.finished == ["discord:9"]
