@@ -468,3 +468,37 @@ def test_jobs_spawn_clamps_the_timeout_like_the_server(monkeypatch, tmp_path, ca
 
     assert rc == 0
     assert jobs_store(tmp_path).get(1)["timeout_s"] == 240 * 60
+
+
+def test_doctor_warns_when_the_jobs_registry_paths_diverge(tmp_path, capsys):
+    from iris.cli import doctor
+
+    mcp = write_mcp(tmp_path, {"jobs": {"command": "python",
+                                        "env": {"IRIS_JOBS_FILE": str(tmp_path / "other.json")}}})
+    rc = doctor(doctor_config(tmp_path, mcp=mcp, allowed=["mcp__jobs__spawn_job"]),
+                probe=False)
+
+    assert rc == 0
+    assert "DIFFERENT registry" in capsys.readouterr().out
+
+
+def test_doctor_quiet_when_jobs_registry_paths_agree(tmp_path, capsys):
+    from iris.cli import doctor
+
+    mcp = write_mcp(tmp_path, {"jobs": {"command": "python",
+                                        "env": {"IRIS_JOBS_FILE": "iris-jobs.json"}}})
+    doctor(doctor_config(tmp_path, mcp=mcp, allowed=["mcp__jobs__spawn_job"]),
+           probe=False)
+
+    assert "DIFFERENT registry" not in capsys.readouterr().out
+
+
+def test_doctor_warns_when_usage_server_cannot_see_the_metrics_file(tmp_path, capsys):
+    from iris.cli import doctor
+
+    mcp = write_mcp(tmp_path, {"usage": {"command": "python"}})
+    config = doctor_config(tmp_path, mcp=mcp, allowed=["mcp__usage__usage_summary"])
+    config.metrics_file = str(tmp_path / "metrics.jsonl")
+    doctor(config, probe=False)
+
+    assert "IRIS_METRICS_FILE" in capsys.readouterr().out

@@ -55,19 +55,24 @@ class _Spinner:
             sys.stdout.flush()
 
 
-def _mcp_config_has_jobs_server(mcp_config: str | None) -> bool:
-    """True when the mcp config is readable JSON whose mcpServers has 'jobs'."""
+def _mcp_servers(mcp_config: str | None) -> dict:
+    """The mcpServers dict from the config file; {} when unreadable/invalid."""
     if not mcp_config:
-        return False
+        return {}
     import json
 
     try:
         with open(mcp_config, encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return False
+        return {}
     servers = data.get("mcpServers") if isinstance(data, dict) else None
-    return isinstance(servers, dict) and "jobs" in servers
+    return servers if isinstance(servers, dict) else {}
+
+
+def _mcp_config_has_jobs_server(mcp_config: str | None) -> bool:
+    """True when the mcp config is readable JSON whose mcpServers has 'jobs'."""
+    return "jobs" in _mcp_servers(mcp_config)
 
 
 def doctor(config: Config, probe: bool = True) -> int:
@@ -137,6 +142,29 @@ def doctor(config: Config, probe: bool = True) -> int:
         print("WARNING: IRIS_JOBS is on but the mcp config has no 'jobs' server, so")
         print("  the model cannot spawn jobs (only 'iris jobs spawn' can queue them).")
         print("  Add the jobs entry from examples/mcp.example.json to your mcp config.")
+    servers = _mcp_servers(config.mcp_config)
+    if has_jobs_server:
+        import os as _os
+
+        # The MCP server cannot inherit IRIS_JOBS_FILE (the driver strips
+        # IRIS_* from the child env); it reads its own env block or the
+        # default. Two different paths = spawned jobs are never claimed.
+        server_jobs_file = (servers["jobs"].get("env") or {}).get(
+            "IRIS_JOBS_FILE", "iris-jobs.json")
+        if _os.path.abspath(server_jobs_file) != _os.path.abspath(config.jobs_file):
+            print("WARNING: the bot and the jobs MCP server use DIFFERENT registry files,")
+            print("  so spawned jobs would never be claimed. Point both at one path:")
+            print(f"  bot (IRIS_JOBS_FILE in .env):    {config.jobs_file}")
+            print(f"  jobs server's mcp-config env:    {server_jobs_file}")
+    if "usage" in servers and config.metrics_file:
+        import os as _os
+
+        server_metrics = (servers["usage"].get("env") or {}).get("IRIS_METRICS_FILE", "")
+        if not server_metrics or (
+                _os.path.abspath(server_metrics) != _os.path.abspath(config.metrics_file)):
+            print("WARNING: the usage MCP server's env block does not match IRIS_METRICS_FILE,")
+            print("  so usage_summary would read a different (or no) metrics file. Set")
+            print(f"  IRIS_METRICS_FILE={config.metrics_file} in the usage server's env block.")
     if not config.allowed_user_ids:
         print("WARNING: IRIS_ALLOWED_USER_IDS is empty, so a network transport will")
         print("  answer ANYONE who can reach it (any DM sender, any group member).")
