@@ -82,6 +82,7 @@ DANGEROUS_BUILTINS = (
     "Edit",
     "NotebookEdit",
     "Task",
+    "Agent",  # Task's new name since Claude Code 2.1.63; both still resolve
     "KillShell",
     "BashOutput",
 )

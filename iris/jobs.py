@@ -178,6 +178,19 @@ class JobStore:
             return f"No job #{job_id}."
 
 
+# The subagent tool answers to two names: Claude Code 2.1.63 renamed Task to
+# Agent and both still resolve, so a grant or ceiling naming either must cover
+# both or the leftover alias stays live.
+_SUBAGENT_NAMES = frozenset({"Task", "Agent"})
+
+
+def _expand_subagent_alias(names: Sequence[str]) -> set[str]:
+    expanded = set(names)
+    if expanded & _SUBAGENT_NAMES:
+        expanded |= _SUBAGENT_NAMES
+    return expanded
+
+
 def build_job_driver(
     base_driver: ClaudeDriver,
     job: dict,
@@ -194,7 +207,9 @@ def build_job_driver(
     Granted = the job's requested grants intersected with the operator ceiling,
     so a job can never talk itself into more reach than IRIS_JOB_GRANTS allows.
     """
-    granted = set(job.get("grants") or ()) & set(grant_ceiling)
+    granted = _expand_subagent_alias(job.get("grants") or ()) & _expand_subagent_alias(
+        grant_ceiling
+    )
     return dataclasses.replace(
         base_driver,
         timeout=float(job.get("timeout_s") or base_driver.timeout),

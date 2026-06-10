@@ -35,8 +35,18 @@ def test_granted_task_is_carved_out_while_the_rest_stay_denied():
     d = build_job_driver(base, make_job(grants=["Task"]), grant_ceiling=("Task",))
     denied = denied_tools(d.build_command())
     assert "Task" not in denied
+    assert "Agent" not in denied  # the renamed subagent tool rides the same grant
     assert "Bash" in denied and "Write" in denied and "Edit" in denied
     assert "NotebookEdit" in denied and "KillShell" in denied and "BashOutput" in denied
+
+
+def test_granting_either_subagent_name_carves_out_both():
+    # Task and Agent are one capability under two names; a ceiling or grant
+    # naming either must strip both, or the leftover alias still works.
+    d = build_job_driver(ClaudeDriver(), make_job(grants=["Agent"]), grant_ceiling=("Task",))
+    denied = denied_tools(d.build_command())
+    assert "Task" not in denied and "Agent" not in denied
+    assert "Bash" in denied
 
 
 def test_empty_grants_keep_the_full_denylist():

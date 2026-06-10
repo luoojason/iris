@@ -154,6 +154,9 @@ def test_default_denylist_blocks_dangerous_builtins():
     i = cmd.index("--disallowedTools")
     denied = cmd[i + 1:]
     assert "Bash" in denied and "Write" in denied and "Task" in denied
+    # the subagent tool answers to both names (Task renamed Agent in Claude
+    # Code 2.1.63, both resolve); denying one without the other is a no-op
+    assert "Agent" in denied
     # read-only and advertised web tools stay available; only reach is denied
     assert "Read" not in denied
     assert "WebFetch" not in denied and "WebSearch" not in denied
