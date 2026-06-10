@@ -20,6 +20,10 @@ def _fmt(seconds: float) -> str:
 
 
 def _template(event: Event) -> str:
+    if event.source == "job":
+        if event.exit_code == 0:
+            return f"job done: {event.title} in {_fmt(event.duration_s)}"
+        return f"job failed: {event.title} exited {event.exit_code} after {_fmt(event.duration_s)}"
     if event.exit_code == 0:
         return f"done: {event.title} passed in {_fmt(event.duration_s)}"
     return f"failed: {event.title} exited {event.exit_code} after {_fmt(event.duration_s)}"
@@ -37,12 +41,25 @@ def _failure_prompt(event: Event) -> str:
     )
 
 
+def _job_failure_prompt(event: Event) -> str:
+    return (
+        "A background job Iris kicked off for the user just failed. In your own "
+        "voice, in one or two short sentences, tell them what likely went wrong "
+        "and offer to dig in. Be specific if the output makes the cause clear.\n\n"
+        f"Job: {event.title}\n"
+        f"Exit code: {event.exit_code}\n"
+        f"Duration: {_fmt(event.duration_s)}\n"
+        f"Last output:\n{event.tail or '(no output captured)'}"
+    )
+
+
 def render(event: Event, driver) -> str:
     """Return the message text. ``driver`` is None for routine events."""
     if driver is None or not needs_model(event):
         return _template(event)
+    prompt = _job_failure_prompt(event) if event.source == "job" else _failure_prompt(event)
     try:
-        result = driver.run(_failure_prompt(event), session_id=None)
+        result = driver.run(prompt, session_id=None)
     except Exception:
         return _template(event)
     if getattr(result, "is_error", True) or not (getattr(result, "text", "") or "").strip():

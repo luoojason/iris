@@ -105,6 +105,7 @@ class StreamTurn:
         # the reader flipping the turn closed.
         self._lock = threading.Lock()
         self._closed = False
+        self._cancelled = False
 
         self._primary_done = threading.Event()  # set when the reply is sendable
         self._finished = threading.Event()       # set when the process is fully done
@@ -157,6 +158,25 @@ class StreamTurn:
     def open(self) -> bool:
         with self._lock:
             return not self._closed
+
+    def cancel(self) -> bool:
+        """Kill the turn's whole process group and finish it. True if it was live.
+
+        Thread-safe and idempotent: exactly one call returns True for a live
+        turn; cancelling a turn that already finished (or was already
+        cancelled) is a no-op returning False. The kill goes through the same
+        hardened group-kill the watchdog uses, so the EOF it trips drives the
+        normal finalize: waiters are released promptly, a landed reply is left
+        untouched, and if no reply had landed wait_primary yields an is_error
+        result whose error says the turn was cancelled.
+        """
+        with self._lock:
+            if self._cancelled or self._finished.is_set():
+                return False
+            self._cancelled = True
+            self._closed = True
+        self._kill()
+        return True
 
     # -- reader / watchdog -------------------------------------------------
 
@@ -270,8 +290,9 @@ class StreamTurn:
                 self._primary_error_obj, self._session_id, returncode=1, stderr=stderr, fold_stderr=True,
             )
         elif self._primary is None:
-            # Never saw a result: a crash, or the watchdog killed a hung process.
-            msg = "claude stream ended without a result"
+            # Never saw a result: a crash, the watchdog killed a hung process,
+            # or cancel() killed the turn on request.
+            msg = "claude stream turn cancelled" if self._cancelled else "claude stream ended without a result"
             if stderr:
                 msg = f"{msg}: {stderr}"
             self._primary = ClaudeResult(text="", session_id=self._session_id, is_error=True, error=msg)
