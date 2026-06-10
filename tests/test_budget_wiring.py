@@ -23,7 +23,7 @@ from iris.driver import ClaudeDriver, is_credit_or_rate_pushback
 def test_predicate_matches_credit_exhaustion_markers():
     assert is_credit_or_rate_pushback("Credit balance is too low")
     assert is_credit_or_rate_pushback("insufficient credits remaining")
-    assert is_credit_or_rate_pushback("monthly quota exceeded")
+    assert is_credit_or_rate_pushback("rate_limit")
 
 
 def test_predicate_matches_rate_limit_markers():
@@ -45,14 +45,22 @@ def test_predicate_ignores_per_request_defects_and_noise():
     assert not is_credit_or_rate_pushback(None)
 
 
-def test_predicate_reuses_the_retry_classifiers_markers():
-    # The tuples are the single source: every marker the predicate honors must
-    # also be one the driver's own retry classifier already knows.
+def test_predicate_ignores_free_form_job_error_text_with_loose_words():
+    # Job error text is free-form (model prose, folded stderr); a bare
+    # 'insufficient' or 'quota' in it is one job's problem, not the credit
+    # pool, and must not park the whole fleet.
+    assert not is_credit_or_rate_pushback("insufficient permissions to write the file")
+    assert not is_credit_or_rate_pushback("disk quota exceeded")
+
+
+def test_retry_classifiers_keep_the_loose_markers():
+    # Only the PARKING predicate narrowed: the retry classifiers' tuples keep
+    # 'insufficient'/'quota' (terminal: surfaced immediately, never retried),
+    # and every rate-limit marker still parks.
     from iris.driver import _RATE_LIMIT_MARKERS, _TERMINAL_MARKERS
 
     for marker in ("credit balance", "insufficient", "quota"):
         assert marker in _TERMINAL_MARKERS
-        assert is_credit_or_rate_pushback(marker)
     for marker in _RATE_LIMIT_MARKERS:
         assert is_credit_or_rate_pushback(marker)
 
@@ -185,6 +193,51 @@ def test_tick_clears_an_expired_park_and_leaves_a_live_one(tmp_path):
     BudgetState(config.budget_state).set_park_until(now + 100)
     budget_tick(config, now=now, sender=collect_sender([]))
     assert BudgetState(config.budget_state).park_until == now + 100
+
+
+def test_tick_pings_resumed_when_it_clears_an_expired_park(tmp_path):
+    # In the standard deployment the tick usually beats the runner to an
+    # expired park; whoever clears it owes the documented "jobs resumed" ping.
+    from iris.budget import BudgetState
+    from iris.cli import budget_tick
+
+    config = tick_config(tmp_path, monthly_credit=0.0)
+    now = datetime(2026, 6, 16).timestamp()
+    BudgetState(config.budget_state).set_park_until(now - 10)
+    sent = []
+
+    budget_tick(config, now=now, sender=collect_sender(sent))
+
+    assert BudgetState(config.budget_state).park_until == 0.0
+    assert [s[:2] for s in sent] == [("999", "jobs resumed: the budget park expired")]
+
+    budget_tick(config, now=now, sender=collect_sender(sent))  # already cleared: silent
+    assert len(sent) == 1
+
+
+def test_whoever_clears_the_park_pings_and_the_other_side_stays_silent(tmp_path):
+    # The state transition is the dedupe: once the tick cleared (and pinged),
+    # the runner sees no park and must not ping a second time.
+    from iris.budget import BudgetState
+    from iris.cli import budget_tick
+    from iris.jobs import JobRunner, JobStore
+
+    config = tick_config(tmp_path, monthly_credit=0.0,
+                         jobs_file=str(tmp_path / "jobs.json"))
+    now = datetime(2026, 6, 16).timestamp()
+    BudgetState(config.budget_state).set_park_until(now - 10)
+    sent = []
+    budget_tick(config, now=now, sender=collect_sender(sent))
+    resumes = [t for _, t, _ in sent if t.startswith("jobs resumed")]
+    assert resumes == ["jobs resumed: the budget park expired"]
+
+    runner = JobRunner(JobStore(config.jobs_file), ClaudeDriver(), sync=True,
+                       budget_state_path=config.budget_state,
+                       notify_channel="999", discord_token="tok",
+                       sender=collect_sender(sent))
+    runner.check_now()
+
+    assert len([t for _, t, _ in sent if t.startswith("jobs resumed")]) == 1
 
 
 def test_reminders_tick_budget_path_is_template_only(tmp_path, monkeypatch):

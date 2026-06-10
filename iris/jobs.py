@@ -293,7 +293,7 @@ class JobRunner:
         light_model: str = "",
         park_minutes: float = 60.0,
         stream_driver_factory=None,
-        clock: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
         sync: bool = False,
     ) -> None:
         self.store = store
@@ -316,6 +316,8 @@ class JobRunner:
         self.light_model = light_model
         self.park_minutes = float(park_minutes)
         self.stream_driver_factory = stream_driver_factory
+        # The credit guard's wall clock (parks are stored as epoch seconds);
+        # injectable so tests can cross a park deadline without sleeping.
         self.clock = clock
         self.sync = bool(sync)
 
@@ -332,6 +334,8 @@ class JobRunner:
         self._check_lock = threading.Lock()
         self._sem = threading.Semaphore(self.concurrency)
         self._stop_event = threading.Event()
+        self._watch_mtime: Optional[float] = None  # registry mtime last seen
+        self._watch_park_until = 0.0               # live park seen on the last pass
 
     @classmethod
     def from_config(cls, config, base_driver: ClaudeDriver, *,
@@ -409,25 +413,44 @@ class JobRunner:
             )
 
     def _watch_loop(self) -> None:
-        # Pure file I/O on the clock: stat the registry and re-read only when
-        # its mtime moved. The None baseline makes the first sighting of the
-        # file count as a change, so jobs queued while the bot was down are
-        # picked up within one poll.
-        last_mtime = None
         while not self._stop_event.wait(self.poll_seconds):
             try:
-                mtime = os.stat(self.store.path).st_mtime
-            except OSError:
-                continue
-            if mtime != last_mtime:
-                last_mtime = mtime
-                try:
-                    self.check_now()
-                except Exception:
-                    # The watcher is the jobs system's heartbeat: one transient
-                    # registry error (disk full, permissions) must not kill the
-                    # thread and silently stop all claiming until restart.
-                    log.warning("job check failed; watcher continues", exc_info=True)
+                self._watch_pass()
+            except Exception:
+                # The watcher is the jobs system's heartbeat: one transient
+                # registry error (disk full, permissions) must not kill the
+                # thread and silently stop all claiming until restart.
+                log.warning("job check failed; watcher continues", exc_info=True)
+
+    def _watch_pass(self) -> None:
+        """One watcher pass: check_now on a registry change or a park ending.
+
+        Pure file I/O on the clock: stat the registry and re-read only when
+        its mtime moved. The None baseline makes the first sighting of the
+        file count as a change, so jobs queued while the bot was down are
+        picked up within one poll. Parking writes nothing to the registry, so
+        on an idle bot an expiry would otherwise never be noticed: when the
+        budget state is wired, remember the live park_until and nudge once
+        the clock passes it, or once the state file shows it cleared (the
+        reminders tick clears expired parks too).
+        """
+        due = False
+        if self.budget_state_path:
+            live = budget.BudgetState(self.budget_state_path).park_until
+            if live > 0 and self.clock() < live:
+                self._watch_park_until = live
+            else:
+                due = self._watch_park_until > 0  # the park we saw just ended
+                self._watch_park_until = 0.0
+        try:
+            mtime = os.stat(self.store.path).st_mtime
+        except OSError:
+            mtime = self._watch_mtime  # no registry yet: no change signal
+        if mtime != self._watch_mtime:
+            self._watch_mtime = mtime
+            due = True
+        if due:
+            self.check_now()
 
     # -- attribution -----------------------------------------------------------
 
@@ -487,12 +510,17 @@ class JobRunner:
         """Honor cancel requests on owned turns, then claim into the free slots.
 
         While a budget park is live no claim happens: pending jobs stay
-        queued and the watcher keeps polling, so expiry is noticed on the
-        next file change or nudge.
+        queued, and the watcher's own pass tracks the park deadline so expiry
+        is noticed within one poll even when nothing touches the registry.
         """
         with self._check_lock:
             self._cancel_pass()
-            claimed = [] if self._parked() else self._claim_pass()
+            parked, resumed = self._parked()
+            claimed = [] if parked else self._claim_pass()
+        if resumed:
+            # Outside the lock: the ping is Discord I/O (up to ~20s) and must
+            # not stall every other cancel/claim pass while it sends.
+            self._budget_ping("jobs resumed: the budget park expired")
         for job in claimed:
             if self.sync:
                 self._worker(job)
@@ -521,23 +549,25 @@ class JobRunner:
                 self._cancel_flagged.add(jid)
             turn.cancel()
 
-    def _parked(self) -> bool:
-        """True while a budget park is live; an expired park clears with one ping.
+    def _parked(self) -> tuple[bool, bool]:
+        """(parked, resumed): parked while a budget park is live; resumed True
+        when this call cleared an expired park, so the caller owes one resume
+        ping once it is out of the check lock (no I/O happens here).
 
         Wall-clock, like BudgetState's stored epoch. The reminders tick may
-        clear an expired park first (same state file); then no ping is owed.
+        clear an expired park first (same state file) and ping it itself;
+        whoever clears, pings, so no ping is owed then.
         """
         if not self.budget_state_path:
-            return False
+            return False, False
         state = budget.BudgetState(self.budget_state_path)
         until = state.park_until
         if until <= 0:
-            return False
-        if time.time() < until:
-            return True
+            return False, False
+        if self.clock() < until:
+            return True, False
         state.set_park_until(0.0)
-        self._budget_ping("jobs resumed: the budget park expired")
-        return False
+        return False, True
 
     def _claim_pass(self) -> list[dict]:
         # Count the free slots by draining the semaphore non-blocking; permits
@@ -677,7 +707,7 @@ class JobRunner:
         if not is_credit_or_rate_pushback(result.error):
             return
         state = budget.BudgetState(self.budget_state_path)
-        now = time.time()
+        now = self.clock()
         if state.park_until > now:
             return  # already parked: one ping per park
         until = now + self.park_minutes * 60.0

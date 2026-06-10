@@ -595,6 +595,26 @@ def test_a_second_pushback_while_parked_pings_only_once(tmp_path):
     assert len(park_pings(sent)) == 1
 
 
+def test_free_form_failure_text_with_loose_words_does_not_park(tmp_path):
+    # "insufficient permissions" and "disk quota exceeded" are one job's
+    # problem (file perms, a full disk), not the credit pool pushing back.
+    from iris.budget import BudgetState
+
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("one", "one")
+    store.add("two", "two")
+    sent = []
+    runner, _ = make_runner(
+        store, [FakeTurn(err_result("insufficient permissions to write the file")),
+                FakeTurn(err_result("disk quota exceeded"))],
+        sender=collect_sender(sent), concurrency=2, **budget_kw(tmp_path))
+
+    runner.check_now()
+
+    assert BudgetState(tmp_path / "budget.json").park_until == 0.0
+    assert park_pings(sent) == []
+
+
 def test_an_ordinary_failure_does_not_park(tmp_path):
     from iris.budget import BudgetState
 
@@ -647,6 +667,120 @@ def test_without_a_budget_state_path_pushback_changes_nothing(tmp_path):
 
     assert store.get(later)["status"] == "done"
     assert park_pings(sent) == []
+
+
+class FakeClock:
+    """Settable wall clock for the credit-guard paths (runner clock seam)."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def test_watcher_notices_park_expiry_without_a_registry_change(tmp_path):
+    # An idle bot: nothing writes the registry while parked, so mtime never
+    # moves. The watcher itself must notice the park deadline passing and
+    # claim the queued job.
+    import time as _time
+
+    from iris.budget import BudgetState
+
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("queued under the park", "queued")
+    clock = FakeClock(_time.time())
+    state_path = tmp_path / "budget.json"
+    BudgetState(state_path).set_park_until(clock.now + 3600)
+    sent = []
+    runner, _ = make_runner(store, [FakeTurn(ok_result())], sync=False,
+                            poll_seconds=0.01, clock=clock,
+                            sender=collect_sender(sent),
+                            budget_state_path=str(state_path), park_minutes=60.0)
+    first_check = threading.Event()
+    real_check = runner.check_now
+
+    def wrapped_check():
+        real_check()
+        first_check.set()
+
+    runner.check_now = wrapped_check
+    runner.start()
+    try:
+        # First sighting of the registry file: checked, but parked, no claim.
+        assert first_check.wait(timeout=2)
+        assert store.get(jid)["status"] == "pending"
+
+        clock.now += 3700  # past expiry; the registry is NOT touched
+        assert runner.turn_registered.wait(timeout=2)
+        runner.workers[jid].join(timeout=2)
+    finally:
+        runner.stop()
+
+    assert store.get(jid)["status"] == "done"
+    assert len([t for _, t, _ in sent if t.startswith("jobs resumed")]) == 1
+    assert BudgetState(state_path).park_until == 0.0
+
+
+def test_the_resumed_ping_is_sent_after_the_check_lock_is_released(tmp_path):
+    # The resume ping is Discord I/O (up to ~20s); holding _check_lock through
+    # it would stall every other cancel/claim pass for the duration.
+    import time as _time
+
+    from iris.budget import BudgetState
+
+    store = JobStore(tmp_path / "jobs.json")
+    state_path = tmp_path / "budget.json"
+    BudgetState(state_path).set_park_until(_time.time() - 1)
+    sent, lock_free = [], []
+    runner, _ = make_runner(store, [], budget_state_path=str(state_path),
+                            park_minutes=60.0)
+
+    def probing_sender(channel, text, token):
+        if text.startswith("jobs resumed"):
+            acquired = runner._check_lock.acquire(blocking=False)
+            lock_free.append(acquired)
+            if acquired:
+                runner._check_lock.release()
+        sent.append((channel, text, token))
+        return True
+
+    runner.sender = probing_sender
+    runner.check_now()
+
+    assert [t for _, t, _ in sent if t.startswith("jobs resumed")] != []
+    assert lock_free == [True]  # the lock was already released at send time
+    assert BudgetState(state_path).park_until == 0.0
+
+
+def test_watch_pass_nudges_when_the_tick_cleared_the_park_first(tmp_path):
+    # The reminders tick clears the park in the shared state file without ever
+    # touching the registry; the next watcher pass must claim (and the runner
+    # owes no resume ping: the tick, having cleared, already pinged).
+    import time as _time
+
+    from iris.budget import BudgetState
+
+    store = JobStore(tmp_path / "jobs.json")
+    jid = store.add("queued under the park", "queued")
+    clock = FakeClock(_time.time())
+    state_path = tmp_path / "budget.json"
+    BudgetState(state_path).set_park_until(clock.now + 3600)
+    sent = []
+    runner, _ = make_runner(store, [FakeTurn(ok_result())], clock=clock,
+                            sender=collect_sender(sent),
+                            budget_state_path=str(state_path), park_minutes=60.0)
+
+    runner._watch_pass()  # first sighting: checked, parked, no claim
+    assert store.get(jid)["status"] == "pending"
+    runner._watch_pass()  # nothing changed: still parked
+    assert store.get(jid)["status"] == "pending"
+
+    BudgetState(state_path).set_park_until(0.0)  # the tick cleared it
+    runner._watch_pass()
+
+    assert store.get(jid)["status"] == "done"
+    assert [t for _, t, _ in sent if t.startswith("jobs resumed")] == []
 
 
 # -- credit guard: near-cap tightening --------------------------------------------

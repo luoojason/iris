@@ -308,6 +308,55 @@ def test_usage_json_dumps_the_summary_dict(tmp_path, capsys):
     assert abs(data["by_transport"]["job"] - 0.05) < 1e-9
 
 
+def test_usage_json_includes_the_credit_keys_for_the_month(tmp_path, capsys):
+    # The text rendering shows credit/percent/projection for the month; the
+    # JSON payload must carry the same story for scripts.
+    import json
+    from datetime import datetime
+
+    from iris.cli import usage
+    from iris.config import Config
+
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [metric(datetime(2026, 6, 5).timestamp(), 40.0)])
+    rc = usage(Config(metrics_file=str(path), monthly_credit=100.0),
+               usage_args(as_json=True),
+               now=datetime(2026, 6, 16).timestamp())  # half of June elapsed
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["credit"] == 100.0
+    assert abs(data["percent_used"] - 40.0) < 1e-9
+    assert abs(data["projected_month_end"] - 80.0) < 1e-9
+
+
+def test_usage_json_credit_keys_stay_off_outside_the_month_or_credit(tmp_path, capsys):
+    # Day spend against a monthly credit would mislead, and without a credit
+    # there is nothing to measure against: the keys are simply absent.
+    import json
+    from datetime import datetime
+
+    from iris.cli import usage
+    from iris.config import Config
+
+    path = tmp_path / "m.jsonl"
+    write_metrics(path, [metric(datetime(2026, 6, 16, 1).timestamp(), 40.0)])
+
+    usage(Config(metrics_file=str(path), monthly_credit=100.0),
+          usage_args(period="day", as_json=True),
+          now=datetime(2026, 6, 16, 12).timestamp())
+    day_data = json.loads(capsys.readouterr().out)
+
+    usage(Config(metrics_file=str(path)), usage_args(as_json=True),
+          now=datetime(2026, 6, 16, 12).timestamp())
+    no_credit_data = json.loads(capsys.readouterr().out)
+
+    for data in (day_data, no_credit_data):
+        assert "credit" not in data
+        assert "percent_used" not in data
+        assert "projected_month_end" not in data
+
+
 def test_usage_via_main_never_touches_network_or_subprocess(monkeypatch, tmp_path, capsys):
     import socket
     import subprocess as sp

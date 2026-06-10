@@ -122,9 +122,15 @@ def _default_runner(cmd: Sequence[str], timeout: float, prompt: str):
 _RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "429", "overloaded", "529")
 
 # Credit-pool exhaustion: the subscription itself pushed back, as opposed to a
-# per-request defect (auth, bad request). Split out so the job runner can park
-# on these without parking on one malformed job's failure.
+# per-request defect (auth, bad request). Split out so credit exhaustion stays
+# terminal (never retried) without lumping it in with the auth-shaped defects.
 _CREDIT_MARKERS = ("credit balance", "insufficient", "quota")
+
+# What parks the job fleet. Parking decides for every job at once and the text
+# it reads is free-form (model prose, folded stderr), so only API-shaped
+# pushback phrases qualify: the retry classifiers' bare 'insufficient'/'quota'
+# would park on "insufficient permissions" or "disk quota exceeded".
+_PUSHBACK_MARKERS = ("credit balance", "insufficient credit") + _RATE_LIMIT_MARKERS
 
 # Permanent failures: retrying only wastes time and credit. Auth, bad request,
 # and credit exhaustion all surface immediately instead of being hidden behind
@@ -140,12 +146,13 @@ _TERMINAL_MARKERS = _CREDIT_MARKERS + (
 def is_credit_or_rate_pushback(error_text: Optional[str]) -> bool:
     """True when an error text is the credit pool or a rate limit pushing back.
 
-    The job runner parks claiming on these. Reuses the retry classifiers'
-    marker tuples; per-request defects (auth, bad request) stay out so one
-    broken job cannot park the whole fleet.
+    The job runner parks claiming on these. API-shaped phrases only:
+    per-request defects (auth, bad request) and free-form job error text that
+    merely mentions 'insufficient' or 'quota' stay out, so one broken job
+    cannot park the whole fleet.
     """
     blob = (error_text or "").lower()
-    return any(marker in blob for marker in _CREDIT_MARKERS + _RATE_LIMIT_MARKERS)
+    return any(marker in blob for marker in _PUSHBACK_MARKERS)
 
 
 @dataclass

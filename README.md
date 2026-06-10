@@ -261,7 +261,9 @@ classifier decides), it parks claiming for `IRIS_BUDGET_PARK_MINUTES`
 (default 60). Pending jobs stay queued, one "jobs parked" ping goes out, and
 one "jobs resumed" ping follows expiry. Past 80% of the credit, jobs without
 an explicit model pin run on `IRIS_MODEL_LIGHT` when it is set; a pinned model
-is always honored, and chat routing is untouched.
+is always honored, and chat routing is untouched. Note the guard approximates
+the credit pool with the local calendar month; the pool's own reset anchor may
+differ (a credit activated mid-month renews mid-month).
 
 ### The owner's wiki
 

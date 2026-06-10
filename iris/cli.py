@@ -192,7 +192,13 @@ def budget_tick(config: Config, *, now: float | None = None, sender=None) -> Non
     now = _time.time() if now is None else now
     state = budget.BudgetState(config.budget_state)
     if 0 < state.park_until <= now:
-        state.set_park_until(0.0)  # expired: the job runner reads the same state
+        # The job runner reads the same state; whoever clears the expired park
+        # owes the "jobs resumed" ping (the transition is the dedupe), and in
+        # the standard deployment the tick usually gets there first.
+        state.set_park_until(0.0)
+        notify_send("jobs resumed: the budget park expired",
+                    token=config.discord_token, channel=config.notify_channel,
+                    sender=sender)
     if config.monthly_credit <= 0 or not config.metrics_file:
         return
     records = budget.read_metrics(config.metrics_file, budget.window(now, "month"))
@@ -260,10 +266,16 @@ def usage(config: Config, args, *, now: float | None = None) -> int:
     now = _time.time() if now is None else now
     records = budget.read_metrics(config.metrics_file, budget.window(now, args.period))
     summary = budget.summarize(records)
+    credit = config.monthly_credit if args.period == "month" else 0.0
     if args.as_json:
+        if credit > 0:
+            # The same story the text rendering tells: the JSON payload
+            # carries the credit lines whenever they would render.
+            summary["credit"] = credit
+            summary["percent_used"] = summary["total_cost"] / credit * 100
+            summary["projected_month_end"] = budget.projection(records, now)
         print(json.dumps(summary))
         return 0
-    credit = config.monthly_credit if args.period == "month" else 0.0
     proj = budget.projection(records, now) if credit > 0 else None
     print(budget.format_summary(summary, credit=credit, projection=proj))
     return 0
