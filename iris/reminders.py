@@ -41,8 +41,11 @@ def parse_when(when: str, now: Optional[float] = None) -> float:
     rel = _REL.match(text)
     if rel:
         return now + int(rel.group(1)) * _UNIT[rel.group(2).lower()]
+    # fromisoformat only learned the trailing 'Z' in Python 3.11; the project
+    # floor is 3.10, so normalize it ourselves.
+    iso = text[:-1] + "+00:00" if text[-1:] in ("z", "Z") else text
     try:
-        dt = datetime.fromisoformat(text)
+        dt = datetime.fromisoformat(iso)
     except ValueError as exc:
         raise ValueError(f"could not parse time {when!r}; use +30m, +2h, +1d, or an ISO datetime") from exc
     if dt.tzinfo is None:
