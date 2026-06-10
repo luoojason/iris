@@ -262,27 +262,32 @@ class LiveConversationRunner:
             await self._send("Something went wrong starting that one. Try again in a moment.")
             return
         self._live = handle
-        ack_task = asyncio.ensure_future(self._delayed_ack())
+        # close() releases the per-conversation lock and is idempotent. It MUST run
+        # on every exit path: a send failure or a non-ClaudeError from result()
+        # (e.g. a session-store IO error) would otherwise leak the lock and wedge
+        # the conversation forever, since begin() acquired it for the whole turn.
         try:
-            cm = self._typing() if self._typing is not None else None
-            if cm is not None:
-                async with cm:
+            ack_task = asyncio.ensure_future(self._delayed_ack())
+            try:
+                cm = self._typing() if self._typing is not None else None
+                if cm is not None:
+                    async with cm:
+                        reply = await handle.result()
+                else:
                     reply = await handle.result()
-            else:
-                reply = await handle.result()
-        finally:
-            ack_task.cancel()
-        if reply:
-            await self._send(reply)
-        # aftermath waits the process out, releases the conversation lock, and
-        # surfaces any stray follow-up (a message that raced the close boundary).
-        try:
+            finally:
+                ack_task.cancel()
+            if reply:
+                await self._send(reply)
+            # aftermath waits the process out and surfaces any stray follow-up
+            # (a message that raced the close boundary).
             strays = await handle.aftermath()
+            for stray in strays:
+                if stray:
+                    await self._send(stray)
         finally:
+            handle.close()
             self._live = None
-        for stray in strays:
-            if stray:
-                await self._send(stray)
 
     async def _delayed_ack(self) -> None:
         try:

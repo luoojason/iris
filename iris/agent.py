@@ -16,7 +16,7 @@ from typing import Optional
 from .config import Config
 from .driver import ClaudeDriver, ClaudeResult
 from .metrics import emit_turn
-from .router import choose_model, choose_model_explained
+from .router import choose_model_explained
 from .sessions import SessionStore
 from .stream_driver import StreamDriver, StreamTurn
 
@@ -100,6 +100,9 @@ class Agent:
         self._locks_guard = threading.Lock()
         self._compacting: set[str] = set()
         self._compact_cooldown_until: dict[str, float] = {}
+        # Bumped on reset(); a live turn captures it at start and refuses to write
+        # a stale session back if a reset advanced it mid-turn.
+        self._epochs: dict[str, int] = {}
         self._last_compaction: threading.Thread | None = None
 
     def _lock_for(self, conversation_id: str) -> threading.Lock:
@@ -167,13 +170,15 @@ class Agent:
         """
         if self.stream_driver is None:
             raise RuntimeError("live_turn requires a stream_driver (live interrupt is off)")
-        model = choose_model(
+        model, reason = choose_model_explained(
             text,
             light_model=self.light_model or None,
             has_attachments=has_attachments,
             trivial_max_chars=self.trivial_max_chars,
         )
-        return LiveTurn(self, conversation_id, text, model)
+        routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
+        return LiveTurn(self, conversation_id, text, model,
+                        routed=routed, reason=reason, has_attachments=has_attachments)
 
     def _should_compact(self, conversation_id: str, result: ClaudeResult) -> bool:
         """Whether this conversation is big enough to condense onto a fresh session."""
@@ -251,7 +256,13 @@ class Agent:
 
     def reset(self, conversation_id: str) -> bool:
         """Forget a conversation so the next message starts fresh."""
+        with self._locks_guard:
+            self._epochs[conversation_id] = self._epochs.get(conversation_id, 0) + 1
         return self.store.clear(conversation_id)
+
+    def _epoch_for(self, conversation_id: str) -> int:
+        with self._locks_guard:
+            return self._epochs.get(conversation_id, 0)
 
     @classmethod
     def from_config(cls, config: Config) -> "Agent":
@@ -317,11 +328,16 @@ class LiveTurn:
     any stray follow-ups. :meth:`close` is idempotent and always releases the lock.
     """
 
-    def __init__(self, agent: "Agent", conversation_id: str, prompt: str, model: Optional[str]):
+    def __init__(self, agent: "Agent", conversation_id: str, prompt: str, model: Optional[str],
+                 *, routed: str = "strong", reason: str = "", has_attachments: bool = False):
         self._agent = agent
         self._cid = conversation_id
         self._prompt = prompt
         self._model = model
+        self._routed = routed
+        self._reason = reason
+        self._has_attachments = has_attachments
+        self._epoch = agent._epoch_for(conversation_id)
         self._lock = agent._lock_for(conversation_id)
         self._have_lock = False
         self._turn: Optional[StreamTurn] = None
@@ -355,7 +371,13 @@ class LiveTurn:
         """Await the reply, retrying once on a dead or overflowed session."""
         if self._final is not None:
             return self._final
-        result = await asyncio.to_thread(self._resolve)
+        try:
+            result = await asyncio.to_thread(self._resolve)
+        except BaseException:
+            # Never leak the conversation lock if persistence or a relaunch fails;
+            # close() is idempotent, so the later aftermath/close is harmless.
+            self.close()
+            raise
         self._final = result
         return result
 
@@ -384,8 +406,14 @@ class LiveTurn:
         if result is None:
             result = ClaudeResult(text="", session_id=session_id, is_error=True,
                                   error="live turn ended without a result")
-        if result.session_id:
+        # Honor a reset that landed mid-turn: if the conversation's epoch advanced,
+        # the user cleared it, so do not write this now-stale session back.
+        if result.session_id and self._agent._epoch_for(self._cid) == self._epoch:
             self._agent.store.set(self._cid, result.session_id)
+        emit_turn(
+            self._agent.metrics_file, self._cid, result, self._routed, self._reason,
+            self._has_attachments, self._agent.store.turns(self._cid),
+        )
         self._due_to_compact = not result.is_error and self._agent._should_compact(self._cid, result)
         return result
 

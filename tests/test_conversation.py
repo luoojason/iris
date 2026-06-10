@@ -162,3 +162,51 @@ def test_silent_turn_sends_nothing():
         assert sent == []
 
     asyncio.run(go())
+
+
+def test_live_runner_closes_handle_when_send_fails():
+    """Regression: a send failure mid-turn must still close the live handle, so the
+    per-conversation lock is released and the conversation is not wedged forever."""
+    from iris.conversation import LiveConversationRunner
+
+    async def go():
+        closed: list[bool] = []
+
+        class FakeHandle:
+            async def begin(self):
+                return None
+
+            def is_open(self):
+                return False
+
+            async def inject(self, text):
+                return False
+
+            async def result(self):
+                return "the reply"
+
+            async def aftermath(self):
+                return []
+
+            def close(self):
+                closed.append(True)
+
+        async def send(text):
+            raise RuntimeError("discord send failed")
+
+        runner = LiveConversationRunner(
+            start_turn=lambda prompt, has_attachments: FakeHandle(),
+            send=send,
+            ack_line=lambda: None,
+            ack_delay=10,  # the interim ack never fires in this test
+        )
+        runner.submit(Turn(text="hi"))
+        worker = runner._worker
+        assert worker is not None
+        try:
+            await worker
+        except RuntimeError:
+            pass  # the send error propagates out of the worker; the point is close() still ran
+        assert closed == [True]
+
+    asyncio.run(go())

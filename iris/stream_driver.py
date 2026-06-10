@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -60,14 +61,23 @@ Process = "subprocess.Popen[str]"
 
 
 def _default_spawn(cmd: Sequence[str], env: dict) -> "subprocess.Popen[str]":
+    kwargs = {}
+    if os.name == "posix":
+        # Own process group so the watchdog can kill claude's whole child tree
+        # (MCP stdio servers, in-flight tool subprocesses), matching the one-shot
+        # driver's hardening instead of orphaning them.
+        kwargs["start_new_session"] = True
     return subprocess.Popen(
         list(cmd),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
         env=env,
+        **kwargs,
     )
 
 
@@ -180,8 +190,10 @@ class StreamTurn:
                 return
 
     def _kill(self) -> None:
+        # Kill the whole process group (claude plus its tool/MCP children), not
+        # just the direct child. Reuses the one-shot driver's hardened helper.
         try:
-            self._proc.kill()
+            ClaudeDriver._kill_tree(self._proc)
         except Exception:
             pass
 
@@ -254,7 +266,9 @@ class StreamTurn:
             self._closed = True
 
         if self._primary_error_obj is not None:
-            self._primary = parse_result_event(self._primary_error_obj, self._session_id, returncode=1, stderr=stderr)
+            self._primary = parse_result_event(
+                self._primary_error_obj, self._session_id, returncode=1, stderr=stderr, fold_stderr=True,
+            )
         elif self._primary is None:
             # Never saw a result: a crash, or the watchdog killed a hung process.
             msg = "claude stream ended without a result"

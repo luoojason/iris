@@ -315,15 +315,18 @@ class ClaudeDriver:
 
     @staticmethod
     def _kill_tree(proc: "subprocess.Popen") -> None:
-        try:
-            if os.name == "posix":
-                os.killpg(os.getpgid(proc.pid), 9)
+        # Only attempt a process-group kill for a real, positive pid; otherwise
+        # (a non-started or fake process) fall straight through to proc.kill().
+        pid = getattr(proc, "pid", None)
+        if os.name == "posix" and isinstance(pid, int) and pid > 0:
+            try:
+                os.killpg(os.getpgid(pid), 9)
                 return
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+            except Exception:
+                pass
         try:
             proc.kill()
-        except OSError:
+        except Exception:
             pass
 
     def _parse(self, proc, session_id: Optional[str]) -> ClaudeResult:
@@ -377,6 +380,7 @@ def parse_result_event(
     *,
     returncode: int = 0,
     stderr: str = "",
+    fold_stderr: bool = False,
 ) -> ClaudeResult:
     """Turn one ``result`` JSON object into a :class:`ClaudeResult`.
 
@@ -405,12 +409,16 @@ def parse_result_event(
         error = (
             obj.get("error")
             or obj.get("result")
-            or (stderr or None)
             or obj.get("subtype")
             or f"claude exited {returncode}"
         )
-        if stderr and error and stderr not in error:
-            error = f"{error}: {stderr}"
+        # fold_stderr is set only by the stream transport, where a dead --resume
+        # session reports its cause on stderr while the result event's error field
+        # is empty. The one-shot path leaves it off so its retry classifier never
+        # sees appended stderr noise (which could flip a retryable failure to look
+        # terminal), keeping that path byte-for-byte as before the merge.
+        if fold_stderr and stderr and stderr not in (error or ""):
+            error = f"{error}: {stderr}" if error else stderr
 
     return ClaudeResult(
         text=obj.get("result") or "",
