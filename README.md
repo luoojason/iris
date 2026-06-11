@@ -263,6 +263,81 @@ or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 
+### Voice messages
+
+Iris can transcribe inbound voice notes locally and for free, so you can talk to
+it on Discord or Telegram. Transcription happens **in the adapter**, before the
+prompt reaches the brain: a voice attachment is downloaded, run through a local
+[`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) model, and folded
+into the prompt as text. (This is the right seam for *inbound* speech: an MCP
+tool the model calls could not intercept the attachment itself.)
+
+```bash
+pip install -e ".[voice]"
+# then in .env:
+IRIS_VOICE=true
+IRIS_VOICE_MODEL=base   # tiny | base | small | medium — larger = slower, more accurate
+```
+
+It is **off by default** on purpose. The first voice message downloads the model
+(tens of MB) and runs CPU inference, which can be slow on a small host, so turn
+it on only where you have verified the box can keep up inside your turn timeout.
+With voice off, an audio attachment degrades to a plain file reference. The model
+is loaded lazily on the first voice message, so enabling it costs nothing until
+someone actually sends audio, preserving Iris's zero-idle-inference shape.
+
+Iris can also **reply** out loud. The bundled `speak` tool
+(`iris/mcp/tts_server.py`) renders text to speech with a local engine and posts
+the audio to Discord. Unlike inbound transcription, *output* speech is a natural
+MCP tool: the model decides when a spoken reply fits and calls it. It uses the
+first available engine: `IRIS_TTS_CMD` (a template reading text on stdin, writing
+to `{out}`), then [piper](https://github.com/rhasspy/piper) (set `IRIS_TTS_VOICE`
+to a voice model), then macOS `say`, then `espeak-ng`. Wire the tts server into
+your mcp config and allowlist `mcp__tts__speak`. If no engine is installed the
+tool just reports that and the bot replies in text.
+
+### Model routing
+
+Set `IRIS_MODEL_LIGHT` to send clearly-trivial turns ("thanks", "lol", a short
+greeting) to a cheaper, faster model while everything substantive stays on
+`IRIS_MODEL`. The decision is a pure heuristic with no extra model call, and it
+is deliberately one-directional: it only ever *downgrades*, and only when a
+message is short, has no attachment, no code fence, and none of the words that
+signal real work (explain, debug, why, plan, compare, …). When in any doubt it
+keeps the strong model, because answering a hard question with a weak model is
+the costly mistake. Leave `IRIS_MODEL_LIGHT` blank to run every turn on one
+model. The default model can switch per turn even mid-conversation; the resumed
+session is just the transcript.
+
+### Long conversations (auto-compaction)
+
+Each conversation rides one `claude` session, resumed turn after turn. Left
+alone, a months-old Discord channel would eventually grow past the model's
+context window. Claude Code auto-compacts in its interactive UI, but that
+behavior is undocumented for headless `-p --resume` and there is no programmatic
+`/compact`, so Iris does not rely on it: it manages its own context budget.
+
+The trigger is **token-accurate**, not a guess. Every `claude -p` turn reports
+how many prompt tokens it carried (fresh plus cache), and when that reaches
+`IRIS_COMPACT_AT_TOKENS` (default 150000, leaving headroom under a 200k window)
+Iris compacts. Because it reads the real context size, a single tool-heavy turn
+(a big web fetch, a large file read) trips it just as a long chat would.
+`IRIS_COMPACT_EVERY` (default 60 turns) is a coarse backstop for the rare case
+where usage numbers are missing. Either at `0` disables that trigger.
+
+To compact, Iris asks the current session for a summary, then carries the summary
+onto a **fresh** session and continues there. The summary runs while the old
+session is still inside its limit, so the summarization itself never overflows,
+and it happens in a background thread **after** your reply is sent, so the turn
+that triggers it is never slowed. It briefly holds that one conversation's lock
+for the summary call, so the very next message on the same conversation can wait
+for it; the fresh-session seeding then runs lock-free. If a turn ever does hit a context-overflow error
+anyway, Iris treats it like a dead session: it starts fresh and retries, so the
+bot recovers instead of wedging (that path does drop history, which is why the
+token trigger is set to fire well before it). Compaction trades a little deep
+history for a conversation that runs indefinitely, the same trade Claude Code's
+own auto-compact makes.
+
 ## What carries over from Hermes
 
 Because Claude Code's skills and tools use open formats, most of a Hermes-style
