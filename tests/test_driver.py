@@ -238,3 +238,16 @@ def test_context_tokens_absent_when_no_usage():
     d = ClaudeDriver(runner=make_runner([FakeProc(0, success_json())]))
     result = d.run("hello")
     assert result.context_tokens is None
+
+
+def test_default_denylist_blocks_the_agent_alias():
+    """Newer claude CLIs expose the subagent tool as Agent as well as Task.
+
+    Denying only Task leaves subagent spawning reachable under the alias, so
+    the default denylist must carry both names.
+    """
+    d = ClaudeDriver(runner=make_runner([]))
+    cmd = d.build_command()
+    i = cmd.index("--disallowedTools")
+    denied = cmd[i + 1:]
+    assert "Task" in denied and "Agent" in denied

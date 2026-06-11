@@ -82,6 +82,7 @@ DANGEROUS_BUILTINS = (
     "Edit",
     "NotebookEdit",
     "Task",
+    "Agent",  # newer CLIs expose the subagent tool under this alias too
     "KillShell",
     "BashOutput",
 )
