@@ -38,6 +38,7 @@ from typing import Optional
 from .config import Config
 from .driver import DANGEROUS_BUILTINS, ClaudeDriver
 from .inbox import Inbox
+from .statefile import quarantine_corrupt
 from .workspaces import WorkspaceStore, collect_artifacts
 
 try:
@@ -151,6 +152,7 @@ class JobStore:
             data = json.loads(self.path.read_text("utf-8"))
             return data if isinstance(data, list) else []
         except (json.JSONDecodeError, OSError):
+            quarantine_corrupt(self.path, "job registry")
             return []
 
     def _save(self, items: list[dict]) -> None:

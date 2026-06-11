@@ -27,6 +27,13 @@ def result(cost=0.5, tokens=1000, is_error=False):
 NOW = 1780000000.0  # 2026-05-29 UTC, a fixed month
 
 
+def freeze_usage_clock(monkeypatch):
+    """Pin iris.usage's clock so record() and the read-back land in one month
+    (the hook tests record and read with now=None)."""
+    import iris.usage as usage_mod
+    monkeypatch.setattr(usage_mod.time, "time", lambda: NOW)
+
+
 # -- ledger --------------------------------------------------------------------
 
 
@@ -162,7 +169,8 @@ def test_budget_tick_pings_each_crossed_threshold_once(tmp_path):
     assert any("50%" in text for _, text in pings)
     assert any("80%" in text for _, text in pings)
     # the next tick is silent: both crossings were recorded
-    assert budget_tick(config, now=NOW, send=send)
+    line2 = budget_tick(config, now=NOW, send=send)
+    assert "pinged" not in line2
     assert len(pings) == 2
 
 
@@ -211,17 +219,18 @@ def test_cli_usage_command(tmp_path, monkeypatch, capsys):
 def test_usage_mcp_tool(tmp_path, monkeypatch):
     import iris.mcp.usage as srv
 
+    freeze_usage_clock(monkeypatch)
     config = guard_config(tmp_path)
     monkeypatch.setattr(srv, "_CONFIG", config)
     UsageLedger(config.usage_file).record("chat", result(cost=5.0))  # current month
-    text = srv.usage_report()
-    assert "50%" in text
+    out = srv.usage_report()
+    assert "50%" in out
 
 
 # -- recording hooks -----------------------------------------------------------------
 
 
-def test_agent_records_chat_turns(tmp_path):
+def test_agent_records_chat_turns(tmp_path, monkeypatch):
     from iris.agent import Agent
     from iris.sessions import SessionStore
 
@@ -231,6 +240,7 @@ def test_agent_records_chat_turns(tmp_path):
         def run(self, prompt, session_id=None, model=None):
             return result(cost=0.3)
 
+    freeze_usage_clock(monkeypatch)
     config = guard_config(tmp_path)
     guard = CreditGuard.from_config(config)
     agent = Agent(FakeDriver(), SessionStore(tmp_path / "s.json"), guard=guard)
@@ -261,9 +271,10 @@ def test_agent_tightened_routing_uses_the_light_model(tmp_path):
     assert calls == ["light"]
 
 
-def test_run_job_records_job_turns(tmp_path):
+def test_run_job_records_job_turns(tmp_path, monkeypatch):
     from iris.jobs import JobStore, run_job
 
+    freeze_usage_clock(monkeypatch)
     store = JobStore(tmp_path / "jobs.json")
     job = store.add("t", "do it", ["subagents"], "", "chan")
     config = guard_config(tmp_path, jobs_enabled=True, discord_token="tok")
@@ -309,9 +320,10 @@ def test_start_job_parks_at_park_level(tmp_path, monkeypatch):
     assert JobStore(config.jobs_file).get(1)["state"] == "parked"
 
 
-def test_watch_records_notify_turns(tmp_path):
+def test_watch_records_notify_turns(tmp_path, monkeypatch):
     import iris.notify.watch_cmd as wc
 
+    freeze_usage_clock(monkeypatch)
     config = Config(
         discord_token="tok", notify_channel="chan",
         usage_file=str(tmp_path / "usage.json"),

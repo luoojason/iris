@@ -545,3 +545,13 @@ def test_send_discord_file_sanitizes_the_header_filename(tmp_path, monkeypatch):
     assert b"b\rc" not in header_zone
     # but the real filename still reaches Discord inside the JSON payload
     assert b'a\\"b\\rc.txt' in body
+
+
+def test_corrupt_store_is_quarantined_not_silently_dropped(tmp_path):
+    path = tmp_path / "jobs.json"
+    path.write_text('[{"id": 1, "title": "precious"}]\nGARBAGE', encoding="utf-8")
+    store = JobStore(path)
+    assert store.all() == []  # recovered to fresh
+    sidecar = path.with_suffix(".json.corrupt")
+    assert sidecar.exists()  # the owner's data is preserved for recovery
+    assert "precious" in sidecar.read_text("utf-8")

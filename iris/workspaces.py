@@ -66,6 +66,9 @@ class WorkspaceStore:
         try:
             data = json.loads(self.path.read_text("utf-8"))
         except (json.JSONDecodeError, OSError):
+            
+            from .statefile import quarantine_corrupt
+            quarantine_corrupt(self.path, "workspace registry")
             return {}
         if not isinstance(data, dict):
             return {}

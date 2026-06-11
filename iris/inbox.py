@@ -51,6 +51,8 @@ class Inbox:
         try:
             data = json.loads(self.path.read_text("utf-8"))
         except (json.JSONDecodeError, OSError):
+            from .statefile import quarantine_corrupt
+            quarantine_corrupt(self.path, "fold-back inbox")
             return []
         if not isinstance(data, list):
             return []

@@ -86,7 +86,8 @@ def test_validate_rules_names_every_problem(tmp_path):
 
 
 def test_validate_rules_rejects_a_non_list():
-    assert validate_rules({"name": "x"})  # one problem: not a list
+    problems = validate_rules({"name": "x"})  # one problem: not a list
+    assert len(problems) == 1 and "list" in problems[0]
 
 
 # -- file_exists / file_gone ------------------------------------------------------

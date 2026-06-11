@@ -70,6 +70,8 @@ class UsageLedger:
             data = json.loads(self.path.read_text("utf-8"))
             return data if isinstance(data, dict) else {}
         except (json.JSONDecodeError, OSError):
+            from .statefile import quarantine_corrupt
+            quarantine_corrupt(self.path, "usage ledger")
             return {}
 
     def _save(self, data: dict) -> None:
