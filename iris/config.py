@@ -53,6 +53,9 @@ class Config:
     allowed_channel_ids: list[str] = field(default_factory=list)
     # Respond to every message in allowed channels, not just @mentions.
     respond_without_mention: bool = False
+    # Start a thread when a task is begun in a regular channel, so the general
+    # channel stays a clean launcher and each task gets its own focused space.
+    auto_thread: bool = False
 
     claude_bin: str = "claude"
     model: Optional[str] = None
@@ -173,6 +176,7 @@ class Config:
             allowed_user_ids=_split(os.environ.get("IRIS_ALLOWED_USER_IDS")),
             allowed_channel_ids=_split(os.environ.get("IRIS_ALLOWED_CHANNEL_IDS")),
             respond_without_mention=_truthy(os.environ.get("IRIS_RESPOND_WITHOUT_MENTION")),
+            auto_thread=_truthy(os.environ.get("IRIS_AUTO_THREAD")),
             claude_bin=os.environ.get("IRIS_CLAUDE_BIN", "claude"),
             model=os.environ.get("IRIS_MODEL") or None,
             light_model=os.environ.get("IRIS_MODEL_LIGHT", ""),

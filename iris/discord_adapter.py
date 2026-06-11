@@ -103,6 +103,27 @@ class _LiveAdapterHandle:
         self._live.close()
 
 
+def thread_name_for(text: str, limit: int = 90) -> str:
+    """A Discord thread name from a task's opening message (<= 100-char limit)."""
+    name = " ".join((text or "").split())  # collapse whitespace/newlines
+    return name[:limit].rstrip() or "New task"
+
+
+def should_auto_thread(channel, config) -> bool:
+    """Whether to spin a fresh thread for a task started in this channel.
+
+    Only in a regular guild channel: never in a DM (no threads there) and never
+    when the message is already inside a thread (it just continues there).
+    """
+    if not config.auto_thread:
+        return False
+    if getattr(channel, "guild", None) is None:
+        return False
+    if getattr(channel, "parent_id", None) is not None:
+        return False
+    return True
+
+
 def should_handle(message, bot_user, config) -> bool:
     """Decide whether to answer a message. Pure, so it is unit-testable.
 
@@ -236,11 +257,23 @@ def build_client(config: Config, agent: Agent):
             await message.channel.send("Started a fresh conversation.")
             return
 
+        task_title = prompt  # the user's words, for naming a thread (before describe)
         attach_paths = await _save_attachments(message.attachments, config.attachments_dir, conversation_id)
         transcripts = await asyncio.to_thread(transcribe_audio, attach_paths, transcriber)
         prompt = describe(prompt, attach_paths, transcripts)
         if not prompt:
             return
+
+        # A new task started in the general channel gets its own thread, so the
+        # channel stays a clean launcher and the work happens in a focused space.
+        channel = message.channel
+        if should_auto_thread(channel, config):
+            try:
+                thread = await message.create_thread(name=thread_name_for(task_title))
+                channel = thread
+                conversation_id = f"discord:{thread.id}"
+            except Exception:
+                log.warning("could not start a thread for the task; replying in the channel", exc_info=True)
 
         async def receipt() -> None:
             # Confirm a mid-task message was seen; it folds into the next turn.
@@ -249,7 +282,7 @@ def build_client(config: Config, agent: Agent):
             except Exception:
                 log.debug("could not react to mid-task message", exc_info=True)
 
-        runner = _runner_for(conversation_id, message.channel)
+        runner = _runner_for(conversation_id, channel)
         runner.submit(Turn(text=prompt, has_attachments=bool(attach_paths), receipt=receipt))
 
     return client
