@@ -380,10 +380,10 @@ def test_one_crashing_rule_does_not_abort_the_rest(tmp_path, monkeypatch):
 
     real_evaluate = wakes_mod._evaluate
 
-    def fragile(rule, entry):
+    def fragile(rule, entry, *args, **kwargs):
         if rule["name"] == "poisoned":
             raise OSError("filesystem oddity")
-        return real_evaluate(rule, entry)
+        return real_evaluate(rule, entry, *args, **kwargs)
 
     monkeypatch.setattr(wakes_mod, "_evaluate", fragile)
     target = tmp_path / "drop.txt"
@@ -414,3 +414,125 @@ def test_duplicate_rule_names_are_skipped_visibly(tmp_path):
     ])
     line, _, _ = tick(tmp_path)
     assert "duplicate" in line and "dup" in line
+
+
+# -- url / url_pattern kinds --------------------------------------------------
+
+
+def url_rule(tmp_path, **over):
+    base = {
+        "name": "site",
+        "kind": "url",
+        "url": "https://example.com/status",
+        "message": "the page changed",
+        "cooldown_secs": 3600,
+    }
+    base.update(over)
+    return base
+
+
+def fetcher(pages):
+    """pages: list of bodies returned on successive fetches; str raises."""
+    calls = {"n": 0}
+
+    def fetch(url, timeout):
+        i = min(calls["n"], len(pages) - 1)
+        calls["n"] += 1
+        body = pages[i]
+        if isinstance(body, Exception):
+            raise body
+        return body.encode("utf-8")
+
+    return fetch
+
+
+def utick(tmp_path, fetch, now=NOW, pings=None):
+    pings = pings if pings is not None else []
+
+    def send(channel, text, token):
+        pings.append((channel, text))
+        return True
+
+    from iris.wakes import tick_wakes
+    config = wake_config(tmp_path)
+    line = tick_wakes(config, now=now, send=send, fetch=fetch)
+    return line, pings, Inbox(config.inbox_file)
+
+
+def test_url_arms_then_fires_on_change(tmp_path):
+    write_rules(tmp_path, [url_rule(tmp_path)])
+    fetch = fetcher(["v1", "v1", "v2"])
+    line, pings, _ = utick(tmp_path, fetch)  # first fetch arms
+    assert "0 fired" in line and pings == []
+    line, pings, _ = utick(tmp_path, fetch, now=NOW + 60, pings=[])  # unchanged
+    assert "0 fired" in line
+    line, pings, inbox = utick(tmp_path, fetch, now=NOW + 120, pings=[])  # changed
+    assert "1 fired" in line
+    assert pings == [("home-1", "wake site: the page changed")]
+    assert inbox.drain() == ["wake site: the page changed"]
+
+
+def test_url_failed_fetch_does_not_fire_or_advance_state(tmp_path):
+    write_rules(tmp_path, [url_rule(tmp_path)])
+    import urllib.error
+    fetch = fetcher(["v1", urllib.error.URLError("down"), "v2"])
+    utick(tmp_path, fetch)  # arm on v1
+    line, pings, _ = utick(tmp_path, fetch, now=NOW + 60, pings=[])  # fetch fails
+    assert "0 fired" in line and pings == []
+    # the failed tick must not have advanced the digest: v2 is still a change
+    line, pings, _ = utick(tmp_path, fetch, now=NOW + 120, pings=[])
+    assert "1 fired" in line
+
+
+def test_url_pattern_fires_on_match_appearing(tmp_path):
+    write_rules(tmp_path, [url_rule(
+        tmp_path, name="instock", kind="url_pattern",
+        pattern="In stock", message="it is back in stock")])
+    fetch = fetcher(["Out of stock", "Out of stock", "In stock now!"])
+    line, _, _ = utick(tmp_path, fetch)  # arm
+    assert "0 fired" in line
+    line, pings, _ = utick(tmp_path, fetch, now=NOW + 60, pings=[])  # still out
+    assert "0 fired" in line
+    line, pings, _ = utick(tmp_path, fetch, now=NOW + 120, pings=[])  # match appears
+    assert "1 fired" in line
+    assert "In stock now!" in pings[0][1]  # the matching line rides along
+
+
+def test_url_pattern_does_not_refire_while_match_persists(tmp_path):
+    write_rules(tmp_path, [url_rule(
+        tmp_path, name="instock", kind="url_pattern", cooldown_secs=1,
+        pattern="In stock", message="back")])
+    fetch = fetcher(["nope", "In stock", "In stock"])
+    utick(tmp_path, fetch)  # arm
+    line, _, _ = utick(tmp_path, fetch, now=NOW + 10, pings=[])  # appears -> fire
+    assert "1 fired" in line
+    line, pings, _ = utick(tmp_path, fetch, now=NOW + 20, pings=[])  # persists, no refire
+    assert "0 fired" in line and pings == []
+
+
+def test_url_validation(tmp_path):
+    good = url_rule(tmp_path)
+    assert validate_rules([good]) == []
+    bad_scheme = url_rule(tmp_path, name="ftp", url="ftp://x/y")
+    assert validate_rules([bad_scheme])
+    no_url = {"name": "nourl", "kind": "url", "message": "m"}
+    assert validate_rules([no_url])
+    pat_missing = {"name": "p", "kind": "url_pattern", "url": "https://x", "message": "m"}
+    assert validate_rules([pat_missing])  # url_pattern needs a pattern
+
+
+def test_url_doctor_reports_ok(tmp_path):
+    from iris.wakes import doctor_lines
+    write_rules(tmp_path, [url_rule(tmp_path)])
+    assert doctor_lines(wake_config(tmp_path)) == ["wakes: 1 rules ok"]
+
+
+def test_wake_http_timeout_config_knob(tmp_path, monkeypatch):
+    import os
+    for key in list(os.environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_WAKE_HTTP_TIMEOUT", "30")
+    assert Config.from_env(dotenv=tmp_path / "none.env").wake_http_timeout == 30.0
+    monkeypatch.delenv("IRIS_WAKE_HTTP_TIMEOUT")
+    assert Config.from_env(dotenv=tmp_path / "none.env").wake_http_timeout == 15.0

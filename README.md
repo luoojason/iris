@@ -230,7 +230,20 @@ your pre-written message, and the event folds into the agent's next turn.
 
 Kinds: `file_exists`, `file_gone`, `file_changed` (all edge-triggered; the
 first observation arms without firing), and `log_pattern` (only bytes
-appended after the rule was armed are scanned; rotation is handled).
+appended after the rule was armed are scanned; rotation is handled). Two more
+watch a remote URL instead of a local path (the merged-in change watcher):
+`url` fires when the page body changes, and `url_pattern` fires when a regex
+appears in it. They take a `url` field instead of `path`; the tick does one
+bounded HTTP GET per rule (`IRIS_WAKE_HTTP_TIMEOUT`), still with no model call.
+
+```json
+[
+  {"name": "release", "kind": "url_pattern",
+   "url": "https://example.com/downloads", "pattern": "v2\\.\\d+",
+   "message": "a new release is listed", "cooldown_secs": 3600}
+]
+```
+
 `cooldown_secs` absorbs flapping; `"once": true` disarms a rule after its
 first fire. `iris doctor` validates the rules file and names every problem.
 

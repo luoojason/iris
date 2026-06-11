@@ -125,9 +125,20 @@ list[str]` of problems) so tests need no filesystem.
 Both on `Config` (`wakes_file`, `wakes_state`), documented in README and
 `.env.example`.
 
+## URL kinds (merged change watcher)
+
+Two further kinds watch a remote URL instead of a local path, documented in
+`2026-06-09-url-watcher-design.md`: `url` (fires on body change) and
+`url_pattern` (fires on a regex appearing in the body). They carry a `url`
+field instead of `path`, share every piece of the machinery above, and add
+one bounded HTTP GET per rule per tick (`IRIS_WAKE_HTTP_TIMEOUT`). This
+relaxes the "no network besides the ping" line for those kinds only. The
+model-call invariant is not relaxed: a URL wake is HTTP plus a hash.
+
 ## Invariants
 
-- Zero model calls anywhere in this module.
-- A wake failure (bad rule, unreadable path, Discord down) degrades to a
-  logged line; reminder delivery in the same tick is never affected.
-- Pings carry owner-authored text plus matched log lines only.
+- Zero model calls anywhere in this module (URL kinds included).
+- A wake failure (bad rule, unreadable path, failed fetch, Discord down)
+  degrades to a logged line; reminder delivery in the same tick is never
+  affected, and other rules still run.
+- Pings carry owner-authored text plus matched log/body lines only.

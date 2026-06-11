@@ -111,6 +111,8 @@ class Config:
     # (no model call, ever). The state file is tick-owned bookkeeping.
     wakes_file: str = "iris-wakes.json"
     wakes_state: str = "iris-wakes.state.json"
+    # Per-fetch timeout for url / url_pattern wake kinds (the change watcher).
+    wake_http_timeout: float = 15.0
 
     # Credit guard: the usage ledger always records; the budget (USD-estimate
     # per month, 0 = off) turns on threshold pings, job parking at park_at%,
@@ -197,6 +199,7 @@ class Config:
             wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
             wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
             wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
+            wake_http_timeout=float(os.environ.get("IRIS_WAKE_HTTP_TIMEOUT", "15")),
             usage_file=os.environ.get("IRIS_USAGE_FILE", "iris-usage.json"),
             usage_budget_usd=float(os.environ.get("IRIS_USAGE_BUDGET_USD", "0")),
             usage_tighten_at=float(os.environ.get("IRIS_USAGE_TIGHTEN_AT", "80")),
