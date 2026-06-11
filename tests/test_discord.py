@@ -39,3 +39,65 @@ def test_respects_a_smaller_limit():
     chunks = chunk_text(text, 30)
     assert all(len(c) <= 30 for c in chunks)
     assert "".join(chunks) == text
+
+
+# -- auto-threading a new task -----------------------------------------------
+
+from iris.config import Config
+from iris.discord_adapter import should_auto_thread, should_handle, thread_name_for
+
+
+class _Chan:
+    def __init__(self, *, guild=True, parent_id=None, id=1):
+        self.guild = object() if guild else None
+        self.parent_id = parent_id
+        self.id = id
+
+
+class _User:
+    def __init__(self, id=10, bot=False):
+        self.id = id
+        self.bot = bot
+
+
+class _Msg:
+    def __init__(self, channel, author=None, mentions=()):
+        self.channel = channel
+        self.author = author or _User()
+        self.mentions = list(mentions)
+
+
+def test_thread_name_collapses_whitespace_and_truncates():
+    assert thread_name_for("  Research   the\nEUDR rules ") == "Research the EUDR rules"
+    assert thread_name_for("") == "New task"
+    assert thread_name_for("   ") == "New task"
+    assert len(thread_name_for("x" * 200)) <= 90
+
+
+def test_should_auto_thread_only_in_a_regular_guild_channel():
+    on = Config(auto_thread=True)
+    assert should_auto_thread(_Chan(guild=True, parent_id=None), on) is True
+    assert should_auto_thread(_Chan(guild=True, parent_id=5), on) is False   # already a thread
+    assert should_auto_thread(_Chan(guild=False), on) is False               # a DM
+    assert should_auto_thread(_Chan(guild=True, parent_id=None), Config(auto_thread=False)) is False
+
+
+def test_auto_thread_config_knob(tmp_path, monkeypatch):
+    import os
+    for k in list(os.environ):
+        if k.startswith("IRIS_"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("IRIS_AUTO_THREAD", "true")
+    assert Config.from_env(dotenv=tmp_path / "none.env").auto_thread is True
+    monkeypatch.delenv("IRIS_AUTO_THREAD")
+    assert Config.from_env(dotenv=tmp_path / "none.env").auto_thread is False
+
+
+def test_should_handle_mention_only_in_channel_auto_in_thread():
+    cfg = Config(respond_without_mention=False)
+    bot = _User(id=999)
+    chan = _Chan(guild=True, parent_id=None)
+    assert should_handle(_Msg(chan, mentions=[]), bot, cfg) is False        # un-mentioned channel msg ignored
+    assert should_handle(_Msg(chan, mentions=[bot]), bot, cfg) is True      # mention -> handled
+    thread = _Chan(guild=True, parent_id=chan.id)
+    assert should_handle(_Msg(thread, mentions=[]), bot, cfg) is True       # in a thread -> auto-handled
