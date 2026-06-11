@@ -38,6 +38,12 @@ SEED_TEMPLATE = (
 )
 
 
+def _fold_prompt(entries: list[str], text: str) -> str:
+    """Prefix a turn's prompt with the notes background work left behind."""
+    notes = "\n".join(f"- {entry}" for entry in entries)
+    return f"[while you were away]\n{notes}\n\n{text}"
+
+
 def _is_dead_session(result: ClaudeResult) -> bool:
     """True when an error means the resumed claude session no longer exists."""
     blob = (result.error or "").lower()
@@ -71,6 +77,7 @@ class Agent:
         metrics_file: str = "",
         trivial_max_chars: int = 140,
         stream_driver: Optional[StreamDriver] = None,
+        inbox=None,
     ):
         self.driver = driver
         self.store = store
@@ -82,6 +89,9 @@ class Agent:
         self.light_model = light_model
         self.trivial_max_chars = trivial_max_chars
         self.metrics_file = metrics_file
+        # Fold-back inbox: background work (jobs, wakes) queues notes here and
+        # the next owner turn carries them. None means the feature is off.
+        self.inbox = inbox
         # Compact a conversation after this many turns on one session (0 = never).
         # A coarse backstop; the token threshold below is the accurate trigger.
         self.compact_every = compact_every
@@ -136,6 +146,11 @@ class Agent:
             )
             routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
         with self._lock_for(conversation_id):
+            folded: list[str] = []
+            if self.inbox is not None:
+                folded = self.inbox.drain()
+                if folded:
+                    text = _fold_prompt(folded, text)
             session_id = self.store.get(conversation_id)
             result = self.driver.run(text, session_id, model)
             # A resumed session that no longer exists, or one that outgrew the
@@ -146,6 +161,10 @@ class Agent:
                     log.warning("conversation %s overflowed its context; starting fresh", conversation_id)
                 self.store.clear(conversation_id)
                 result = self.driver.run(text, None, model)
+            if result.is_error and folded:
+                # The turn that took the notes failed; put them back so the
+                # next turn re-delivers them instead of losing them.
+                self.inbox.restore(folded)
             if result.session_id:
                 self.store.set(conversation_id, result.session_id)
             emit_turn(
@@ -339,6 +358,7 @@ class LiveTurn:
         self._has_attachments = has_attachments
         self._epoch = agent._epoch_for(conversation_id)
         self._lock = agent._lock_for(conversation_id)
+        self._folded: list[str] = []
         self._have_lock = False
         self._turn: Optional[StreamTurn] = None
         self._final: Optional[ClaudeResult] = None
@@ -350,11 +370,16 @@ class LiveTurn:
         await asyncio.to_thread(self._lock.acquire)
         self._have_lock = True
         try:
+            if self._agent.inbox is not None:
+                self._folded = await asyncio.to_thread(self._agent.inbox.drain)
+                if self._folded:
+                    self._prompt = _fold_prompt(self._folded, self._prompt)
             session_id = self._agent.store.get(self._cid)
             self._turn = await asyncio.to_thread(
                 self._agent.stream_driver.start, self._prompt, session_id, self._model
             )
         except BaseException:
+            self._restore_folded()
             self.close()
             raise
 
@@ -406,6 +431,8 @@ class LiveTurn:
         if result is None:
             result = ClaudeResult(text="", session_id=session_id, is_error=True,
                                   error="live turn ended without a result")
+        if result.is_error:
+            self._restore_folded()
         # Honor a reset that landed mid-turn: if the conversation's epoch advanced,
         # the user cleared it, so do not write this now-stale session back.
         if result.session_id and self._agent._epoch_for(self._cid) == self._epoch:
@@ -429,6 +456,12 @@ class LiveTurn:
         if self._due_to_compact:
             self._agent._launch_compaction(self._cid)
         return strays
+
+    def _restore_folded(self) -> None:
+        """Give drained inbox entries back after a failed turn. Idempotent."""
+        if self._folded and self._agent.inbox is not None:
+            self._agent.inbox.restore(self._folded)
+        self._folded = []
 
     def close(self) -> None:
         """Release the conversation lock if held. Safe to call more than once."""

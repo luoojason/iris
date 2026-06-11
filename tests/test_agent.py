@@ -262,3 +262,126 @@ def test_from_config_builds_agent(tmp_path):
     assert agent.driver.model == "claude-sonnet-4-6"
     assert agent.driver.append_system_prompt_file == cfg.persona_file
     assert isinstance(agent.store, SessionStore)
+
+
+# -- fold-back inbox ---------------------------------------------------------
+
+
+def test_respond_folds_inbox_entries_into_the_prompt(tmp_path):
+    from iris.inbox import Inbox
+
+    store = SessionStore(tmp_path / "s.json")
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("job #1 (audit) finished: all clean")
+    driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)])
+    agent = Agent(driver, store, inbox=box)
+    agent.respond("c1", "hello")
+    prompt = driver.calls[0][0]
+    assert prompt.startswith("[while you were away]")
+    assert "job #1 (audit) finished: all clean" in prompt
+    assert prompt.endswith("hello")
+    assert box.drain() == []  # consumed by the successful turn
+
+
+def test_failed_turn_restores_inbox_entries(tmp_path):
+    from iris.inbox import Inbox
+
+    store = SessionStore(tmp_path / "s.json")
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("job #2 finished: report text")
+    driver = FakeDriver([ClaudeResult(text="", session_id=None, is_error=True, error="boom")])
+    agent = Agent(driver, store, inbox=box)
+    result = agent.respond("c1", "hello")
+    assert result.is_error
+    # a flaky turn must not eat the report; it comes back next turn
+    assert box.drain() == ["job #2 finished: report text"]
+
+
+def test_empty_inbox_leaves_the_prompt_alone(tmp_path):
+    from iris.inbox import Inbox
+
+    store = SessionStore(tmp_path / "s.json")
+    box = Inbox(tmp_path / "inbox.json")
+    driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)])
+    agent = Agent(driver, store, inbox=box)
+    agent.respond("c1", "hello")
+    assert driver.calls[0][0] == "hello"
+
+
+async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
+    from iris.inbox import Inbox
+
+    class FakeStreamTurn:
+        def __init__(self, result):
+            self._result = result
+            self.open = False
+            self.strays = []
+
+        def wait_primary(self, timeout=None):
+            return self._result
+
+        def wait_finished(self, timeout=None):
+            return True
+
+    class FakeStreamDriver:
+        def __init__(self, results):
+            self.results = list(results)
+            self.prompts = []
+
+        def start(self, prompt, session_id=None, model=None):
+            self.prompts.append(prompt)
+            return FakeStreamTurn(self.results.pop(0))
+
+    store = SessionStore(tmp_path / "s.json")
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("job #3 finished: done")
+    sd = FakeStreamDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)])
+    agent = Agent(FakeDriver([]), store, stream_driver=sd, inbox=box)
+    turn = agent.live_turn("c1", "hello")
+    await turn.begin()
+    result = await turn.result()
+    await turn.aftermath()
+    assert not result.is_error
+    assert sd.prompts[0].startswith("[while you were away]")
+    assert "job #3 finished: done" in sd.prompts[0]
+    assert sd.prompts[0].endswith("hello")
+    assert box.drain() == []
+
+
+async def test_live_turn_restores_inbox_on_error(tmp_path):
+    from iris.inbox import Inbox
+
+    class FakeStreamTurn:
+        def __init__(self, result):
+            self._result = result
+            self.open = False
+            self.strays = []
+
+        def wait_primary(self, timeout=None):
+            return self._result
+
+        def wait_finished(self, timeout=None):
+            return True
+
+    class FakeStreamDriver:
+        def __init__(self, results):
+            self.results = list(results)
+            self.prompts = []
+
+        def start(self, prompt, session_id=None, model=None):
+            self.prompts.append(prompt)
+            return FakeStreamTurn(self.results.pop(0))
+
+    store = SessionStore(tmp_path / "s.json")
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("job #4 finished: report")
+    sd = FakeStreamDriver([
+        ClaudeResult(text="", session_id=None, is_error=True, error="boom"),
+    ])
+    agent = Agent(FakeDriver([]), store, stream_driver=sd, inbox=box)
+    turn = agent.live_turn("c1", "hello")
+    await turn.begin()
+    result = await turn.result()
+    await turn.aftermath()
+    assert result.is_error
+    assert box.drain() == ["job #4 finished: report"]
