@@ -555,3 +555,16 @@ def test_corrupt_store_is_quarantined_not_silently_dropped(tmp_path):
     sidecar = path.with_suffix(".json.corrupt")
     assert sidecar.exists()  # the owner's data is preserved for recovery
     assert "precious" in sidecar.read_text("utf-8")
+
+
+def test_artifact_upload_failure_is_reported_not_silent(tmp_path):
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / "out.md").write_text("report", encoding="utf-8")
+    env = runner_env(tmp_path, workspace=ws,
+                     result=ClaudeResult(text="done\nARTIFACT: out.md",
+                                         session_id=None, is_error=False))
+    env["send_file"] = lambda channel, path, text, token: {"error": "HTTP 413"}
+    assert run_with(env) == 0  # the job still completes
+    folded = env["inbox"].drain()
+    assert any("failed to upload" in note and "HTTP 413" in note for note in folded)
