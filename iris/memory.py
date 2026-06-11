@@ -60,7 +60,10 @@ def _parse_ts(value: Optional[str]) -> Optional[float]:
         return datetime.strptime(value, _TS_FMT).replace(tzinfo=timezone.utc).timestamp()
     except (ValueError, TypeError):
         try:
-            return datetime.fromisoformat(value).timestamp()
+            # 'Z' is only accepted by fromisoformat from Python 3.11; normalize
+            # it so stored ISO timestamps parse on the 3.10 floor too.
+            iso = value[:-1] + "+00:00" if isinstance(value, str) and value.endswith("Z") else value
+            return datetime.fromisoformat(iso).timestamp()
         except (ValueError, TypeError):
             return None
 
