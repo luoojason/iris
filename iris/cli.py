@@ -106,6 +106,12 @@ def doctor(config: Config, probe: bool = True) -> int:
         print(f"auto-compact: at {' or '.join(triggers)}")
     else:
         print("auto-compact: off")
+    try:
+        from .wakes import doctor_lines
+        for line in doctor_lines(config):
+            print(line)
+    except Exception as exc:
+        print(f"wakes: could not validate the rules file ({exc})")
     if config.usage_budget_usd > 0:
         try:
             from .usage import UsageLedger, level_for, percent_used
@@ -177,13 +183,19 @@ def reminders_tick(config: Config) -> int:
         else:
             store.add(job["due_ts"], job["text"], job["channel_id"])  # re-queue on failure
     print(f"reminders-tick: {len(due)} due, {sent} delivered")
-    # The budget check rides the same tick. It must never take reminder
-    # delivery down with it, so it is fail-soft to a printed line.
+    # The budget check and the wake rules ride the same tick. Neither may
+    # ever take reminder delivery down with it, so both are fail-soft to a
+    # printed line, and neither makes a model call.
     try:
         from .usage import budget_tick
         print(budget_tick(config))
     except Exception as exc:
         print(f"budget tick failed: {exc}")
+    try:
+        from .wakes import tick_wakes
+        print(tick_wakes(config))
+    except Exception as exc:
+        print(f"wakes tick failed: {exc}")
     return 0
 
 

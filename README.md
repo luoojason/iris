@@ -212,6 +212,28 @@ Point `IRIS_WIKI_DIR` at an Obsidian-style vault and the agent gets
 named vault-relative (`Projects/Iris`); the tools validate every name and
 refuse anything that resolves outside the vault. There is no delete tool.
 
+### Event wakes
+
+Reminders fire at a time; wakes fire on an **event**. Declare conditions in
+`IRIS_WAKES_FILE` (a JSON list you author; the model has no tool to touch
+it) and the same `reminders-tick` cadence evaluates them with cheap stat and
+read calls — never a model call. When one fires you get a Discord ping with
+your pre-written message, and the event folds into the agent's next turn.
+
+```json
+[
+  {"name": "build-errors", "kind": "log_pattern",
+   "path": "/home/you/myrepo/run.log", "pattern": "ERROR|Traceback",
+   "message": "the build run hit an error", "cooldown_secs": 3600}
+]
+```
+
+Kinds: `file_exists`, `file_gone`, `file_changed` (all edge-triggered; the
+first observation arms without firing), and `log_pattern` (only bytes
+appended after the rule was armed are scanned; rotation is handled).
+`cooldown_secs` absorbs flapping; `"once": true` disarms a rule after its
+first fire. `iris doctor` validates the rules file and names every problem.
+
 ### Reminders
 
 The `reminders` tool (`iris/mcp/reminders.py`: `schedule_reminder`,

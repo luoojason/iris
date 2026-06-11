@@ -107,6 +107,11 @@ class Config:
     # The owner's wiki vault (Obsidian-style). Empty disables the wiki tools.
     wiki_dir: str = ""
 
+    # Event wakes: owner-authored rules the reminders tick evaluates cheaply
+    # (no model call, ever). The state file is tick-owned bookkeeping.
+    wakes_file: str = "iris-wakes.json"
+    wakes_state: str = "iris-wakes.state.json"
+
     # Credit guard: the usage ledger always records; the budget (USD-estimate
     # per month, 0 = off) turns on threshold pings, job parking at park_at%,
     # and tighter light-model routing at tighten_at%.
@@ -190,6 +195,8 @@ class Config:
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
             wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
+            wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
+            wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
             usage_file=os.environ.get("IRIS_USAGE_FILE", "iris-usage.json"),
             usage_budget_usd=float(os.environ.get("IRIS_USAGE_BUDGET_USD", "0")),
             usage_tighten_at=float(os.environ.get("IRIS_USAGE_TIGHTEN_AT", "80")),
