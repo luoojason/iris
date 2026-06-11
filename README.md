@@ -155,6 +155,63 @@ adapter can't, without raw shell. A **history search** tool
 transcripts Claude Code already keeps. Point Claude at any other MCP server
 (filesystem, browser, web search, your own) the same way.
 
+### Background jobs
+
+Chat turns are short on purpose. For work that takes minutes to hours (audit
+a repo, batch-process files, deep research), Iris has background jobs: the
+agent records a job and a detached runner executes it as one `claude -p` turn
+with its own grants and a long timeout. Chat stays locked down; **subagents
+are allowed inside jobs only**, so a job can fan out internally while the
+chat denylist still denies `Task`/`Agent`.
+
+Everything is off until you set `IRIS_JOBS=true` and wire the tools:
+
+```
+IRIS_JOBS=true
+IRIS_ALLOWED_TOOLS=...,mcp__jobs__start_job,mcp__jobs__job_status,mcp__jobs__list_jobs,mcp__jobs__cancel_job,mcp__jobs__resume_job
+```
+
+with a `jobs` server entry in your MCP config
+(`python -m iris.mcp.jobs`). The pieces:
+
+- **Grants.** A job always gets subagents. It may request `shell` and
+  `files`, clamped to your `IRIS_JOB_GRANTS` ceiling; refusals are reported,
+  never silent. The job denylist is *derived* from the driver's
+  `DANGEROUS_BUILTINS` (an explicit denylist replaces the default, so it must
+  track the source of truth).
+- **Workspaces.** Jobs that touch a repo name a workspace you registered
+  with `iris workspaces add <name> <path>` (`remove`, `list`). The model only
+  ever speaks names; paths stay on your side of the boundary
+  (`IRIS_WORKSPACES_FILE`).
+- **ARTIFACT hand-back.** A job's report can name files to deliver with
+  `ARTIFACT: relative/path` lines. At most 5 files and 8 MB total are
+  uploaded to the home channel; anything rejected or skipped (escapes, caps,
+  missing files) is named in the report.
+- **Delivery.** When a job finishes you get a Discord ping (plain REST, no
+  model call), and the report folds into your next chat turn via the inbox
+  (`IRIS_INBOX_FILE`), so the agent knows the outcome without polling.
+  Parked and queued jobs launch only when you say so (`resume_job`).
+
+### Credit guard
+
+Iris draws from your plan's monthly agent credit; the guard makes the draw
+visible and brakes gently before it runs dry. Every turn's `cost_usd`
+estimate lands in a ledger (`iris usage` prints it; the `usage_report` MCP
+tool lets the agent answer "how much have I burned?"). Set
+`IRIS_USAGE_BUDGET_USD` to enable the brakes: the reminders tick pings the
+home channel once per crossed threshold (`IRIS_USAGE_PING_AT`), new jobs are
+parked at `IRIS_USAGE_PARK_AT`%, and above `IRIS_USAGE_TIGHTEN_AT`% the
+light-model routing gets `IRIS_TIGHTEN_FACTOR`x more aggressive. Chat is
+never blocked, and no model call ever fires from the tick.
+
+### Wiki tools
+
+Point `IRIS_WIKI_DIR` at an Obsidian-style vault and the agent gets
+`wiki_read`, `wiki_write`, `wiki_append`, `wiki_list`, and `wiki_search`
+(server: `python -m iris.mcp.wiki`; allowlist `mcp__wiki__*`). Pages are
+named vault-relative (`Projects/Iris`); the tools validate every name and
+refuse anything that resolves outside the vault. There is no delete tool.
+
 ### Reminders
 
 The `reminders` tool (`iris/mcp/reminders.py`: `schedule_reminder`,
