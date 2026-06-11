@@ -104,6 +104,9 @@ class Config:
     # The owner's recorded home channel (job pings, artifact uploads).
     home_channel: str = ""
 
+    # The owner's wiki vault (Obsidian-style). Empty disables the wiki tools.
+    wiki_dir: str = ""
+
     # Credit guard: the usage ledger always records; the budget (USD-estimate
     # per month, 0 = off) turns on threshold pings, job parking at park_at%,
     # and tighter light-model routing at tighten_at%.
@@ -186,6 +189,7 @@ class Config:
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
+            wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
             usage_file=os.environ.get("IRIS_USAGE_FILE", "iris-usage.json"),
             usage_budget_usd=float(os.environ.get("IRIS_USAGE_BUDGET_USD", "0")),
             usage_tighten_at=float(os.environ.get("IRIS_USAGE_TIGHTEN_AT", "80")),
