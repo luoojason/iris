@@ -388,3 +388,18 @@ def test_ledger_file_is_json_on_disk(tmp_path):
     UsageLedger(path).record("chat", result(cost=1.0), now=NOW)
     data = json.loads(path.read_text("utf-8"))
     assert "2026-05" in data
+
+
+def test_budget_tick_pings_at_an_exact_threshold_boundary(tmp_path):
+    config, pings, send = tick_env(tmp_path)
+    UsageLedger(config.usage_file).record("chat", result(cost=8.0), now=NOW)  # exactly 80%
+    budget_tick(config, now=NOW, send=send)
+    assert any("80%" in text for _, text in pings)
+    assert any("50%" in text for _, text in pings)
+
+
+def test_guard_parks_at_exactly_park_at(tmp_path):
+    config = guard_config(tmp_path)
+    guard = CreditGuard.from_config(config)
+    UsageLedger(config.usage_file).record("chat", result(cost=9.5))  # exactly 95%
+    assert guard.should_park() is True

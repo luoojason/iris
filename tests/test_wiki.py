@@ -119,3 +119,58 @@ def test_wiki_dir_config_knob(tmp_path, monkeypatch):
     assert cfg.wiki_dir == "/some/vault"
     monkeypatch.delenv("IRIS_WIKI_DIR")
     assert Config.from_env(dotenv=tmp_path / "none.env").wiki_dir == ""
+
+
+def test_unhandled_read_error_does_not_leak_the_vault_path(vault, monkeypatch):
+    """If reading a page raises (a race deletes it, a perms flip), the model
+    must get a clean message, never a traceback carrying the absolute path."""
+    srv.wiki_write("Projects/Iris", "content")
+
+    real_read = type(vault).read_text
+
+    def boom(self, *a, **k):
+        raise OSError(f"Permission denied: {self}")  # path is in the message
+
+    monkeypatch.setattr(type(vault), "read_text", boom)
+    reply = srv.wiki_read("Projects/Iris")
+    assert str(vault) not in reply
+    assert "could not read" in reply.lower()
+
+
+def test_append_survives_a_read_error_without_leaking(vault, monkeypatch):
+    srv.wiki_write("log", "existing")
+
+    def boom(self, *a, **k):
+        raise OSError(f"Permission denied: {self}")
+
+    monkeypatch.setattr(type(vault), "read_text", boom)
+    reply = srv.wiki_append("log", "new line")
+    assert str(vault) not in reply
+    assert "could not" in reply.lower()
+
+
+def test_dotted_page_names_get_md_appended(vault):
+    # "v1.2-notes" looks like it has a suffix but is a normal page name
+    reply = srv.wiki_write("releases/v1.2-notes", "content")
+    assert "releases/v1.2-notes" in reply
+    assert (vault / "releases" / "v1.2-notes.md").exists()
+    assert srv.wiki_read("releases/v1.2-notes") == "content"
+
+
+def test_explicit_non_md_suffix_is_still_rejected(vault):
+    assert "page name" in srv.wiki_write("notes.txt", "x").lower()
+
+
+def test_symlink_escape_blocks_append_and_write_too(vault, tmp_path):
+    secret = tmp_path / "secret.md"
+    secret.write_text("hidden", encoding="utf-8")
+    (vault / "leak.md").symlink_to(secret)
+    assert "page name" in srv.wiki_append("leak", "appended").lower() or \
+           "outside" in srv.wiki_append("leak", "appended").lower()
+    assert "page name" in srv.wiki_write("leak", "overwrite").lower() or \
+           "outside" in srv.wiki_write("leak", "overwrite").lower()
+    assert secret.read_text("utf-8") == "hidden"  # the outside file is untouched
+    # and the escaping symlink never appears in list or search output
+    assert "leak" not in srv.wiki_list()
+    srv.wiki_write("real", "hidden")
+    assert "leak" not in srv.wiki_search("hidden")

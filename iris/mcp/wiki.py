@@ -50,6 +50,21 @@ class _BadName(ValueError):
     pass
 
 
+# File extensions that signal "this is a non-markdown file, not a page name".
+# A dotted name whose final segment is not one of these (v1.2-notes, 2026.06)
+# is treated as a plain page name and gets .md appended.
+_FILE_SUFFIXES = {
+    ".txt", ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".htm",
+    ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".sh", ".py", ".js",
+    ".ts", ".css", ".xml", ".ini", ".cfg", ".conf", ".log", ".zip", ".gz",
+    ".tar", ".bin", ".exe", ".canvas",
+}
+
+
+def _looks_like_file_suffix(name: str) -> bool:
+    return Path(name).suffix.lower() in _FILE_SUFFIXES
+
+
 def _resolve(root: Path, name: str) -> Path:
     """Page name -> real path inside the vault. The single validation funnel."""
     name = (name or "").strip()
@@ -58,11 +73,16 @@ def _resolve(root: Path, name: str) -> Path:
     parts = Path(name).parts
     if any(part in (".", "..") for part in parts):
         raise _BadName(f"bad page name {name!r}: no . or .. segments")
-    suffix = Path(name).suffix
-    if suffix == "":
-        name += ".md"
-    elif suffix != ".md":
+    # The .md suffix is implied, so a name without it just gets it appended —
+    # including names with dots in them (v1.2-notes -> v1.2-notes.md). Only an
+    # *explicit* .md is honored as already-suffixed; any other explicit file
+    # extension (notes.txt) is rejected, since pages are markdown.
+    if name.endswith(".md"):
+        pass
+    elif _looks_like_file_suffix(name):
         raise _BadName(f"bad page name {name!r}: pages are .md (the suffix is implied)")
+    else:
+        name += ".md"
     candidate = (root / name).resolve()
     if root != candidate and root not in candidate.parents:
         raise _BadName(f"bad page name {name!r}: it resolves outside the vault")
@@ -114,7 +134,11 @@ def wiki_read(name: str) -> str:
         return str(exc)
     if not path.is_file():
         return f"No page named {name!r}. Use wiki_list to see what exists."
-    text = path.read_text("utf-8")
+    try:
+        text = path.read_text("utf-8")
+    except (OSError, UnicodeDecodeError):
+        # Never surface the exception text: it carries the absolute path.
+        return f"Could not read page {name!r}."
     if len(text) > READ_CAP:
         return text[:READ_CAP] + "\n…[truncated]"
     return text
@@ -159,7 +183,10 @@ def wiki_write(name: str, content: str) -> str:
         path = _resolve(root, name)
     except _BadName as exc:
         return str(exc)
-    _atomic_write(path, content or "")
+    try:
+        _atomic_write(path, content or "")
+    except OSError:
+        return f"Could not write page {name!r}."
     return f"Wrote {len((content or '').encode('utf-8'))} bytes to {name}."
 
 
@@ -174,11 +201,14 @@ def wiki_append(name: str, text: str) -> str:
     except _BadName as exc:
         return str(exc)
     existing = ""
-    if path.is_file():
-        existing = path.read_text("utf-8")
-    block = (text or "").strip("\n")
-    merged = (existing.rstrip("\n") + "\n\n" + block + "\n") if existing.strip() else block + "\n"
-    _atomic_write(path, merged)
+    try:
+        if path.is_file():
+            existing = path.read_text("utf-8")
+        block = (text or "").strip("\n")
+        merged = (existing.rstrip("\n") + "\n\n" + block + "\n") if existing.strip() else block + "\n"
+        _atomic_write(path, merged)
+    except (OSError, UnicodeDecodeError):
+        return f"Could not append to page {name!r}."
     return f"Appended to {name}."
 
 
