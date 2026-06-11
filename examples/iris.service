@@ -19,7 +19,7 @@ Type=simple
 # Absolute path to the iris checkout (where your .env lives).
 WorkingDirectory=%h/iris
 # Use the interpreter from the venv you installed iris into.
-ExecStart=%h/iris/.venv/bin/python -m iris discord
+ExecStart=%h/venv/bin/python -m iris discord
 Restart=on-failure
 RestartSec=5
 # claude must be on PATH for this service; adjust if it is elsewhere.

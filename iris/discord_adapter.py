@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from typing import Optional
 
-from .agent import Agent
+from .agent import Agent, LiveTurn
 from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
-from .driver import ClaudeError
+from .conversation import ConversationRunner, LiveConversationRunner, Turn
+from .driver import ClaudeError, ClaudeResult
 from .textutil import chunk_text
 from .transcribe import build_transcriber, transcribe_audio
 
@@ -26,6 +28,79 @@ log = logging.getLogger("iris.discord")
 
 DISCORD_LIMIT = 2000
 RESET_COMMANDS = {"!reset", "!forget", "!newchat"}
+
+# Short, varied interim lines for a turn that runs long. Kept casual and in
+# Iris's voice; one is picked at random so a slow stretch does not read like a
+# canned bot.
+_ACK_LINES = (
+    "on it",
+    "on it, one sec",
+    "working on it",
+    "give me a moment",
+    "digging into this",
+    "let me take a look",
+)
+
+
+def _ack_line() -> str:
+    return random.choice(_ACK_LINES)
+
+
+def _reply_text(result: ClaudeResult, *, placeholder: bool) -> Optional[str]:
+    """Map a turn's result to the user-facing string, or None to stay silent.
+
+    Shared by the one-shot and live paths so they speak with one voice. The
+    primary reply uses a placeholder for an empty success ("(no response)"); a
+    stray follow-up stays silent instead, since an empty trailing line reads as a
+    glitch.
+    """
+    if result.is_error:
+        log.warning("turn errored: %s", result.error)
+        return (
+            "Something went wrong on that one. "
+            + (f"({result.error})" if result.error else "Try again in a moment.")
+        )
+    text = result.text.strip()
+    if text:
+        return text
+    return "(no response)" if placeholder else None
+
+
+class _LiveAdapterHandle:
+    """Adapts :class:`iris.agent.LiveTurn` to the runner's text-level LiveHandle."""
+
+    def __init__(self, live: LiveTurn) -> None:
+        self._live = live
+
+    async def begin(self) -> None:
+        await self._live.begin()
+
+    def is_open(self) -> bool:
+        return self._live.is_open()
+
+    async def inject(self, text: str) -> bool:
+        return await self._live.inject(text)
+
+    async def result(self) -> Optional[str]:
+        try:
+            result = await self._live.result()
+        except ClaudeError as exc:
+            log.error("claude unavailable: %s", exc)
+            self._live.close()
+            return f"I can't reach my brain right now: {exc}"
+        return _reply_text(result, placeholder=True)
+
+    async def aftermath(self) -> list[str]:
+        try:
+            strays = await self._live.aftermath()
+        except Exception:
+            log.warning("live aftermath failed", exc_info=True)
+            self._live.close()
+            return []
+        return [m for m in (_reply_text(s, placeholder=False) for s in strays) if m]
+
+    def close(self) -> None:
+        self._live.close()
 
 
 def should_handle(message, bot_user, config) -> bool:
@@ -88,12 +163,60 @@ def build_client(config: Config, agent: Agent):
     client = discord.Client(intents=intents)
     transcriber = build_transcriber(config)  # None unless IRIS_VOICE is on
 
+    # One runner per conversation serializes its turns and coalesces messages
+    # that arrive while a turn is in flight, so the user can keep talking.
+    runners: dict[str, ConversationRunner] = {}
+
     def _clean_content(message) -> str:
         text = message.content or ""
         if client.user:
             for token in (f"<@{client.user.id}>", f"<@!{client.user.id}>"):
                 text = text.replace(token, "")
         return text.strip()
+
+    def _runner_for(conversation_id: str, channel):
+        runner = runners.get(conversation_id)
+        if runner is not None:
+            return runner
+
+        async def send(text: str) -> None:
+            for piece in chunk_text(text, DISCORD_LIMIT):
+                await channel.send(piece)
+
+        if config.live_interrupt and agent.stream_driver is not None:
+            # Live interrupt: a mid-turn message redirects the running turn.
+            def start_turn(prompt: str, has_attachments: bool) -> _LiveAdapterHandle:
+                return _LiveAdapterHandle(agent.live_turn(conversation_id, prompt, has_attachments))
+
+            runner = LiveConversationRunner(
+                start_turn=start_turn,
+                send=send,
+                ack_line=_ack_line,
+                typing=channel.typing,
+                ack_delay=config.ack_delay,
+            )
+            runners[conversation_id] = runner
+            return runner
+
+        async def run_turn(prompt: str, has_attachments: bool) -> Optional[str]:
+            try:
+                result = await asyncio.to_thread(
+                    agent.respond, conversation_id, prompt, has_attachments
+                )
+            except ClaudeError as exc:
+                log.error("claude unavailable: %s", exc)
+                return f"I can't reach my brain right now: {exc}"
+            return _reply_text(result, placeholder=True)
+
+        runner = ConversationRunner(
+            run_turn=run_turn,
+            send=send,
+            ack_line=_ack_line,
+            typing=channel.typing,
+            ack_delay=config.ack_delay,
+        )
+        runners[conversation_id] = runner
+        return runner
 
     @client.event
     async def on_ready():
@@ -109,6 +232,7 @@ def build_client(config: Config, agent: Agent):
 
         if prompt in RESET_COMMANDS:
             agent.reset(conversation_id)
+            runners.pop(conversation_id, None)  # drop any queued-but-unsent turns
             await message.channel.send("Started a fresh conversation.")
             return
 
@@ -118,27 +242,15 @@ def build_client(config: Config, agent: Agent):
         if not prompt:
             return
 
-        try:
-            async with message.channel.typing():
-                result = await asyncio.to_thread(
-                    agent.respond, conversation_id, prompt, bool(attach_paths)
-                )
-        except ClaudeError as exc:
-            log.error("claude unavailable: %s", exc)
-            await message.channel.send(f"I can't reach my brain right now: {exc}")
-            return
+        async def receipt() -> None:
+            # Confirm a mid-task message was seen; it folds into the next turn.
+            try:
+                await message.add_reaction("\N{EYES}")
+            except Exception:
+                log.debug("could not react to mid-task message", exc_info=True)
 
-        if result.is_error:
-            log.warning("turn errored: %s", result.error)
-            await message.channel.send(
-                "Something went wrong on that one. "
-                + (f"({result.error})" if result.error else "Try again in a moment.")
-            )
-            return
-
-        reply = result.text.strip() or "(no response)"
-        for piece in chunk_text(reply, DISCORD_LIMIT):
-            await message.channel.send(piece)
+        runner = _runner_for(conversation_id, message.channel)
+        runner.submit(Turn(text=prompt, has_attachments=bool(attach_paths), receipt=receipt))
 
     return client
 

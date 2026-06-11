@@ -1,0 +1,20 @@
+# Fire iris-reminders.service once a minute so due reminders go out promptly and
+# recurring ones keep their cadence. A minute of granularity is plenty for
+# human-scale reminders and costs nothing: the tick makes no model call, it just
+# reads a JSON file and posts any due messages over Discord's REST API.
+
+[Unit]
+Description=Iris - run the reminder tick every minute
+
+[Timer]
+# First run a minute after boot, then every minute thereafter.
+OnBootSec=1min
+OnUnitActiveSec=1min
+# Catch up with a single run if the machine was asleep at the scheduled time,
+# rather than firing every minute it missed. Pairs with pop_due's fire-once
+# reschedule-from-now, so a missed window means one reminder, not a flood.
+Persistent=true
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

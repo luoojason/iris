@@ -102,6 +102,17 @@ class Config:
     # Timeout retries are separate: a hung turn rarely recovers by waiting another
     # full timeout, so the default is to report it at once rather than block.
     timeout_max_retries: int = 0
+    # Let the user redirect a turn mid-flight (stream-json transport) instead of
+    # waiting for it to finish. Off by default; the one-shot driver is the safe
+    # fallback. See iris/stream_driver.py.
+    live_interrupt: bool = False
+    # Seconds of silence (no event) before a streaming turn is treated as hung.
+    stream_idle_timeout: float = 300.0
+    # Hard ceiling on a whole streaming turn, however lively.
+    stream_total_timeout: float = 1800.0
+    # Seconds a turn may run before the adapter sends a short interim "on it" line,
+    # so a slow turn never looks like a hang. Only used by the conversation runner.
+    ack_delay: float = 4.0
     # Compact a conversation when a turn's context reaches this many tokens: the
     # accurate trigger, since it catches tool-heavy turns. 0 disables it.
     compact_at_tokens: int = 150000
@@ -140,6 +151,10 @@ class Config:
             max_retries=int(os.environ.get("IRIS_MAX_RETRIES", "2")),
             retry_base_delay=float(os.environ.get("IRIS_RETRY_BASE_DELAY", "2")),
             timeout_max_retries=int(os.environ.get("IRIS_TIMEOUT_RETRIES", "0")),
+            live_interrupt=_truthy(os.environ.get("IRIS_LIVE_INTERRUPT")),
+            stream_idle_timeout=float(os.environ.get("IRIS_STREAM_IDLE_TIMEOUT", "300")),
+            stream_total_timeout=float(os.environ.get("IRIS_STREAM_TOTAL_TIMEOUT", "1800")),
+            ack_delay=float(os.environ.get("IRIS_ACK_DELAY", "4")),
             compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
             notify_channel=os.environ.get("IRIS_NOTIFY_CHANNEL", ""),

@@ -117,7 +117,6 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 | `IRIS_DISCORD_TOKEN` | Discord bot token. |
 | `IRIS_ALLOWED_USER_IDS` | Comma-separated ids the bot will answer. Lock to yourself. |
 | `IRIS_MODEL` | `claude-opus-4-...`, `claude-sonnet-4-...`, `claude-haiku-4-...`, or blank. Haiku stretches the credit furthest. |
-| `IRIS_MODEL_LIGHT` | Optional lighter model for trivial turns (enables routing). Blank = every turn on `IRIS_MODEL`. |
 | `IRIS_PERSONA_FILE` | System prompt file for the persona. |
 | `IRIS_MCP_CONFIG` | MCP tool config (gives the agent tools). |
 | `IRIS_PERMISSION_MODE` + `IRIS_ALLOWED_TOOLS` | Control which tools run unattended. |
@@ -128,16 +127,10 @@ Out of the box Iris is a plain chat bot, which runs anywhere `claude` is
 installed. Tools are opt-in, exposed the way Claude Code already understands them:
 MCP servers launched through `--mcp-config`.
 
-One rule trips people up: under the `default` permission mode, an MCP tool that
-is **not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even
-claim it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that
-tool too. Note `IRIS_ALLOWED_TOOLS` is an approval list, not an exclusive
-boundary: on its own it does not stop the host's built-in tools (Bash, Write,
-Edit, ...) from running, since your `~/.claude/settings.json` may pre-approve
-them. Iris therefore denies the high-reach built-ins by default (shell, file
-writes, subagents: `IRIS_RESTRICT_BUILTIN_TOOLS=true`); Read, Glob, Grep, and web
-search/fetch stay available. Set it to `false`, or use an explicit
-`IRIS_DISALLOWED_TOOLS`, to take full control.
+One rule trips people up: under the `default` permission mode, any tool that is
+**not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even claim
+it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that tool
+too.
 
 To turn on the bundled memory tool (`remember`, `recall`, `forget`):
 
@@ -152,16 +145,6 @@ To turn on the bundled memory tool (`remember`, `recall`, `forget`):
    ```
 
 4. Tell the persona to use it (the example persona notes where).
-
-Token-bearing MCP servers (the bundled Discord, tts, and publish ones) do **not**
-inherit your `IRIS_*` variables: the driver strips them from the `claude` child so
-a tool cannot read your bot token. Give such a server its secret by putting it in
-that server's own `"env"` block in the mcp config file, for example:
-
-```json
-{ "mcpServers": { "discord": { "command": "...", "args": ["..."],
-  "env": { "IRIS_DISCORD_TOKEN": "your-token" } } } }
-```
 
 Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
@@ -188,81 +171,6 @@ or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 
-### Voice messages
-
-Iris can transcribe inbound voice notes locally and for free, so you can talk to
-it on Discord or Telegram. Transcription happens **in the adapter**, before the
-prompt reaches the brain: a voice attachment is downloaded, run through a local
-[`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) model, and folded
-into the prompt as text. (This is the right seam for *inbound* speech: an MCP
-tool the model calls could not intercept the attachment itself.)
-
-```bash
-pip install -e ".[voice]"
-# then in .env:
-IRIS_VOICE=true
-IRIS_VOICE_MODEL=base   # tiny | base | small | medium — larger = slower, more accurate
-```
-
-It is **off by default** on purpose. The first voice message downloads the model
-(tens of MB) and runs CPU inference, which can be slow on a small host, so turn
-it on only where you have verified the box can keep up inside your turn timeout.
-With voice off, an audio attachment degrades to a plain file reference. The model
-is loaded lazily on the first voice message, so enabling it costs nothing until
-someone actually sends audio, preserving Iris's zero-idle-inference shape.
-
-Iris can also **reply** out loud. The bundled `speak` tool
-(`iris/mcp/tts_server.py`) renders text to speech with a local engine and posts
-the audio to Discord. Unlike inbound transcription, *output* speech is a natural
-MCP tool: the model decides when a spoken reply fits and calls it. It uses the
-first available engine: `IRIS_TTS_CMD` (a template reading text on stdin, writing
-to `{out}`), then [piper](https://github.com/rhasspy/piper) (set `IRIS_TTS_VOICE`
-to a voice model), then macOS `say`, then `espeak-ng`. Wire the tts server into
-your mcp config and allowlist `mcp__tts__speak`. If no engine is installed the
-tool just reports that and the bot replies in text.
-
-### Model routing
-
-Set `IRIS_MODEL_LIGHT` to send clearly-trivial turns ("thanks", "lol", a short
-greeting) to a cheaper, faster model while everything substantive stays on
-`IRIS_MODEL`. The decision is a pure heuristic with no extra model call, and it
-is deliberately one-directional: it only ever *downgrades*, and only when a
-message is short, has no attachment, no code fence, and none of the words that
-signal real work (explain, debug, why, plan, compare, …). When in any doubt it
-keeps the strong model, because answering a hard question with a weak model is
-the costly mistake. Leave `IRIS_MODEL_LIGHT` blank to run every turn on one
-model. The default model can switch per turn even mid-conversation; the resumed
-session is just the transcript.
-
-### Long conversations (auto-compaction)
-
-Each conversation rides one `claude` session, resumed turn after turn. Left
-alone, a months-old Discord channel would eventually grow past the model's
-context window. Claude Code auto-compacts in its interactive UI, but that
-behavior is undocumented for headless `-p --resume` and there is no programmatic
-`/compact`, so Iris does not rely on it: it manages its own context budget.
-
-The trigger is **token-accurate**, not a guess. Every `claude -p` turn reports
-how many prompt tokens it carried (fresh plus cache), and when that reaches
-`IRIS_COMPACT_AT_TOKENS` (default 150000, leaving headroom under a 200k window)
-Iris compacts. Because it reads the real context size, a single tool-heavy turn
-(a big web fetch, a large file read) trips it just as a long chat would.
-`IRIS_COMPACT_EVERY` (default 60 turns) is a coarse backstop for the rare case
-where usage numbers are missing. Either at `0` disables that trigger.
-
-To compact, Iris asks the current session for a summary, then carries the summary
-onto a **fresh** session and continues there. The summary runs while the old
-session is still inside its limit, so the summarization itself never overflows,
-and it happens in a background thread **after** your reply is sent, so the turn
-that triggers it is never slowed. It briefly holds that one conversation's lock
-for the summary call, so the very next message on the same conversation can wait
-for it; the fresh-session seeding then runs lock-free. If a turn ever does hit a context-overflow error
-anyway, Iris treats it like a dead session: it starts fresh and retries, so the
-bot recovers instead of wedging (that path does drop history, which is why the
-token trigger is set to fire well before it). Compaction trades a little deep
-history for a conversation that runs indefinitely, the same trade Claude Code's
-own auto-compact makes.
-
 ## What carries over from Hermes
 
 Because Claude Code's skills and tools use open formats, most of a Hermes-style
@@ -270,10 +178,9 @@ agent maps cleanly onto the official client:
 
 - **Carries over well:** persona, per-conversation memory, shell and file tools,
   web search and fetch, planning, subagent delegation, browser automation (via
-  the Playwright MCP), Claude Code skills (the same `SKILL.md` format), and free
-  local voice both ways (speech-to-text in, text-to-speech out; see Voice).
-- **Re-add as MCP servers:** custom tools, platform admin actions, and history
-  search (Iris ships scoped Discord-actions, history-search, and tts servers).
+  the Playwright MCP), and Claude Code skills (the same `SKILL.md` format).
+- **Re-add as MCP servers:** custom tools, free local text-to-speech and
+  speech-to-text, platform admin actions, history search.
 - **Does not carry over:** anything that needs a paid third-party API key (image
   and video generation, paid search and voice backends), multi-model
   mixture-of-agents reasoning, and Hermes's single-turn tool-chain collapse.
@@ -283,12 +190,12 @@ agent maps cleanly onto the official client:
 
 Early, and honest about what is proven. The core (the driver, sessions, the agent
 loop, and the bundled memory tool) is verified end to end against the real
-`claude` binary and covered by unit tests. The Discord and Telegram message
-loops are wired and their gating (who and where the bot answers) is unit-tested,
-but the full loops have **not** yet been exercised against a live bot connection. Start with `python -m iris chat` to try the brain,
+`claude` binary and covered by unit tests. The Discord and Telegram message loops
+are wired and unit-tested in isolation, but have **not** yet been exercised
+against a live bot connection. Start with `python -m iris chat` to try the brain,
 then wire up a transport.
 
-Roadmap: live-testing the wired transports end to end, and a documented
+Roadmap: a skills loader, the free-local voice MCP servers, and a documented
 feature-survival map against Hermes.
 
 ## Related work
