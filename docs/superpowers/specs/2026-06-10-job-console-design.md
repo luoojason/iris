@@ -62,6 +62,10 @@ deliver <id>` — re-upload artifacts to the home channel. `iris jobs prune
 - No new model-call path. `iris jobs run`/`rerun` spawn a detached runner
   exactly like the MCP `start_job`; the runner makes the one model call, the
   console makes none.
+- Every launch path (run, rerun, TUI re-run) funnels through one gated launch
+  that re-clamps grants to the *current* `IRIS_JOB_GRANTS` ceiling, applies
+  the credit-guard park, and honors the `jobs_max` admission cap. A re-run of
+  an old job can never resurrect a grant the owner has since revoked.
 - No new network listener. The only outbound is the artifact re-delivery
   (the existing Discord REST upload).
 - Actions are atomic-or-refused, never force.
