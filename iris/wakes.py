@@ -215,56 +215,82 @@ def tick_wakes(config: Config, now: Optional[float] = None, send=None,
     fired = 0
     store = _StateStore(config.wakes_state)
     with store.locked() as state:
-        names = set()
-        for rule in rules:
-            problems = validate_rules([rule])
-            name = rule.get("name") if isinstance(rule, dict) else None
-            if problems:
-                skipped.append(f"{name or 'rule'} ({problems[0]})")
-                continue
-            names.add(name)
-            entry = state.setdefault(name, {})
+        try:
+            seen: set = set()
+            for rule in rules:
+                problems = validate_rules([rule])
+                name = rule.get("name") if isinstance(rule, dict) else None
+                if problems:
+                    skipped.append(f"{name or 'rule'} ({problems[0]})")
+                    continue
+                if name in seen:
+                    skipped.append(f"{name} (duplicate name; only the first rule ran)")
+                    continue
+                seen.add(name)
+                entry = state.setdefault(name, {})
 
-            # Retry a ping a previous tick could not deliver, before anything new.
-            pending = entry.get("pending_ping")
-            if pending:
-                if _send_ping(rule, config, send, pending):
-                    entry["pending_ping"] = None
-                    entry["last_fired_ts"] = now
-                continue  # no new fire while a ping is still owed
-
-            if rule.get("once") and entry.get("fired_once"):
-                continue
-
-            fired_now, detail = _evaluate(rule, entry)
-            if not fired_now:
-                continue
-            last = float(entry.get("last_fired_ts") or 0.0)
-            cooldown = float(rule.get("cooldown_secs", DEFAULT_COOLDOWN))
-            if now - last < cooldown:
-                continue  # flapping; observation state advanced, no ping
-
-            fired += 1
-            message = f"wake {name}: {rule['message']}"
-            if detail:
-                message += f"\n> {detail}"
-            if rule.get("once"):
-                entry["fired_once"] = True
-            inbox.append(message)  # queued exactly once, ping or no ping
-            if _send_ping(rule, config, send, message):
-                entry["last_fired_ts"] = now
-            else:
-                entry["pending_ping"] = message  # the next tick retries
-
-        for name in list(state):
-            if name not in names:
-                del state[name]  # the rule is gone; its state goes too
-        store.save(state)
+                try:
+                    fired += _run_rule(rule, entry, config, send, inbox, now)
+                except Exception as exc:
+                    # One poisoned rule (a hostile path, a filesystem oddity)
+                    # must never abort the others or skip the state save.
+                    log.warning("wake rule %s crashed", name, exc_info=True)
+                    skipped.append(f"{name} (evaluation crashed: {exc})")
+        finally:
+            # Prune by RAW rule names: a rule that is present but momentarily
+            # invalid keeps its offsets and once-flags; only rules that left
+            # the file lose their state. Saving in finally means a crash can
+            # never replay already-recorded fires on the next tick.
+            raw_names = {
+                r.get("name") for r in rules
+                if isinstance(r, dict) and isinstance(r.get("name"), str)
+            }
+            for name in list(state):
+                if name not in raw_names:
+                    del state[name]
+            store.save(state)
 
     line = f"wakes: {len(rules)} rules, {fired} fired"
     if skipped:
         line += "; skipped " + ", ".join(skipped)
     return line
+
+
+def _run_rule(rule: dict, entry: dict, config: Config, send, inbox: Inbox,
+              now: float) -> int:
+    """Evaluate one validated rule against its state entry. Returns fires (0/1)."""
+    name = rule["name"]
+
+    # Retry a ping a previous tick could not deliver, before anything new.
+    pending = entry.get("pending_ping")
+    if pending:
+        if _send_ping(rule, config, send, pending):
+            entry["pending_ping"] = None
+            entry["last_fired_ts"] = now
+        return 0  # no new fire while a ping is still owed
+
+    if rule.get("once") and entry.get("fired_once"):
+        return 0
+
+    fired_now, detail = _evaluate(rule, entry)
+    if not fired_now:
+        return 0
+    last = float(entry.get("last_fired_ts") or 0.0)
+    cooldown = float(rule.get("cooldown_secs", DEFAULT_COOLDOWN))
+    if now - last < cooldown:
+        return 0  # flapping; observation state advanced, no ping
+
+    message = f"wake {name}: {rule['message']}"
+    if detail:
+        message += f"\n> {detail}"
+    if rule.get("once"):
+        entry["fired_once"] = True
+    inbox.append(message)  # queued exactly once, ping or no ping
+    if _send_ping(rule, config, send, message):
+        entry["last_fired_ts"] = now
+    else:
+        entry["pending_ping"] = message  # the next tick retries
+    return 1
 
 
 def _send_ping(rule: dict, config: Config, send, message: str) -> bool:

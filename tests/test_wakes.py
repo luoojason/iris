@@ -353,3 +353,63 @@ def test_wakes_config_knobs(tmp_path, monkeypatch):
         wakes_file="iris-wakes.json",
     )
     assert cfg.wakes_state == "iris-wakes.state.json"
+
+
+def test_temporarily_invalid_rule_keeps_its_state(tmp_path):
+    """A fat-fingered regex must not erase the rule's offset: pruning is for
+    rules that no longer exist, not rules that are momentarily broken."""
+    target = tmp_path / "run.log"
+    target.write_text("preamble\n", encoding="utf-8")
+    write_rules(tmp_path, [rule(tmp_path)])
+    tick(tmp_path)  # arms at EOF
+
+    write_rules(tmp_path, [rule(tmp_path, pattern="(")])  # owner mid-edit
+    line, _, _ = tick(tmp_path, now=NOW + 60)
+    assert "watch-log" in line  # skipped, visibly
+
+    write_rules(tmp_path, [rule(tmp_path)])  # fixed
+    with open(target, "a", encoding="utf-8") as handle:
+        handle.write("ERROR: while the rule was broken-then-fixed\n")
+    line, _, _ = tick(tmp_path, now=NOW + 120)
+    assert "1 fired" in line  # the preserved offset caught the new error
+
+
+def test_one_crashing_rule_does_not_abort_the_rest(tmp_path, monkeypatch):
+    import iris.wakes as wakes_mod
+
+    real_evaluate = wakes_mod._evaluate
+
+    def fragile(rule, entry):
+        if rule["name"] == "poisoned":
+            raise OSError("filesystem oddity")
+        return real_evaluate(rule, entry)
+
+    monkeypatch.setattr(wakes_mod, "_evaluate", fragile)
+    target = tmp_path / "drop.txt"
+    write_rules(tmp_path, [
+        rule(tmp_path, name="poisoned", kind="file_exists",
+             path="/tmp/somewhere", message="m", pattern=None),
+        rule(tmp_path, name="healthy", kind="file_exists",
+             path=str(target), message="it landed", pattern=None),
+    ])
+    line, _, _ = tick(tmp_path)
+    assert "poisoned" in line  # the crash is named, not silent
+    target.write_text("x", encoding="utf-8")
+    line, pings, _ = tick(tmp_path, now=NOW + 60, pings=[])
+    assert "1 fired" in line  # the healthy rule armed and fired normally
+    assert pings[0][1] == "wake healthy: it landed"
+    # and its state persisted: no re-fire while present
+    line, _, _ = tick(tmp_path, now=NOW + 7300, pings=[])
+    assert "0 fired" in line
+
+
+def test_duplicate_rule_names_are_skipped_visibly(tmp_path):
+    target = tmp_path / "drop.txt"
+    write_rules(tmp_path, [
+        rule(tmp_path, name="dup", kind="file_exists", path=str(target),
+             message="first", pattern=None),
+        rule(tmp_path, name="dup", kind="file_gone", path=str(target),
+             message="second", pattern=None),
+    ])
+    line, _, _ = tick(tmp_path)
+    assert "duplicate" in line and "dup" in line
