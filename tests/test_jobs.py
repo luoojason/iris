@@ -628,22 +628,24 @@ def test_jobs_keep_config_knob(tmp_path, monkeypatch):
     assert Config.from_env(dotenv=tmp_path / "none.env").jobs_keep == 50
 
 
-def test_rerun_clones_the_source_job(tmp_path):
-    from iris.jobs import rerun_job
 
+
+def test_prune_keep_zero_preserves_the_id_anchor(tmp_path):
+    """keep=0 must not empty the registry of its highest id, or the next add()
+    would reuse an id already delivered to the owner."""
     store = JobStore(tmp_path / "jobs.json")
-    src = store.add("audit", "look hard", ["subagents", "files"], "myrepo", "chan-1")
-    store.transition(src["id"], ("pending",), "done", report="old")
-    clone = rerun_job(store, src["id"], channel_id="chan-2")
-    assert clone is not None
-    assert clone["id"] != src["id"]
-    assert clone["title"] == "audit" and clone["instructions"] == "look hard"
-    assert clone["grants"] == ["subagents", "files"] and clone["workspace"] == "myrepo"
-    assert clone["state"] == "pending" and clone["channel_id"] == "chan-2"
-    assert clone["report"] == ""  # a fresh run, not a copy of the old result
+    store.add("a", "x", [], "", "")
+    store.add("b", "x", [], "", "")
+    store.transition(1, ("pending",), "done")
+    store.transition(2, ("pending",), "done")
+    store.prune(keep=0)
+    # the highest-id terminal job is kept as the monotonic anchor
+    assert store.add("c", "x", [], "", "")["id"] == 3  # never reuses #1/#2
 
 
-def test_rerun_unknown_job_returns_none(tmp_path):
-    from iris.jobs import rerun_job
-
-    assert rerun_job(JobStore(tmp_path / "jobs.json"), 99, channel_id="c") is None
+def test_auto_prune_keep_zero_never_reuses_ids(tmp_path):
+    store = JobStore(tmp_path / "jobs.json", keep=0)
+    j1 = store.add("a", "x", [], "", "")["id"]
+    store.transition(j1, ("pending",), "done")  # auto-prune fires, keep=0
+    j2 = store.add("b", "x", [], "", "")["id"]
+    assert j2 > j1  # monotonic despite keep=0

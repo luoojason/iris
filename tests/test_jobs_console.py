@@ -296,7 +296,10 @@ def test_list_works_even_with_jobs_disabled(tmp_path, capsys):
     assert rc == 0 and "a" in capsys.readouterr().out
 
 
-def test_no_action_prints_usage(tmp_path, capsys):
+def test_jobs_command_none_action_is_a_usage_fallback(tmp_path, capsys):
+    # Direct-call defensive fallback (the CLI defaults a bare `iris jobs` to
+    # `list` before dispatch, so production never hits this; see
+    # test_cli_jobs_no_subcommand_lists for the real path).
     rc = run(env(tmp_path), args(None))
     assert rc == 2
     assert "usage" in capsys.readouterr().out.lower()
@@ -317,3 +320,136 @@ def test_cli_jobs_list_smoke(tmp_path, monkeypatch, capsys):
     JobStore(tmp_path / "jobs.json").add("hello", "x", [], "", "")
     assert main(["jobs", "list"]) == 0
     assert "hello" in capsys.readouterr().out
+
+
+# -- review fixes: rerun must be fully gated and re-clamped --------------------
+
+
+def test_rerun_reclamps_grants_to_current_ceiling(tmp_path, capsys):
+    config = env(tmp_path, job_grants=[])  # ceiling narrowed since the original run
+    store = JobStore(config.jobs_file)
+    store.add("audit", "look", ["subagents", "files"], "", "home-1")  # old wide grants
+    store.transition(1, ("pending",), "done")
+    spawned = []
+    rc = run(config, args("rerun", job_id=1), spawned=spawned)
+    out = capsys.readouterr().out
+    assert rc == 0 and spawned == [2]
+    # 'files' is no longer in the ceiling, so the rerun must drop it
+    assert JobStore(config.jobs_file).get(2)["grants"] == ["subagents"]
+    assert "files" in out and "efus" in out  # the refusal is reported
+
+
+def test_rerun_gated_on_jobs_enabled(tmp_path, capsys):
+    config = env(tmp_path, jobs_enabled=False)
+    store = JobStore(config.jobs_file)
+    store.add("a", "x", ["subagents"], "", "home-1")
+    store.transition(1, ("pending",), "done")
+    spawned = []
+    rc = run(config, args("rerun", job_id=1), spawned=spawned)
+    assert rc == 1 and spawned == []
+    assert "disabled" in capsys.readouterr().out.lower()
+
+
+def test_rerun_parks_at_credit_park_level(tmp_path, capsys):
+    from iris.usage import UsageLedger
+    from iris.driver import ClaudeResult
+
+    config = env(tmp_path, usage_budget_usd=10.0)
+    UsageLedger(config.usage_file).record(
+        "chat", ClaudeResult(text="", session_id=None, is_error=False, cost_usd=9.9))
+    store = JobStore(config.jobs_file)
+    store.add("a", "x", ["subagents"], "", "home-1")
+    store.transition(1, ("pending",), "done")
+    spawned = []
+    rc = run(config, args("rerun", job_id=1), spawned=spawned)
+    out = capsys.readouterr().out
+    assert rc == 0 and spawned == []
+    assert "park" in out.lower()
+    assert JobStore(config.jobs_file).get(2)["state"] == "parked"
+
+
+def test_rerun_respects_jobs_max(tmp_path, capsys):
+    config = env(tmp_path, jobs_max=1)
+    store = JobStore(config.jobs_file)
+    store.add("active", "x", ["subagents"], "", "home-1")  # 1 active -> at the cap
+    store.add("old", "y", ["subagents"], "", "home-1")
+    store.transition(2, ("pending",), "done")
+    spawned = []
+    rc = run(config, args("rerun", job_id=2), spawned=spawned)
+    out = capsys.readouterr().out
+    assert rc == 0 and spawned == []  # queued, not launched, over the cap
+    assert "queued" in out.lower()
+
+
+def test_run_park_reports_clamped_grants(tmp_path, capsys):
+    from iris.usage import UsageLedger
+    from iris.driver import ClaudeResult
+
+    config = env(tmp_path, usage_budget_usd=10.0, job_grants=["files"])
+    UsageLedger(config.usage_file).record(
+        "chat", ClaudeResult(text="", session_id=None, is_error=False, cost_usd=9.9))
+    rc = run(config, args("run", title="t", instructions="i", grant="shell,files"))
+    out = capsys.readouterr().out
+    assert "park" in out.lower()
+    assert "shell" in out and "efus" in out  # clamp still reported while parked
+
+
+# -- review fixes: deliver exit code + containment refusal --------------------
+
+
+def test_deliver_exit_nonzero_when_all_uploads_fail(tmp_path, capsys):
+    config = env(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "r.md").write_text("x", encoding="utf-8")
+    WorkspaceStore(config.workspaces_file).add("repo", str(repo))
+    store = JobStore(config.jobs_file)
+    store.add("a", "x", [], "repo", "home-1")
+    store.transition(1, ("pending",), "done", artifacts=["r.md"])
+    import iris.jobs_console as console
+    rc = console.jobs_command(
+        config, args("deliver", job_id=1),
+        spawn=lambda *a, **k: None,
+        send_file=lambda *a: {"error": "HTTP 500"})
+    assert rc == 1
+    assert "fail" in capsys.readouterr().out.lower()
+
+
+def test_deliver_refuses_escaping_artifact_through_console(tmp_path, capsys):
+    config = env(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "secret.md").write_text("nope", encoding="utf-8")
+    WorkspaceStore(config.workspaces_file).add("repo", str(repo))
+    store = JobStore(config.jobs_file)
+    store.add("a", "x", [], "repo", "home-1")
+    store.transition(1, ("pending",), "done", artifacts=["../secret.md"])
+    files = []
+    rc = run(config, args("deliver", job_id=1), files=files)
+    out = capsys.readouterr().out
+    assert files == []  # escaping artifact refused, not uploaded
+    assert rc == 1 and "secret.md" in out
+
+
+# -- review fixes: prune negative keep + id monotonicity ----------------------
+
+
+def test_prune_rejects_negative_keep(tmp_path, capsys):
+    config = env(tmp_path)
+    rc = run(config, args("prune", keep=-3))
+    assert rc == 2
+    assert "keep" in capsys.readouterr().out.lower()
+
+
+def test_cli_jobs_no_subcommand_lists(tmp_path, monkeypatch, capsys):
+    from iris.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    for key in list(os.environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_JOBS", "true")
+    monkeypatch.setenv("IRIS_JOBS_FILE", str(tmp_path / "jobs.json"))
+    JobStore(tmp_path / "jobs.json").add("listme", "x", [], "", "")
+    assert main(["jobs"]) == 0  # bare `iris jobs` lists, never usage
+    assert "listme" in capsys.readouterr().out

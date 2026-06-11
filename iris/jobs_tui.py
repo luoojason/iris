@@ -18,10 +18,9 @@ from .jobs import (
     JobStore,
     cancel,
     repair_dead_runners,
-    rerun_job,
     spawn_runner,
 )
-from .jobs_console import _age, format_detail
+from .jobs_console import _age, format_detail, gated_launch
 
 
 def build_jobs_app(config: Config, *, spawn=None):
@@ -127,11 +126,21 @@ def build_jobs_app(config: Config, *, spawn=None):
             jid = self.selected_id()
             if jid is None:
                 return
-            clone = rerun_job(self.store, jid, config.home_channel)
-            if clone is None:
+            if not config.jobs_enabled:
+                self._status("background jobs are disabled (set IRIS_JOBS=true)")
                 return
-            launch(clone["id"], store=self.store)
-            self._status(f"re-ran job #{jid} as #{clone['id']}")
+            job = self.store.get(jid)
+            if job is None:
+                return
+            # Same fully-gated, re-clamped launch the console uses, so a TUI
+            # re-run cannot escalate grants or skip the credit-guard park.
+            result = gated_launch(
+                config, self.store,
+                title=job.get("title", "rerun"), instructions=job.get("instructions", ""),
+                grants=list(job.get("grants") or []), workspace=job.get("workspace", ""),
+                spawn=launch,
+            )
+            self._status(f"re-ran job #{jid} -> #{result['job']['id']} ({result['outcome']})")
             self.refresh_jobs()
 
     return JobsApp

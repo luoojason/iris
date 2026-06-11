@@ -37,8 +37,11 @@ def test_long_success_notifies_with_template():
     assert sent == [("123", "done: build passed in 45s", "t")]
 
 
-def test_failure_uses_driver_and_delivers():
-    cfg = Config(discord_token="t", notify_channel="123")
+def test_failure_uses_driver_and_delivers(tmp_path):
+    # usage_file under tmp_path so the recording driver does not write
+    # iris-usage.json into the repo root when the suite runs from there.
+    cfg = Config(discord_token="t", notify_channel="123",
+                 usage_file=str(tmp_path / "usage.json"))
     sent = []
 
     class FakeResult:

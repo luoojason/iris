@@ -23,7 +23,6 @@ from .jobs import (
     clamp_grants,
     parse_grants,
     repair_dead_runners,
-    rerun_job,
     send_discord_file,
     spawn_runner,
 )
@@ -31,6 +30,46 @@ from .reminders import fmt_ts
 from .workspaces import WorkspaceStore, collect_artifacts
 
 _DISABLED = "Background jobs are disabled (set IRIS_JOBS=true)."
+
+
+def gated_launch(config: Config, store: JobStore, *, title: str, instructions: str,
+                 grants: list, workspace: str, spawn) -> dict:
+    """The single launch path for console run, console rerun, and TUI rerun.
+
+    Clamps grants to the IRIS_JOB_GRANTS ceiling, applies the credit-guard park
+    and the jobs_max admission cap, then spawns (or not). Returns a result dict
+    ``{outcome, job, granted, clamped}`` the caller formats. Callers must check
+    ``config.jobs_enabled`` first. Routing every launch through here is what
+    keeps rerun from re-escalating grants or bypassing the park.
+    """
+    granted, clamped = clamp_grants(grants, config.job_grants)
+    from .usage import CreditGuard
+
+    if CreditGuard.from_config(config).should_park():
+        job = store.add(title, instructions, granted, workspace, config.home_channel, state="parked")
+        return {"outcome": "parked", "job": job, "granted": granted, "clamped": clamped}
+    repair_dead_runners(store)
+    job = store.add(title, instructions, granted, workspace, config.home_channel,
+                    admit_below=config.jobs_max)
+    if not job["admitted"]:
+        return {"outcome": "queued", "job": job, "granted": granted, "clamped": clamped}
+    spawn(job["id"], store=store)
+    return {"outcome": "started", "job": job, "granted": granted, "clamped": clamped}
+
+
+def _print_launch(result: dict) -> int:
+    job, outcome = result["job"], result["outcome"]
+    if outcome == "parked":
+        print(f"Job #{job['id']} ({job['title']}) PARKED: the credit budget is nearly spent. "
+              f"Launch it anyway with: iris jobs resume {job['id']}.")
+    elif outcome == "queued":
+        print(f"Job #{job['id']} ({job['title']}) recorded but queued: jobs are already active. "
+              f"Launch it with: iris jobs resume {job['id']}.")
+    else:
+        print(f"Started job #{job['id']} ({job['title']}) with grants: {', '.join(result['granted'])}.")
+    if result["clamped"]:
+        print(f"Refused grants over the IRIS_JOB_GRANTS ceiling: {', '.join(result['clamped'])}.")
+    return 0
 
 
 def _age(job: dict) -> str:
@@ -107,6 +146,9 @@ def jobs_command(config: Config, args, *, spawn=None, send_file=None) -> int:
 
     if action == "prune":
         keep = config.jobs_keep if getattr(args, "keep", None) is None else int(args.keep)
+        if keep < 0:
+            print("--keep must be 0 or more.")
+            return 2
         dropped = store.prune(keep)
         print(f"Pruned {dropped} terminal job(s); keeping the most recent {keep}.")
         return 0
@@ -137,10 +179,7 @@ def jobs_command(config: Config, args, *, spawn=None, send_file=None) -> int:
     if action == "resume":
         return _cmd_resume(config, store, job, spawn)
     if action == "rerun":
-        clone = rerun_job(store, job_id, config.home_channel)
-        spawn(clone["id"], store=store)
-        print(f"Re-ran job #{job_id} as new job #{clone['id']} ({clone['title']}).")
-        return 0
+        return _cmd_rerun(config, store, job, spawn)
     if action == "deliver":
         return _cmd_deliver(config, store, job, send_file)
 
@@ -162,32 +201,34 @@ def _cmd_run(config: Config, store: JobStore, args, spawn) -> int:
     except ValueError as exc:
         print(str(exc))
         return 2
-    granted, clamped = clamp_grants(requested, config.job_grants)
     workspace = (getattr(args, "workspace", "") or "").strip()
     if workspace and WorkspaceStore(config.workspaces_file).resolve(workspace) is None:
         names = ", ".join(WorkspaceStore(config.workspaces_file).list()) or "none registered"
         print(f"No workspace named {workspace!r} (registered: {names}).")
         return 2
+    result = gated_launch(config, store, title=title, instructions=instructions,
+                          grants=requested, workspace=workspace, spawn=spawn)
+    return _print_launch(result)
 
-    from .usage import CreditGuard
 
-    if CreditGuard.from_config(config).should_park():
-        job = store.add(title, instructions, granted, workspace, config.home_channel, state="parked")
-        print(f"Job #{job['id']} ({title}) PARKED: the credit budget is nearly spent. "
-              f"Launch it anyway with: iris jobs resume {job['id']}.")
-        return 0
-    repair_dead_runners(store)
-    job = store.add(title, instructions, granted, workspace, config.home_channel,
-                    admit_below=config.jobs_max)
-    if not job["admitted"]:
-        print(f"Job #{job['id']} ({title}) recorded but queued: {config.jobs_max} jobs are "
-              f"already active. Launch it with: iris jobs resume {job['id']}.")
-    else:
-        spawn(job["id"], store=store)
-        print(f"Started job #{job['id']} ({title}) with grants: {', '.join(granted)}.")
-    if clamped:
-        print(f"Refused grants over the IRIS_JOB_GRANTS ceiling: {', '.join(clamped)}.")
-    return 0
+def _cmd_rerun(config: Config, store: JobStore, job: dict, spawn) -> int:
+    """Clone an existing job into a fresh run — fully gated and re-clamped.
+
+    Re-clamping the source job's grants against the *current* ceiling is the
+    load-bearing bit: an old job created when the ceiling was wider must not
+    resurrect a grant the owner has since revoked.
+    """
+    if not config.jobs_enabled:
+        print(_DISABLED)
+        return 1
+    result = gated_launch(
+        config, store,
+        title=job.get("title", "rerun"), instructions=job.get("instructions", ""),
+        grants=list(job.get("grants") or []), workspace=job.get("workspace", ""),
+        spawn=spawn,
+    )
+    print(f"(re-run of job #{job['id']})")
+    return _print_launch(result)
 
 
 def _cmd_resume(config: Config, store: JobStore, job: dict, spawn) -> int:
@@ -221,10 +262,17 @@ def _cmd_deliver(config: Config, store: JobStore, job: dict, send_file) -> int:
     files, problems = collect_artifacts(report, workspace_path)
     for problem in problems:
         print(problem)
+    delivered = 0
     for path in files:
         res = send_file(channel, path, f"job #{job['id']} artifact", config.discord_token)
         if isinstance(res, dict) and res.get("error"):
             print(f"upload failed for {path}: {res['error']}")
         else:
             print(f"delivered {path}")
+            delivered += 1
+    # The owner asked to deliver artifacts; if none made it (all refused or all
+    # failed to upload), say so with a non-zero exit for scripted callers.
+    if delivered == 0:
+        print("Delivered no artifacts.")
+        return 1
     return 0

@@ -288,7 +288,10 @@ def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
         # The claude child runs in its own session; kill BOTH groups or the
         # turn keeps burning credit and running tools after the cancel.
         killed_runner = kill(job.get("pid"))
-        killed_claude = bool(job.get("claude_pid")) and kill(job.get("claude_pid"))
+        # Re-read: claude_pid may have been recorded during the kill window
+        # (the runner records it only once the claude child spawns).
+        fresh = store.get(job_id) or job
+        killed_claude = bool(fresh.get("claude_pid")) and kill(fresh.get("claude_pid"))
         if store.transition(job_id, ("running",), "cancelled", finished_ts=time.time()):
             suffix = "" if (killed_runner or killed_claude) else " (its runner was already gone)"
             return f"Cancelled job #{job_id}.{suffix}"
@@ -309,29 +312,17 @@ def _apply_prune(items: list[dict], keep: int) -> tuple[list[dict], int]:
         return items, 0
     oldest = sorted(terminal, key=lambda j: j.get("id", 0))[: len(terminal) - keep]
     drop_ids = {j.get("id") for j in oldest}
+    # Never drop the highest id overall: add() derives the next id from
+    # max(existing)+1, so the top id must survive to anchor monotonicity.
+    # Without this, prune --keep 0 on an all-terminal store would empty the
+    # file and the next add() would reuse id #1.
+    anchor = max((j.get("id", 0) for j in items), default=0)
+    drop_ids.discard(anchor)
     remaining = [
         j for j in items
         if not (j.get("state") in _TERMINAL_STATES and j.get("id") in drop_ids)
     ]
     return remaining, len(drop_ids)
-
-
-def rerun_job(store: JobStore, job_id: int, channel_id: str) -> Optional[dict]:
-    """Clone a job's instructions/grants/workspace into a fresh pending job.
-
-    Returns the new job record, or None if the source job does not exist. The
-    clone starts clean: no report, error, or artifacts carry over.
-    """
-    src = store.get(job_id)
-    if src is None:
-        return None
-    return store.add(
-        src.get("title", "rerun"),
-        src.get("instructions", ""),
-        list(src.get("grants") or []),
-        src.get("workspace", ""),
-        channel_id,
-    )
 
 
 def repair_dead_runners(store: JobStore) -> int:
