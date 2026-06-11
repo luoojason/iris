@@ -9,9 +9,6 @@ See docs/superpowers/specs/2026-06-08-job-coordinator-design.md.
 
 from __future__ import annotations
 
-import os
-import signal
-import time
 from typing import Optional
 
 try:
@@ -57,13 +54,10 @@ def _workspaces() -> WorkspaceStore:
 
 
 def _kill_runner(pid) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-        return True
-    except (ProcessLookupError, PermissionError, OSError):
-        return False
+    # A thin module-level seam (tests monkeypatch this) over the shared killer.
+    from iris.jobs import kill_process_group
+
+    return kill_process_group(pid)
 
 
 @mcp.tool()
@@ -188,25 +182,9 @@ def cancel_job(job_id: int) -> str:
     """Cancel a background job (kills its runner and its claude turn)."""
     if not _config().jobs_enabled:
         return _DISABLED
-    store = _store()
-    job = store.get(job_id)
-    if job is None:
-        return f"No job #{job_id}."
-    # Transition-first: the guard inside the store decides who wins a race
-    # with the runner, so this tool never claims a cancel that did not stick.
-    if store.transition(job_id, ("pending", "parked"), "cancelled", finished_ts=time.time()):
-        return f"Cancelled job #{job_id} before it started."
-    job = store.get(job_id)
-    if job and job["state"] == "running":
-        # The claude child runs in its own session; kill BOTH groups or the
-        # turn keeps burning credit and running tools after the cancel.
-        killed_runner = _kill_runner(job.get("pid"))
-        killed_claude = bool(job.get("claude_pid")) and _kill_runner(job.get("claude_pid"))
-        if store.transition(job_id, ("running",), "cancelled", finished_ts=time.time()):
-            suffix = "" if (killed_runner or killed_claude) else " (its runner was already gone)"
-            return f"Cancelled job #{job_id}.{suffix}"
-        job = store.get(job_id)
-    return f"Job #{job_id} is already {job['state'] if job else 'gone'}."
+    from iris.jobs import cancel as cancel_core
+
+    return cancel_core(_store(), job_id, kill=_kill_runner)
 
 
 @mcp.tool()

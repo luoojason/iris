@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,43 @@ class JobStore:
 
     def count_active(self) -> int:
         return sum(1 for j in self._load() if j.get("state") in _ACTIVE_STATES)
+
+
+def kill_process_group(pid) -> bool:
+    """SIGKILL a pid's whole process group. False if the pid is gone/invalid."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
+    """Cancel a job, killing its runner and its claude turn. Refuses on a lost race.
+
+    Shared by the jobs MCP tool and the console so the transition-first,
+    kill-both-process-groups, refuse-on-race logic lives in exactly one place.
+    """
+    job = store.get(job_id)
+    if job is None:
+        return f"No job #{job_id}."
+    # Transition-first: the store's guard decides who wins a race with the
+    # runner, so a cancel is never claimed unless it actually stuck.
+    if store.transition(job_id, ("pending", "parked"), "cancelled", finished_ts=time.time()):
+        return f"Cancelled job #{job_id} before it started."
+    job = store.get(job_id)
+    if job and job["state"] == "running":
+        # The claude child runs in its own session; kill BOTH groups or the
+        # turn keeps burning credit and running tools after the cancel.
+        killed_runner = kill(job.get("pid"))
+        killed_claude = bool(job.get("claude_pid")) and kill(job.get("claude_pid"))
+        if store.transition(job_id, ("running",), "cancelled", finished_ts=time.time()):
+            suffix = "" if (killed_runner or killed_claude) else " (its runner was already gone)"
+            return f"Cancelled job #{job_id}.{suffix}"
+        job = store.get(job_id)
+    return f"Job #{job_id} is already {job['state'] if job else 'gone'}."
 
 
 def _apply_prune(items: list[dict], keep: int) -> tuple[list[dict], int]:

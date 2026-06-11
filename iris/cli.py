@@ -268,6 +268,22 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("usage", help="show this month's credit draw and budget level")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
     job_run_parser.add_argument("job_id", type=int)
+    jobs_parser = sub.add_parser("jobs", help="the terminal job console: see and steer background jobs")
+    jobs_parser.add_argument("--tui", action="store_true", help="open the full-screen jobs view")
+    jobs_sub = jobs_parser.add_subparsers(dest="jobs_action")
+    jobs_sub.add_parser("list", help="list jobs (default)")
+    js_show = jobs_sub.add_parser("show", help="show one job in full")
+    js_show.add_argument("job_id", type=int)
+    js_run = jobs_sub.add_parser("run", help="create and launch a job from the terminal")
+    js_run.add_argument("--title", required=True)
+    js_run.add_argument("--instructions", required=True)
+    js_run.add_argument("--grant", default="", help="extra grants, comma-separated: shell,files")
+    js_run.add_argument("--workspace", default="", help="a registered workspace name")
+    for act in ("cancel", "resume", "rerun", "artifacts", "deliver"):
+        p = jobs_sub.add_parser(act, help=f"{act} a job by id")
+        p.add_argument("job_id", type=int)
+    js_prune = jobs_sub.add_parser("prune", help="drop old terminal jobs")
+    js_prune.add_argument("--keep", type=int, default=None)
     ws_parser = sub.add_parser("workspaces", help="manage the directories jobs may work in")
     ws_sub = ws_parser.add_subparsers(dest="ws_action")
     ws_add = ws_sub.add_parser("add", help="register a directory under a name")
@@ -333,6 +349,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         from . import jobs as jobs_mod
         return jobs_mod.run_job(args.job_id, config)
+    if command == "jobs":
+        if getattr(args, "tui", False) and not getattr(args, "jobs_action", None):
+            from .jobs_tui import run as run_jobs_tui
+            return run_jobs_tui(config)
+        # default to the list view when no subcommand is given
+        if not getattr(args, "jobs_action", None):
+            args.jobs_action = "list"
+        from .jobs_console import jobs_command
+        return jobs_command(config, args)
     if command == "tui":
         from .tui import run as run_tui
         run_tui(config)
