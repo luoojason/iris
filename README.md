@@ -192,6 +192,32 @@ with a `jobs` server entry in your MCP config
   (`IRIS_INBOX_FILE`), so the agent knows the outcome without polling.
   Parked and queued jobs launch only when you say so (`resume_job`).
 
+### Job console
+
+When you're at the box where Iris runs, `iris jobs` is a terminal control
+panel over the same job registry — no Discord round-trip, no model, no credit
+spent. `iris jobs` (or `iris jobs list`) prints the table; `iris jobs show
+<id>` gives the full report; and you can act directly:
+
+```bash
+iris jobs run --title "audit a repo" --grant files --workspace myrepo \
+  --instructions "Review the repo, fix flaky tests, report findings."
+iris jobs cancel 3      # kills the runner and its claude turn
+iris jobs resume 4      # launch a parked or queued job
+iris jobs rerun 3       # clone an old job's instructions into a fresh run
+iris jobs artifacts 3   # list a finished job's files
+iris jobs deliver 3     # re-upload them to the home channel
+iris jobs prune --keep 20
+iris jobs --tui         # the full-screen view (needs the [tui] extra)
+```
+
+`iris jobs run` is the one path that creates a job without the model — you
+write the instructions yourself. Its grants are still clamped to the
+`IRIS_JOB_GRANTS` ceiling, and it parks the job when the credit guard says so,
+exactly like the chat path. Actions are atomic-or-refused: if a runner moved a
+job underneath you, the console reports the real state instead of forcing.
+Terminal jobs auto-prune past `IRIS_JOBS_KEEP` (default 50).
+
 ### Credit guard
 
 Iris draws from your plan's monthly agent credit; the guard makes the draw
