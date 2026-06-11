@@ -87,6 +87,23 @@ class Config:
     # the model boundary). Edited only via `iris workspaces add/remove/list`.
     workspaces_file: str = "iris-workspaces.json"
 
+    # Background jobs (the hybrid job coordinator). Off by default; everything
+    # below is inert until IRIS_JOBS is set.
+    jobs_enabled: bool = False
+    jobs_file: str = "iris-jobs.json"
+    # The grants ceiling: the most a job may ever be granted beyond subagents.
+    job_grants: list[str] = field(default_factory=list)
+    # Active (pending+running) jobs past this count are queued, not launched.
+    jobs_max: int = 2
+    job_timeout: float = 1800.0
+    # Optional model/persona for job turns; empty falls back to the chat model.
+    job_model: str = ""
+    job_persona: str = ""
+    # Where finished background work queues notes for the next chat turn.
+    inbox_file: str = "iris-inbox.json"
+    # The owner's recorded home channel (job pings, artifact uploads).
+    home_channel: str = ""
+
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
@@ -150,6 +167,15 @@ class Config:
             voice_enabled=_truthy(os.environ.get("IRIS_VOICE")),
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
             workspaces_file=os.environ.get("IRIS_WORKSPACES_FILE", "iris-workspaces.json"),
+            jobs_enabled=_flag(os.environ.get("IRIS_JOBS"), False),
+            jobs_file=os.environ.get("IRIS_JOBS_FILE", "iris-jobs.json"),
+            job_grants=_split(os.environ.get("IRIS_JOB_GRANTS")),
+            jobs_max=int(os.environ.get("IRIS_JOBS_MAX", "2")),
+            job_timeout=float(os.environ.get("IRIS_JOB_TIMEOUT", "1800")),
+            job_model=os.environ.get("IRIS_JOB_MODEL", ""),
+            job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
+            inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
+            home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),

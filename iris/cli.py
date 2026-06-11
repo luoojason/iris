@@ -229,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
+    job_run_parser.add_argument("job_id", type=int)
     ws_parser = sub.add_parser("workspaces", help="manage the directories jobs may work in")
     ws_sub = ws_parser.add_subparsers(dest="ws_action")
     ws_add = ws_sub.add_parser("add", help="register a directory under a name")
@@ -286,6 +288,12 @@ def main(argv: list[str] | None = None) -> int:
             config, args.ws_action,
             name=getattr(args, "name", ""), path=getattr(args, "path", ""),
         )
+    if command == "job-run":
+        if not config.jobs_enabled:
+            print("job-run: background jobs are disabled (set IRIS_JOBS=true)")
+            return 1
+        from . import jobs as jobs_mod
+        return jobs_mod.run_job(args.job_id, config)
     if command == "tui":
         from .tui import run as run_tui
         run_tui(config)

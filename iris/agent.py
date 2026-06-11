@@ -314,6 +314,10 @@ class Agent:
                 idle_timeout=config.stream_idle_timeout,
                 total_timeout=config.stream_total_timeout,
             )
+        inbox = None
+        if config.jobs_enabled:
+            from .inbox import Inbox
+            inbox = Inbox(config.inbox_file)
         return cls(
             driver,
             store,
@@ -323,6 +327,7 @@ class Agent:
             metrics_file=config.metrics_file,
             trivial_max_chars=config.trivial_max_chars,
             stream_driver=stream_driver,
+            inbox=inbox,
         )
 
 
