@@ -385,3 +385,26 @@ async def test_live_turn_restores_inbox_on_error(tmp_path):
     await turn.aftermath()
     assert result.is_error
     assert box.drain() == ["job #4 finished: report"]
+
+
+def test_raising_driver_restores_inbox_entries(tmp_path):
+    """ClaudeError raises out of respond (adapters catch it); the drained
+    notes must be restored exactly as they are for an error result."""
+    import pytest
+
+    from iris.driver import ClaudeError
+    from iris.inbox import Inbox
+
+    class RaisingDriver:
+        model = None
+
+        def run(self, prompt, session_id=None, model=None):
+            raise ClaudeError("claude binary not found")
+
+    store = SessionStore(tmp_path / "s.json")
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("job #5 finished: do not lose me")
+    agent = Agent(RaisingDriver(), store, inbox=box)
+    with pytest.raises(ClaudeError):
+        agent.respond("c1", "hello")
+    assert box.drain() == ["job #5 finished: do not lose me"]

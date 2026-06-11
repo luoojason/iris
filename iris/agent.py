@@ -156,15 +156,22 @@ class Agent:
                 if folded:
                     text = _fold_prompt(folded, text)
             session_id = self.store.get(conversation_id)
-            result = self.driver.run(text, session_id, model)
-            # A resumed session that no longer exists, or one that outgrew the
-            # context window, carries no replacement id. Either way the stored id
-            # is unusable, so drop it and retry once on a fresh session.
-            if result.is_error and session_id and (_is_dead_session(result) or _is_overflow(result)):
-                if _is_overflow(result):
-                    log.warning("conversation %s overflowed its context; starting fresh", conversation_id)
-                self.store.clear(conversation_id)
-                result = self.driver.run(text, None, model)
+            try:
+                result = self.driver.run(text, session_id, model)
+                # A resumed session that no longer exists, or one that outgrew the
+                # context window, carries no replacement id. Either way the stored id
+                # is unusable, so drop it and retry once on a fresh session.
+                if result.is_error and session_id and (_is_dead_session(result) or _is_overflow(result)):
+                    if _is_overflow(result):
+                        log.warning("conversation %s overflowed its context; starting fresh", conversation_id)
+                    self.store.clear(conversation_id)
+                    result = self.driver.run(text, None, model)
+            except BaseException:
+                # ClaudeError raises out to the adapter; the drained notes must
+                # survive that exactly as they survive an error result.
+                if folded:
+                    self.inbox.restore(folded)
+                raise
             if result.is_error and folded:
                 # The turn that took the notes failed; put them back so the
                 # next turn re-delivers them instead of losing them.
@@ -326,10 +333,11 @@ class Agent:
                 idle_timeout=config.stream_idle_timeout,
                 total_timeout=config.stream_total_timeout,
             )
-        inbox = None
-        if config.jobs_enabled:
-            from .inbox import Inbox
-            inbox = Inbox(config.inbox_file)
+        # Always built: jobs AND wakes queue fold-back notes, so the inbox
+        # must drain even when IRIS_JOBS is off. Empty-inbox drains are one
+        # cheap read per turn.
+        from .inbox import Inbox
+        inbox = Inbox(config.inbox_file)
         from .usage import CreditGuard
         guard = CreditGuard.from_config(config)
         return cls(

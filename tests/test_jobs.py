@@ -304,14 +304,15 @@ def test_jobs_config_defaults(tmp_path, monkeypatch):
     assert cfg.job_grants == []
 
 
-def test_agent_from_config_builds_inbox_only_when_jobs_are_on(tmp_path):
+def test_agent_from_config_always_builds_the_inbox(tmp_path):
+    """Wakes queue fold-back notes whether or not jobs are enabled, so the
+    inbox must drain regardless of IRIS_JOBS."""
     from iris.agent import Agent
 
     base = dict(session_store_path=str(tmp_path / "s.json"),
                 inbox_file=str(tmp_path / "i.json"))
-    assert Agent.from_config(Config(jobs_enabled=False, **base)).inbox is None
-    agent = Agent.from_config(Config(jobs_enabled=True, **base))
-    assert agent.inbox is not None
+    assert Agent.from_config(Config(jobs_enabled=False, **base)).inbox is not None
+    assert Agent.from_config(Config(jobs_enabled=True, **base)).inbox is not None
 
 
 def test_cli_job_run_gate_and_dispatch(tmp_path, monkeypatch):
