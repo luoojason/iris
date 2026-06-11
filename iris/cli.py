@@ -106,6 +106,15 @@ def doctor(config: Config, probe: bool = True) -> int:
         print(f"auto-compact: at {' or '.join(triggers)}")
     else:
         print("auto-compact: off")
+    if config.usage_budget_usd > 0:
+        try:
+            from .usage import UsageLedger, level_for, percent_used
+
+            pct = percent_used(UsageLedger(config.usage_file).month(), config.usage_budget_usd)
+            lvl = level_for(pct, config.usage_tighten_at, config.usage_park_at)
+            print(f"credit guard: {pct:.0f}% of ${config.usage_budget_usd:.2f} used this month ({lvl})")
+        except Exception as exc:
+            print(f"credit guard: could not read the ledger ({exc})")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
@@ -168,6 +177,21 @@ def reminders_tick(config: Config) -> int:
         else:
             store.add(job["due_ts"], job["text"], job["channel_id"])  # re-queue on failure
     print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    # The budget check rides the same tick. It must never take reminder
+    # delivery down with it, so it is fail-soft to a printed line.
+    try:
+        from .usage import budget_tick
+        print(budget_tick(config))
+    except Exception as exc:
+        print(f"budget tick failed: {exc}")
+    return 0
+
+
+def usage_cmd(config: Config) -> int:
+    """Print this month's credit draw (a report, not a check; always exits 0)."""
+    from .usage import summary_text
+
+    print(summary_text(config))
     return 0
 
 
@@ -229,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    sub.add_parser("usage", help="show this month's credit draw and budget level")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
     job_run_parser.add_argument("job_id", type=int)
     ws_parser = sub.add_parser("workspaces", help="manage the directories jobs may work in")
@@ -283,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
+    if command == "usage":
+        return usage_cmd(config)
     if command == "workspaces":
         return workspaces_cmd(
             config, args.ws_action,

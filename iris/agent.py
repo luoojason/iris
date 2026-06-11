@@ -78,6 +78,7 @@ class Agent:
         trivial_max_chars: int = 140,
         stream_driver: Optional[StreamDriver] = None,
         inbox=None,
+        guard=None,
     ):
         self.driver = driver
         self.store = store
@@ -92,6 +93,9 @@ class Agent:
         # Fold-back inbox: background work (jobs, wakes) queues notes here and
         # the next owner turn carries them. None means the feature is off.
         self.inbox = inbox
+        # Credit guard: records every turn's cost and, when the month runs hot,
+        # stretches the trivial cap so more chatter routes light. None = off.
+        self.guard = guard
         # Compact a conversation after this many turns on one session (0 = never).
         # A coarse backstop; the token threshold below is the accurate trigger.
         self.compact_every = compact_every
@@ -142,7 +146,7 @@ class Agent:
                 text,
                 light_model=self.light_model or None,
                 has_attachments=has_attachments,
-                trivial_max_chars=self.trivial_max_chars,
+                trivial_max_chars=self._routing_cap(),
             )
             routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
         with self._lock_for(conversation_id):
@@ -167,6 +171,8 @@ class Agent:
                 self.inbox.restore(folded)
             if result.session_id:
                 self.store.set(conversation_id, result.session_id)
+            if self.guard is not None:
+                self.guard.record("chat", result)
             emit_turn(
                 self.metrics_file, conversation_id, result, routed, reason,
                 has_attachments, self.store.turns(conversation_id),
@@ -193,11 +199,17 @@ class Agent:
             text,
             light_model=self.light_model or None,
             has_attachments=has_attachments,
-            trivial_max_chars=self.trivial_max_chars,
+            trivial_max_chars=self._routing_cap(),
         )
         routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
         return LiveTurn(self, conversation_id, text, model,
                         routed=routed, reason=reason, has_attachments=has_attachments)
+
+    def _routing_cap(self) -> int:
+        """The trivial-routing cap, stretched by the credit guard when hot."""
+        if self.guard is not None:
+            return self.guard.tightened_max_chars(self.trivial_max_chars)
+        return self.trivial_max_chars
 
     def _should_compact(self, conversation_id: str, result: ClaudeResult) -> bool:
         """Whether this conversation is big enough to condense onto a fresh session."""
@@ -318,6 +330,8 @@ class Agent:
         if config.jobs_enabled:
             from .inbox import Inbox
             inbox = Inbox(config.inbox_file)
+        from .usage import CreditGuard
+        guard = CreditGuard.from_config(config)
         return cls(
             driver,
             store,
@@ -328,6 +342,7 @@ class Agent:
             trivial_max_chars=config.trivial_max_chars,
             stream_driver=stream_driver,
             inbox=inbox,
+            guard=guard,
         )
 
 
@@ -442,6 +457,8 @@ class LiveTurn:
         # the user cleared it, so do not write this now-stale session back.
         if result.session_id and self._agent._epoch_for(self._cid) == self._epoch:
             self._agent.store.set(self._cid, result.session_id)
+        if self._agent.guard is not None:
+            self._agent.guard.record("chat", result)
         emit_turn(
             self._agent.metrics_file, self._cid, result, self._routed, self._reason,
             self._has_attachments, self._agent.store.turns(self._cid),

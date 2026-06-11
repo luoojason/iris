@@ -100,6 +100,16 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
                 f"No workspace named {workspace!r} (registered: {names}). "
                 "The owner registers one with: iris workspaces add <name> <path>."
             )
+    from iris.usage import CreditGuard
+
+    if CreditGuard.from_config(config).should_park():
+        job = store.add(title.strip(), instructions, granted, workspace,
+                        config.home_channel, state="parked")
+        return (
+            f"Job #{job['id']} ({job['title']}) was PARKED, not started: the credit "
+            f"guard says the month's budget is nearly spent. The owner can launch "
+            f"it anyway with resume_job({job['id']})."
+        )
     repair_dead_runners(store)
     queued = store.count_active() >= config.jobs_max
     job = store.add(title.strip(), instructions, granted, workspace, config.home_channel)

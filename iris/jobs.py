@@ -302,6 +302,7 @@ def run_job(
     driver_factory=None,
     send_message=None,
     send_file=None,
+    guard=None,
 ) -> int:
     """Run one recorded job to completion. This IS the detached runner.
 
@@ -312,6 +313,9 @@ def run_job(
     workspace_store = workspace_store or WorkspaceStore(config.workspaces_file)
     inbox = inbox or Inbox(config.inbox_file)
     driver_factory = driver_factory or build_job_driver
+    if guard is None:
+        from .usage import CreditGuard
+        guard = CreditGuard.from_config(config)
     if send_message is None:
         from .reminders import send_discord_message as send_message
     send_file = send_file or send_discord_file
@@ -344,6 +348,7 @@ def run_job(
 
     driver = driver_factory(config, job, workspace_path)
     result = driver.run(job["instructions"])
+    guard.record("job", result)
 
     if result.is_error:
         error = result.error or "the job turn failed"

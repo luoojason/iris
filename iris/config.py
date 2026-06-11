@@ -104,6 +104,16 @@ class Config:
     # The owner's recorded home channel (job pings, artifact uploads).
     home_channel: str = ""
 
+    # Credit guard: the usage ledger always records; the budget (USD-estimate
+    # per month, 0 = off) turns on threshold pings, job parking at park_at%,
+    # and tighter light-model routing at tighten_at%.
+    usage_file: str = "iris-usage.json"
+    usage_budget_usd: float = 0.0
+    usage_tighten_at: float = 80.0
+    usage_park_at: float = 95.0
+    usage_ping_at: list[float] = field(default_factory=lambda: [50.0, 80.0, 95.0])
+    tighten_factor: float = 3.0
+
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
@@ -176,6 +186,12 @@ class Config:
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
+            usage_file=os.environ.get("IRIS_USAGE_FILE", "iris-usage.json"),
+            usage_budget_usd=float(os.environ.get("IRIS_USAGE_BUDGET_USD", "0")),
+            usage_tighten_at=float(os.environ.get("IRIS_USAGE_TIGHTEN_AT", "80")),
+            usage_park_at=float(os.environ.get("IRIS_USAGE_PARK_AT", "95")),
+            usage_ping_at=[float(v) for v in _split(os.environ.get("IRIS_USAGE_PING_AT")) or ["50", "80", "95"]],
+            tighten_factor=float(os.environ.get("IRIS_TIGHTEN_FACTOR", "3")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
