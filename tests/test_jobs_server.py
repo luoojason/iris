@@ -25,7 +25,7 @@ def env(tmp_path, monkeypatch):
     )
     spawned = []
     monkeypatch.setattr(srv, "_CONFIG", config)
-    monkeypatch.setattr(srv, "SPAWN", lambda job_id: spawned.append(job_id))
+    monkeypatch.setattr(srv, "SPAWN", lambda job_id, **kw: spawned.append(job_id))
     return {
         "config": config,
         "spawned": spawned,
@@ -158,3 +158,61 @@ def test_list_repairs_dead_runners(env, monkeypatch):
     listing = srv.list_jobs()
     assert "[failed]" in listing
     assert env["store"].get(1)["error"] == "the job runner died"
+
+
+def test_cancel_running_job_kills_both_process_groups(env, monkeypatch):
+    """The claude child runs in its OWN session (driver hardening), so a
+    cancel must kill the recorded claude pid too or the turn keeps burning
+    credit and running tools after the owner said stop."""
+    srv.start_job("a", "one")
+    env["store"].transition(1, ("pending",), "running", pid=111, claude_pid=222,
+                            started_ts=time.time())
+    killed = []
+    monkeypatch.setattr(srv, "_kill_runner", lambda pid: killed.append(pid) or True)
+    reply = srv.cancel_job(1)
+    assert "Cancelled job #1" in reply
+    assert set(killed) == {111, 222}
+
+
+def test_cancel_reports_truth_when_the_job_finished_first(env, monkeypatch):
+    srv.start_job("a", "one")
+    env["store"].transition(1, ("pending",), "running", pid=111)
+
+    def kill_and_finish(pid):
+        # while we were killing, the runner completed and recorded done
+        env["store"].transition(1, ("running",), "done", report="won the race")
+        return True
+
+    monkeypatch.setattr(srv, "_kill_runner", kill_and_finish)
+    reply = srv.cancel_job(1)
+    assert "already done" in reply  # never claim a cancel that did not happen
+
+
+def test_status_list_cancel_are_gated_on_iris_jobs(env, monkeypatch):
+    srv.start_job("a", "one")
+    monkeypatch.setattr(srv, "_CONFIG", Config(jobs_enabled=False,
+                                               jobs_file=env["config"].jobs_file))
+    assert "disabled" in srv.job_status(1)
+    assert "disabled" in srv.list_jobs()
+    assert "disabled" in srv.cancel_job(1)
+    assert env["store"].get(1)["state"] == "pending"  # nothing was touched
+
+
+def test_parked_reply_still_reports_clamped_grants(env, monkeypatch, tmp_path):
+    from iris.usage import UsageLedger
+    from iris.driver import ClaudeResult
+
+    config = Config(
+        jobs_enabled=True,
+        jobs_file=env["config"].jobs_file,
+        workspaces_file=env["config"].workspaces_file,
+        job_grants=["files"],
+        usage_file=str(tmp_path / "u.json"),
+        usage_budget_usd=10.0,
+    )
+    UsageLedger(config.usage_file).record(
+        "chat", ClaudeResult(text="", session_id=None, is_error=False, cost_usd=9.9))
+    monkeypatch.setattr(srv, "_CONFIG", config)
+    reply = srv.start_job("big", "work", grants="shell, files")
+    assert "PARKED" in reply
+    assert "Refused grants" in reply and "shell" in reply

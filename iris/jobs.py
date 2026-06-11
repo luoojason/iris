@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -160,9 +161,15 @@ class JobStore:
         os.replace(tmp, self.path)
 
     def add(self, title: str, instructions: str, grants: list[str],
-            workspace: str, channel_id: str, state: str = "pending") -> dict:
+            workspace: str, channel_id: str, state: str = "pending",
+            admit_below: Optional[int] = None) -> dict:
+        """Record a job. With ``admit_below``, the active-jobs admission check
+        happens under the same lock as the insert (no TOCTOU between counting
+        and adding); the returned dict carries an ephemeral ``admitted`` flag
+        that is never persisted."""
         with self._locked():
             items = self._load()
+            active = sum(1 for j in items if j.get("state") in _ACTIVE_STATES)
             job = {
                 "id": max((int(i.get("id", 0)) for i in items), default=0) + 1,
                 "title": title,
@@ -174,6 +181,7 @@ class JobStore:
                 "started_ts": None,
                 "finished_ts": None,
                 "pid": None,
+                "claude_pid": None,
                 "report": "",
                 "error": None,
                 "artifacts": [],
@@ -182,7 +190,9 @@ class JobStore:
             }
             items.append(job)
             self._save(items)
-            return dict(job)
+            returned = dict(job)
+            returned["admitted"] = admit_below is None or active < admit_below
+            return returned
 
     def get(self, job_id: int) -> Optional[dict]:
         for job in self._load():
@@ -226,20 +236,30 @@ class JobStore:
 
 
 def repair_dead_runners(store: JobStore) -> int:
-    """Flip ``running`` jobs whose runner pid is gone to ``failed``.
+    """Flip jobs whose runner pid is gone to ``failed``.
 
-    There is no poller; this runs on owner-driven touches (list, status,
-    start) so a crashed runner is discovered the next time anyone looks.
+    Covers two windows: ``running`` jobs whose runner died mid-flight, and
+    ``pending`` jobs that were spawned (a pid was recorded) but whose runner
+    died before it could even take the pending->running transition — without
+    this they would consume a jobs_max slot forever. Pending jobs with no pid
+    are genuinely queued and stay untouched. There is no poller; this runs on
+    owner-driven touches (list, status, start) so a crashed runner is
+    discovered the next time anyone looks.
     """
     repaired = 0
     for job in store.all():
-        if job.get("state") != "running":
+        state = job.get("state")
+        if state not in ("running", "pending"):
             continue
         pid = job.get("pid")
+        if state == "pending" and pid is None:
+            continue  # queued, never spawned
         if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
             continue
-        if store.transition(job["id"], ("running",), "failed",
-                            error="the job runner died", finished_ts=time.time()):
+        error = ("the job runner died" if state == "running"
+                 else "the job runner died before starting")
+        if store.transition(job["id"], (state,), "failed",
+                            error=error, finished_ts=time.time()):
             repaired += 1
     return repaired
 
@@ -254,9 +274,22 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def build_job_driver(config: Config, job: dict, workspace_path: Optional[str]) -> ClaudeDriver:
-    """The job's ClaudeDriver: same hardened path as chat, wider grants."""
+def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
+                     child_pid_callback=None) -> ClaudeDriver:
+    """The job's ClaudeDriver: same hardened path as chat, wider grants.
+
+    Two deliberate deviations from the chat defaults:
+
+    * ``restrict_builtin_tools=False``: the denylist here is the *derived*
+      one. With every grant given it derives to the empty tuple, and the
+      driver treats a falsy explicit denylist as unset and would silently
+      fall back to the FULL default — re-denying every granted tool.
+    * ``cwd``: the agent's own directory holds .env and the state files, and
+      the Read tool is always available to a job. The child runs in the
+      workspace instead, or a throwaway scratch dir when there is none.
+    """
     grants = list(job.get("grants") or ["subagents"])
+    cwd = workspace_path or tempfile.mkdtemp(prefix="iris-job-")
     return ClaudeDriver(
         claude_bin=config.claude_bin,
         model=config.job_model or config.model,
@@ -264,8 +297,11 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str]) -
         permission_mode=config.permission_mode,
         allowed_tools=job_allowed_builtins(grants) or None,
         disallowed_tools=job_disallowed(grants),
+        restrict_builtin_tools=False,
         disable_auto_memory=config.disable_auto_memory,
         add_dirs=[workspace_path] if workspace_path else None,
+        cwd=cwd,
+        child_pid_callback=child_pid_callback,
         timeout=config.job_timeout,
         max_retries=config.max_retries,
         retry_base_delay=config.retry_base_delay,
@@ -273,16 +309,26 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str]) -
     )
 
 
-def spawn_runner(job_id: int, *, popen=None) -> None:
-    """Launch the detached runner for a recorded job."""
+def spawn_runner(job_id: int, *, store: Optional[JobStore] = None, popen=None) -> int:
+    """Launch the detached runner for a recorded job, recording its pid.
+
+    The pid lands in the job row immediately (the runner re-records the same
+    value on its pending->running transition), so a runner that dies before
+    that transition is still discoverable by repair_dead_runners instead of
+    consuming a jobs_max slot forever.
+    """
     popen = popen or subprocess.Popen
-    popen(
+    proc = popen(
         [sys.executable, "-m", "iris", "job-run", str(job_id)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    pid = getattr(proc, "pid", None)
+    if store is not None and isinstance(pid, int):
+        store.update(job_id, pid=pid)
+    return pid if isinstance(pid, int) else 0
 
 
 def _head(text: str, cap: int = REPORT_FOLD_CAP) -> str:
@@ -329,12 +375,19 @@ def run_job(
     channel = job.get("channel_id") or config.home_channel
     token = config.discord_token
 
-    def deliver(text: str) -> None:
+    def deliver(text: str, problems: list = ()) -> bool:
+        # Truncate the report part first, THEN append problem lines, so a
+        # long report can never push a skip notice out of the message.
         note = _head(text)
+        for problem in problems:
+            note += "\n" + problem
+        delivered = True
         if channel and token:
-            if not send_message(channel, note, token):
+            delivered = bool(send_message(channel, note, token))
+            if not delivered:
                 log.warning("could not ping channel %s for job %s", channel, job_id)
         inbox.append(note)
+        return delivered
 
     workspace_path: Optional[str] = None
     if job.get("workspace"):
@@ -346,8 +399,22 @@ def run_job(
             deliver(f"job #{job_id} ({job['title']}) failed: {error}")
             return 1
 
-    driver = driver_factory(config, job, workspace_path)
-    result = driver.run(job["instructions"])
+    def record_child(pid: int) -> None:
+        # So a cancel can kill the claude tree: it runs in its OWN session
+        # (driver hardening), so killing the runner alone would orphan it.
+        store.update(job_id, claude_pid=pid)
+
+    try:
+        driver = driver_factory(config, job, workspace_path, record_child)
+        result = driver.run(job["instructions"])
+    except Exception as exc:
+        # ClaudeError (binary missing) or anything else: the job must never
+        # be left 'running' with no ping — the owner is never left guessing.
+        log.exception("job %s crashed while launching claude", job_id)
+        store.transition(job_id, ("running",), "failed",
+                         error=f"the job turn crashed: {exc}", finished_ts=time.time())
+        deliver(f"job #{job_id} ({job['title']}) failed: the job turn crashed: {exc}")
+        return 1
     guard.record("job", result)
 
     if result.is_error:
@@ -358,24 +425,52 @@ def run_job(
         return 1
 
     report = result.text or ""
-    files, problems = collect_artifacts(report, workspace_path)
-    artifact_names = [str(Path(f).relative_to(Path(workspace_path).resolve())) if workspace_path else f
-                      for f in files]
-    store.transition(job_id, ("running",), "done",
-                     report=report, artifacts=artifact_names,
-                     finished_ts=time.time())
+    try:
+        files, problems = collect_artifacts(report, workspace_path)
+        artifact_names = [str(Path(f).relative_to(Path(workspace_path).resolve())) if workspace_path else f
+                          for f in files]
+    except Exception as exc:
+        # The turn is already paid for; its report must survive the crash.
+        log.exception("job %s finished but artifact handling crashed", job_id)
+        store.transition(job_id, ("running",), "failed",
+                         error=f"finished, but artifact handling crashed: {exc}",
+                         report=report, finished_ts=time.time())
+        deliver(f"job #{job_id} ({job['title']}) finished, but artifact handling crashed: {exc}")
+        return 1
 
-    summary = f"job #{job_id} ({job['title']}) finished: {report}"
-    if problems:
-        summary += "\n" + "\n".join(problems)
-    deliver(summary)
+    final = store.transition(job_id, ("running",), "done",
+                             report=report, artifacts=artifact_names,
+                             finished_ts=time.time())
+    if final is None:
+        # The job left 'running' under us (an owner cancel won the race).
+        # Don't follow a cancel with a confusing 'finished' ping.
+        log.info("job %s was cancelled mid-run; skipping delivery", job_id)
+        return 0
 
-    for path in files:
-        if channel and token:
-            res = send_file(channel, path, f"job #{job_id} artifact", token)
-            if isinstance(res, dict) and res.get("error"):
-                inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}")
+    if deliver(f"job #{job_id} ({job['title']}) finished: {report}", problems):
+        store.update(job_id, report_delivered=True)
+
+    try:
+        for path in files:
+            if channel and token:
+                res = send_file(channel, path, f"job #{job_id} artifact", token)
+                if isinstance(res, dict) and res.get("error"):
+                    inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}")
+    except Exception:
+        log.exception("job %s artifact upload crashed after completion", job_id)
     return 0
+
+
+def _header_safe(filename: str) -> str:
+    """A filename safe to embed in a multipart header.
+
+    A job with file grants can create files whose names carry quotes or
+    control bytes; interpolated raw into Content-Disposition those would
+    terminate the header and inject parts into the authenticated request.
+    The real name still reaches Discord via the JSON payload (json.dumps).
+    """
+    cleaned = re.sub(r'[^\x20-\x7e]', "_", filename)
+    return cleaned.replace('"', "_").replace("\\", "_") or "artifact"
 
 
 def send_discord_file(channel_id: str, file_path: str, content: str, token: str) -> dict:
@@ -396,7 +491,7 @@ def send_discord_file(channel_id: str, file_path: str, content: str, token: str)
         ).encode(),
         (
             f'--{boundary}\r\nContent-Disposition: form-data; name="files[0]"; '
-            f'filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+            f'filename="{_header_safe(filename)}"\r\nContent-Type: application/octet-stream\r\n\r\n'
         ).encode() + blob + b"\r\n",
         f"--{boundary}--\r\n".encode(),
     ])

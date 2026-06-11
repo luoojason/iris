@@ -144,14 +144,15 @@ def runner_env(tmp_path, *, result, workspace=None, grants=None):
     driver = FakeJobDriver(result)
     captured = {}
 
-    def driver_factory(config, job, workspace_path):
+    def driver_factory(config, job, workspace_path, child_pid_callback=None):
         captured["workspace_path"] = workspace_path
         captured["job"] = dict(job)
         return driver
 
     pings = []
     files = []
-    config = Config(jobs_enabled=True, discord_token="tok")
+    config = Config(jobs_enabled=True, discord_token="tok",
+                    usage_file=str(tmp_path / "usage.json"))
     return {
         "store": store, "ws_store": ws_store, "inbox": inbox, "driver": driver,
         "driver_factory": driver_factory, "captured": captured, "config": config,
@@ -333,3 +334,213 @@ def test_cli_job_run_gate_and_dispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(jobs_mod, "run_job", fake_run_job)
     assert main(["job-run", "7"]) == 0
     assert seen["id"] == 7
+
+
+def test_full_grants_disable_the_denylist_instead_of_reviving_it():
+    """All grants -> empty derived denylist. The driver treats a falsy explicit
+    denylist as unset and falls back to the FULL default, silently re-denying
+    every granted tool; the job driver must disable that fallback."""
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True)
+    driver = build_job_driver(
+        config, {"grants": ["subagents", "shell", "files"], "workspace": ""}, None)
+    assert driver.disallowed_tools == ()
+    assert "--disallowedTools" not in driver.build_command()
+    assert "Bash" in (driver.allowed_tools or [])
+
+
+def test_job_driver_runs_in_the_workspace(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True)
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": "ws"},
+                              str(tmp_path))
+    assert driver.cwd == str(tmp_path)
+
+
+def test_job_driver_without_workspace_avoids_the_secrets_dir(tmp_path, monkeypatch):
+    """The agent's own dir holds .env and state files; a job's claude child
+    must never have it as cwd (the Read tool is always available)."""
+    import tempfile
+
+    from iris.jobs import build_job_driver
+
+    monkeypatch.chdir(tmp_path)  # pretend tmp_path is the iris dir
+    config = Config(jobs_enabled=True)
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    assert driver.cwd is not None
+    assert driver.cwd != str(tmp_path)
+    assert driver.cwd.startswith(tempfile.gettempdir())
+
+
+def test_run_job_records_the_claude_child_pid(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="ok", session_id=None, is_error=False))
+
+    def factory_with_callback(config, job, workspace_path, child_pid_callback=None):
+        class D:
+            def run(self, prompt, session_id=None, model=None):
+                child_pid_callback(7777)  # what ClaudeDriver does on spawn
+                return ClaudeResult(text="ok", session_id=None, is_error=False)
+        return D()
+
+    env["driver_factory"] = factory_with_callback
+    assert run_with(env) == 0
+    assert env["store"].get(1)["claude_pid"] == 7777
+
+
+def test_run_job_survives_a_raising_driver(tmp_path):
+    from iris.driver import ClaudeError
+
+    env = runner_env(tmp_path, result=None)
+
+    def exploding_factory(config, job, workspace_path, child_pid_callback=None):
+        class D:
+            def run(self, prompt, session_id=None, model=None):
+                raise ClaudeError("claude binary not found on PATH")
+        return D()
+
+    env["driver_factory"] = exploding_factory
+    assert run_with(env) == 1
+    job = env["store"].get(1)
+    assert job["state"] == "failed"
+    assert "crashed" in job["error"]
+    assert len(env["pings"]) == 1 and "failed" in env["pings"][0][1]
+    assert env["inbox"].drain()  # the owner is never left guessing
+
+
+def test_run_job_keeps_the_paid_report_when_artifact_handling_crashes(tmp_path, monkeypatch):
+    import iris.jobs as jobs_mod
+
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    env = runner_env(tmp_path, workspace=ws,
+                     result=ClaudeResult(text="precious report", session_id=None, is_error=False))
+
+    def explode(report, workspace_dir):
+        raise RuntimeError("artifact bug")
+
+    monkeypatch.setattr(jobs_mod, "collect_artifacts", explode)
+    assert run_with(env) == 1
+    job = env["store"].get(1)
+    assert job["state"] == "failed"
+    assert job["report"] == "precious report"  # the billed turn's output survives
+    assert "artifact" in job["error"]
+    assert len(env["pings"]) == 1
+
+
+def test_run_job_skips_delivery_when_cancelled_mid_run(tmp_path):
+    env = runner_env(tmp_path, result=None)
+    store = env["store"]
+
+    def cancelling_factory(config, job, workspace_path, child_pid_callback=None):
+        class D:
+            def run(self, prompt, session_id=None, model=None):
+                store.transition(1, ("running",), "cancelled")  # owner cancelled mid-turn
+                return ClaudeResult(text="too late", session_id=None, is_error=False)
+        return D()
+
+    env["driver_factory"] = cancelling_factory
+    assert run_with(env) == 0
+    assert store.get(1)["state"] == "cancelled"
+    assert env["pings"] == []  # no confusing 'finished' after a cancel
+    assert env["inbox"].drain() == []
+
+
+def test_artifact_problems_survive_a_long_report(tmp_path):
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    long_report = ("x" * 3000) + "\nARTIFACT: missing.bin"
+    env = runner_env(tmp_path, workspace=ws,
+                     result=ClaudeResult(text=long_report, session_id=None, is_error=False))
+    assert run_with(env) == 0
+    text = env["pings"][0][1]
+    assert "missing.bin" in text  # the skip note outlives report truncation
+    assert "truncated" in text
+
+
+def test_ping_success_marks_report_delivered(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="ok", session_id=None, is_error=False))
+    run_with(env)
+    assert env["store"].get(1)["report_delivered"] is True
+
+
+def test_failed_ping_leaves_report_undelivered(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="ok", session_id=None, is_error=False))
+    env["send_message"] = lambda channel, text, token: False
+    run_with(env)
+    assert env["store"].get(1)["report_delivered"] is False
+
+
+def test_repair_flips_spawned_but_dead_pending_jobs(tmp_path, monkeypatch):
+    import iris.jobs as jobs_mod
+    from iris.jobs import repair_dead_runners
+
+    store = make_store(tmp_path)
+    store.add("spawned", "x", [], "", "")
+    store.update(1, pid=4242)  # the spawn recorded a runner pid
+    store.add("queued", "y", [], "", "")  # never spawned: pid stays None
+    monkeypatch.setattr(jobs_mod, "_pid_alive", lambda pid: False)
+    assert repair_dead_runners(store) == 1
+    assert store.get(1)["state"] == "failed"
+    assert store.get(2)["state"] == "pending"  # genuinely queued jobs are untouched
+
+
+def test_spawn_runner_records_the_pid(tmp_path):
+    from iris.jobs import spawn_runner
+
+    store = make_store(tmp_path)
+    store.add("a", "x", [], "", "")
+
+    class FakeProc:
+        pid = 31337
+
+    spawn_runner(1, store=store, popen=lambda *a, **k: FakeProc())
+    assert store.get(1)["pid"] == 31337
+
+
+def test_store_admission_is_atomic_with_add(tmp_path):
+    store = make_store(tmp_path)
+    store.add("a", "x", [], "", "")
+    store.add("b", "y", [], "", "")  # two active
+    job = store.add("c", "z", [], "", "", admit_below=2)
+    assert job["admitted"] is False
+    store.transition(1, ("pending",), "done")
+    store.transition(3, ("pending",), "cancelled")  # queued jobs count as active
+    job = store.add("d", "w", [], "", "", admit_below=2)
+    assert job["admitted"] is True
+    # the ephemeral flag never lands in the file
+    assert "admitted" not in store.get(job["id"])
+
+
+def test_send_discord_file_sanitizes_the_header_filename(tmp_path, monkeypatch):
+    import iris.jobs as jobs_mod
+    from iris.jobs import send_discord_file
+
+    hostile = tmp_path / 'a"b\rc.txt'
+    hostile.write_bytes(b"data")
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = req.data
+        return FakeResponse()
+
+    monkeypatch.setattr(jobs_mod.urllib.request, "urlopen", fake_urlopen)
+    res = send_discord_file("chan", str(hostile), "job #1 artifact", "tok")
+    assert res.get("ok")
+    body = captured["body"]
+    # the multipart headers carry no quote or CR from the hostile name
+    header_zone = body.split(b"\r\n\r\ndata", 1)[0]
+    assert b'a"b' not in header_zone
+    assert b"b\rc" not in header_zone
+    # but the real filename still reaches Discord inside the JSON payload
+    assert b'a\\"b\\rc.txt' in body

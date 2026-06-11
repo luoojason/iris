@@ -280,7 +280,7 @@ def test_run_job_records_job_turns(tmp_path):
         job["id"], config,
         store=store, workspace_store=WorkspaceStore(tmp_path / "ws.json"),
         inbox=Inbox(tmp_path / "inbox.json"),
-        driver_factory=lambda c, j, w: FakeDriver(),
+        driver_factory=lambda c, j, w, cb=None: FakeDriver(),
         send_message=lambda *a: True, send_file=lambda *a: {"ok": True},
         guard=guard,
     )
@@ -301,7 +301,7 @@ def test_start_job_parks_at_park_level(tmp_path, monkeypatch):
     UsageLedger(config.usage_file).record("chat", result(cost=9.9))  # 99% -> park
     spawned = []
     monkeypatch.setattr(srv, "_CONFIG", config)
-    monkeypatch.setattr(srv, "SPAWN", lambda job_id: spawned.append(job_id))
+    monkeypatch.setattr(srv, "SPAWN", lambda job_id, **kw: spawned.append(job_id))
     reply = srv.start_job("big", "work")
     assert "parked" in reply.lower()
     assert "resume_job(1)" in reply

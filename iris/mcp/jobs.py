@@ -102,30 +102,33 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
             )
     from iris.usage import CreditGuard
 
+    lines = []
     if CreditGuard.from_config(config).should_park():
         job = store.add(title.strip(), instructions, granted, workspace,
                         config.home_channel, state="parked")
-        return (
+        lines.append(
             f"Job #{job['id']} ({job['title']}) was PARKED, not started: the credit "
             f"guard says the month's budget is nearly spent. The owner can launch "
             f"it anyway with resume_job({job['id']})."
         )
-    repair_dead_runners(store)
-    queued = store.count_active() >= config.jobs_max
-    job = store.add(title.strip(), instructions, granted, workspace, config.home_channel)
-    lines = []
-    if queued:
-        lines.append(
-            f"Job #{job['id']} ({job['title']}) recorded but queued: "
-            f"{config.jobs_max} jobs are already active. "
-            f"Start it later with resume_job({job['id']})."
-        )
     else:
-        SPAWN(job["id"])
-        lines.append(
-            f"Job #{job['id']} ({job['title']}) started in the background "
-            f"with grants: {', '.join(granted)}."
-        )
+        repair_dead_runners(store)
+        # The admission check runs inside the store's lock with the insert,
+        # so two simultaneous start_job calls cannot both slip under the cap.
+        job = store.add(title.strip(), instructions, granted, workspace,
+                        config.home_channel, admit_below=config.jobs_max)
+        if not job["admitted"]:
+            lines.append(
+                f"Job #{job['id']} ({job['title']}) recorded but queued: "
+                f"{config.jobs_max} jobs are already active. "
+                f"Start it later with resume_job({job['id']})."
+            )
+        else:
+            SPAWN(job["id"], store=store)
+            lines.append(
+                f"Job #{job['id']} ({job['title']}) started in the background "
+                f"with grants: {', '.join(granted)}."
+            )
     if clamped:
         lines.append(
             f"Refused grants (over the owner's IRIS_JOB_GRANTS ceiling): {', '.join(clamped)}."
@@ -133,9 +136,14 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     return "\n".join(lines)
 
 
+_DISABLED = "Background jobs are disabled. The owner can set IRIS_JOBS=true."
+
+
 @mcp.tool()
 def job_status(job_id: int) -> str:
     """Check one background job: state, timing, report, artifacts."""
+    if not _config().jobs_enabled:
+        return _DISABLED
     store = _store()
     repair_dead_runners(store)
     job = store.get(job_id)
@@ -160,6 +168,8 @@ def job_status(job_id: int) -> str:
 @mcp.tool()
 def list_jobs(limit: int = 10) -> str:
     """List recent background jobs, newest first."""
+    if not _config().jobs_enabled:
+        return _DISABLED
     store = _store()
     repair_dead_runners(store)
     jobs = store.all()
@@ -174,20 +184,28 @@ def list_jobs(limit: int = 10) -> str:
 
 @mcp.tool()
 def cancel_job(job_id: int) -> str:
-    """Cancel a background job (kills its runner if it is running)."""
+    """Cancel a background job (kills its runner and its claude turn)."""
+    if not _config().jobs_enabled:
+        return _DISABLED
     store = _store()
     job = store.get(job_id)
     if job is None:
         return f"No job #{job_id}."
-    if job["state"] in ("pending", "parked"):
-        store.transition(job_id, ("pending", "parked"), "cancelled", finished_ts=time.time())
+    # Transition-first: the guard inside the store decides who wins a race
+    # with the runner, so this tool never claims a cancel that did not stick.
+    if store.transition(job_id, ("pending", "parked"), "cancelled", finished_ts=time.time()):
         return f"Cancelled job #{job_id} before it started."
-    if job["state"] == "running":
-        killed = _kill_runner(job.get("pid"))
-        store.transition(job_id, ("running",), "cancelled", finished_ts=time.time())
-        suffix = "" if killed else " (its runner was already gone)"
-        return f"Cancelled job #{job_id}.{suffix}"
-    return f"Job #{job_id} is already {job['state']}."
+    job = store.get(job_id)
+    if job and job["state"] == "running":
+        # The claude child runs in its own session; kill BOTH groups or the
+        # turn keeps burning credit and running tools after the cancel.
+        killed_runner = _kill_runner(job.get("pid"))
+        killed_claude = bool(job.get("claude_pid")) and _kill_runner(job.get("claude_pid"))
+        if store.transition(job_id, ("running",), "cancelled", finished_ts=time.time()):
+            suffix = "" if (killed_runner or killed_claude) else " (its runner was already gone)"
+            return f"Cancelled job #{job_id}.{suffix}"
+        job = store.get(job_id)
+    return f"Job #{job_id} is already {job['state'] if job else 'gone'}."
 
 
 @mcp.tool()
@@ -203,7 +221,7 @@ def resume_job(job_id: int) -> str:
     if job["state"] not in ("pending", "parked"):
         return f"Job #{job_id} is {job['state']}; only parked or queued jobs can be resumed."
     store.transition(job_id, ("parked",), "pending")
-    SPAWN(job_id)
+    SPAWN(job_id, store=store)
     return f"Resumed job #{job_id} ({job['title']})."
 
 

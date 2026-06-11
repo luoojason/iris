@@ -139,23 +139,39 @@ def collect_artifacts(report: str, workspace_dir: Optional[str]) -> tuple[list[s
 
     root = Path(workspace_dir).resolve()
     total = 0
+    byte_capped = False
     for name in names:
         if len(files) >= ARTIFACT_MAX_FILES:
             problems.append(f"artifact {name}: skipped, over the {ARTIFACT_MAX_FILES}-file cap")
             continue
-        if os.path.isabs(name) or ".." in Path(name).parts:
-            problems.append(f"artifact {name}: only workspace-relative paths are allowed")
+        if byte_capped:
+            # Past the byte cap the REMAINING artifacts are skipped, so what
+            # gets delivered never depends on the ordering of smaller files.
+            problems.append(
+                f"artifact {name}: skipped, over the "
+                f"{ARTIFACT_MAX_BYTES // (1024 * 1024)} MB total cap"
+            )
             continue
-        candidate = (root / name).resolve()
-        # Containment on the *resolved* path: symlinks cannot point outside.
-        if root != candidate and root not in candidate.parents:
-            problems.append(f"artifact {name}: resolves outside the workspace")
+        try:
+            if os.path.isabs(name) or ".." in Path(name).parts:
+                problems.append(f"artifact {name}: only workspace-relative paths are allowed")
+                continue
+            candidate = (root / name).resolve()
+            # Containment on the *resolved* path: symlinks cannot point outside.
+            if root != candidate and root not in candidate.parents:
+                problems.append(f"artifact {name}: resolves outside the workspace")
+                continue
+            if not candidate.is_file():
+                problems.append(f"artifact {name}: no such file in the workspace")
+                continue
+            size = candidate.stat().st_size
+        except (ValueError, OSError) as exc:
+            # Hostile bytes in the name (null bytes, over-long segments) must
+            # become a named problem, never a runner crash.
+            problems.append(f"artifact {name!r}: unusable name ({exc})")
             continue
-        if not candidate.is_file():
-            problems.append(f"artifact {name}: no such file in the workspace")
-            continue
-        size = candidate.stat().st_size
         if total + size > ARTIFACT_MAX_BYTES:
+            byte_capped = True
             problems.append(
                 f"artifact {name}: skipped, would exceed the "
                 f"{ARTIFACT_MAX_BYTES // (1024 * 1024)} MB total cap"

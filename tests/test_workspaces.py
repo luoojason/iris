@@ -199,3 +199,28 @@ def test_cli_workspaces_list_empty(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("IRIS_WORKSPACES_FILE", str(tmp_path / "ws.json"))
     assert main(["workspaces", "list"]) == 0
     assert "no workspaces" in capsys.readouterr().out.lower()
+
+
+def test_collect_artifacts_handles_hostile_names_without_crashing(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    report = "ARTIFACT: bad\x00name\nARTIFACT: ok.txt"
+    (ws / "ok.txt").write_text("x", encoding="utf-8")
+    files, problems = collect_artifacts(report, str(ws))
+    assert files == [str((ws / "ok.txt").resolve())]
+    assert len(problems) == 1 and "bad" in problems[0]
+
+
+def test_byte_cap_skips_all_remaining_artifacts(tmp_path):
+    """Past the byte cap, the REMAINING artifacts are skipped (spec), so
+    delivery is order-stable instead of best-effort filling smaller files."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "big.bin").write_bytes(b"x" * (ARTIFACT_MAX_BYTES - 10))
+    (ws / "medium.bin").write_bytes(b"y" * 100)
+    (ws / "tiny.bin").write_bytes(b"z" * 5)
+    report = "ARTIFACT: big.bin\nARTIFACT: medium.bin\nARTIFACT: tiny.bin"
+    files, problems = collect_artifacts(report, str(ws))
+    assert files == [str((ws / "big.bin").resolve())]
+    assert len(problems) == 2
+    assert "medium.bin" in problems[0] and "tiny.bin" in problems[1]

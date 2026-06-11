@@ -152,6 +152,14 @@ class ClaudeDriver:
     # Keep native auto-memory off so the bundled MCP memory tool is the store.
     disable_auto_memory: bool = True
     add_dirs: Optional[Sequence[str]] = None
+    # Working directory for the claude child. None inherits this process's cwd
+    # (the chat default). The job runner points it away from the agent's own
+    # directory, which holds .env and state files the Read tool must not see.
+    cwd: Optional[str] = None
+    # Called with the claude child's pid right after spawn. The job runner uses
+    # it to record the pid so a cancel can kill the whole claude tree (the
+    # child runs in its own session, so killing the runner alone orphans it).
+    child_pid_callback: Optional[Callable[[int], None]] = None
     timeout: float = 300.0
     # Transient failures (rate limit, overload, in-flight execution errors).
     max_retries: int = 2
@@ -301,8 +309,14 @@ class ClaudeDriver:
             encoding="utf-8",
             errors="replace",
             env=_child_env(self.disable_auto_memory),
+            cwd=self.cwd,
             **kwargs,
         )
+        if self.child_pid_callback is not None:
+            try:
+                self.child_pid_callback(proc.pid)
+            except Exception:
+                log.warning("child pid callback failed", exc_info=True)
         try:
             out, err = proc.communicate(input=prompt, timeout=timeout)
         except subprocess.TimeoutExpired:

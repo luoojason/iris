@@ -26,3 +26,8 @@ iris-reminders.json
 neph.md
 neph-memory.json
 *.lock
+iris-usage.json
+iris-jobs.json
+iris-inbox.json
+iris-workspaces.json
+iris-wakes.state.json
