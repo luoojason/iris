@@ -152,7 +152,14 @@ class _StateStore:
 
 
 def http_get(url: str, timeout: float) -> bytes:
-    """Fetch a URL's body (bounded). The default fetcher; tests inject a fake."""
+    """Fetch a URL's body (bounded). The default fetcher; tests inject a fake.
+
+    urllib follows redirects, and there is no SSRF / private-IP guard. That is
+    deliberate: wake rules are owner-authored (the model has no tool to write
+    IRIS_WAKES_FILE), so the owner can already point a rule anywhere directly,
+    and the body only ever becomes a digest or a regex match in a ping — it is
+    never executed, parsed as config, or fed to the model.
+    """
     req = urllib.request.Request(
         url, method="GET",
         headers={"User-Agent": "iris-wakes (https://github.com/luoojason/iris, 0.1)"},
