@@ -215,12 +215,24 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
+    command = args.command or "discord"
+
+    # Usage errors must exit before Config.from_env() reads .env into the
+    # process environment; a malformed invocation should have no side effects.
+    watch_cmd: list[str] = []
+    if command == "watch":
+        watch_cmd = list(args.argv)
+        if watch_cmd and watch_cmd[0] == "--":
+            watch_cmd = watch_cmd[1:]
+        if not watch_cmd:
+            print("usage: iris watch [--name N] [--always] [--quiet] -- <command>")
+            return 2
+
     config = Config.from_env()
     # Make any configured skills discoverable before a bot/chat run starts.
     if config.skills_dir:
         from .skills import link_skills
         link_skills(config.skills_dir)
-    command = args.command or "discord"
 
     if command == "doctor":
         return doctor(config, probe=not getattr(args, "no_probe", False))
@@ -236,13 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "watch":
         from .notify.watch_cmd import watch as run_watch
-        cmd = list(args.argv)
-        if cmd and cmd[0] == "--":
-            cmd = cmd[1:]
-        if not cmd:
-            print("usage: iris watch [--name N] [--always] [--quiet] -- <command>")
-            return 2
-        return run_watch(cmd, config, name=args.name, force=args.always, quiet=args.quiet)
+        return run_watch(watch_cmd, config, name=args.name, force=args.always, quiet=args.quiet)
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)
