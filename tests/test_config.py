@@ -20,6 +20,9 @@ def test_dotenv_does_not_override_real_env(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("IRIS_MODEL=from-file\nIRIS_DISCORD_TOKEN=tok\n# comment\n", encoding="utf-8")
     monkeypatch.setenv("IRIS_MODEL", "from-real-env")
+    # Hermetic: an operator-exported token (or one leaked by another test)
+    # must not poison the "file fills the gap" assertion below.
+    monkeypatch.delenv("IRIS_DISCORD_TOKEN", raising=False)
     load_dotenv(env_file)
     import os
     assert os.environ["IRIS_MODEL"] == "from-real-env"  # real env wins

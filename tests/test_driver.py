@@ -238,3 +238,72 @@ def test_context_tokens_absent_when_no_usage():
     d = ClaudeDriver(runner=make_runner([FakeProc(0, success_json())]))
     result = d.run("hello")
     assert result.context_tokens is None
+
+
+def test_default_denylist_blocks_the_agent_alias():
+    """Newer claude CLIs expose the subagent tool as Agent as well as Task.
+
+    Denying only Task leaves subagent spawning reachable under the alias, so
+    the default denylist must carry both names.
+    """
+    d = ClaudeDriver(runner=make_runner([]))
+    cmd = d.build_command()
+    i = cmd.index("--disallowedTools")
+    denied = cmd[i + 1:]
+    assert "Task" in denied and "Agent" in denied
+
+
+class _FakePopen:
+    """Captures Popen kwargs; yields one canned success result."""
+
+    def __init__(self, cmd, **kwargs):
+        _FakePopen.captured = dict(kwargs)
+        self.returncode = 0
+        self.pid = 4242
+
+    def communicate(self, input=None, timeout=None):
+        return ('{"result": "ok", "session_id": "s"}', "")
+
+
+def test_subprocess_runs_in_the_configured_cwd(monkeypatch):
+    import iris.driver as drv
+
+    monkeypatch.setattr(drv.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(drv.shutil, "which", lambda name: "/usr/bin/claude")
+    d = ClaudeDriver(cwd="/some/dir")
+    result = d.run("hi")
+    assert not result.is_error
+    assert _FakePopen.captured["cwd"] == "/some/dir"
+
+
+def test_subprocess_cwd_defaults_to_inherited(monkeypatch):
+    import iris.driver as drv
+
+    monkeypatch.setattr(drv.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(drv.shutil, "which", lambda name: "/usr/bin/claude")
+    ClaudeDriver().run("hi")
+    assert _FakePopen.captured["cwd"] is None
+
+
+def test_child_pid_callback_sees_the_spawned_pid(monkeypatch):
+    import iris.driver as drv
+
+    monkeypatch.setattr(drv.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(drv.shutil, "which", lambda name: "/usr/bin/claude")
+    pids = []
+    d = ClaudeDriver(child_pid_callback=pids.append)
+    d.run("hi")
+    assert pids == [4242]
+
+
+def test_child_pid_callback_errors_do_not_break_the_turn(monkeypatch):
+    import iris.driver as drv
+
+    monkeypatch.setattr(drv.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(drv.shutil, "which", lambda name: "/usr/bin/claude")
+
+    def explode(pid):
+        raise RuntimeError("callback bug")
+
+    result = ClaudeDriver(child_pid_callback=explode).run("hi")
+    assert not result.is_error

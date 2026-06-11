@@ -72,7 +72,7 @@ perms 600, never in the repo):
 ## Environment (on the box)
 
 ```bash
-IRIS_SOCIAL_TOKENS=/home/irisbot/iris-social.json   # the 600 tokens file above
+IRIS_SOCIAL_TOKENS=/home/you/iris-social.json   # the 600 tokens file above
 
 # Instagram media hosting (S3-compatible: R2 / B2 / S3)
 IRIS_MEDIA_BUCKET=your-bucket

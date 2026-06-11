@@ -117,7 +117,6 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 | `IRIS_DISCORD_TOKEN` | Discord bot token. |
 | `IRIS_ALLOWED_USER_IDS` | Comma-separated ids the bot will answer. Lock to yourself. |
 | `IRIS_MODEL` | `claude-opus-4-...`, `claude-sonnet-4-...`, `claude-haiku-4-...`, or blank. Haiku stretches the credit furthest. |
-| `IRIS_MODEL_LIGHT` | Optional lighter model for trivial turns (enables routing). Blank = every turn on `IRIS_MODEL`. |
 | `IRIS_PERSONA_FILE` | System prompt file for the persona. |
 | `IRIS_MCP_CONFIG` | MCP tool config (gives the agent tools). |
 | `IRIS_PERMISSION_MODE` + `IRIS_ALLOWED_TOOLS` | Control which tools run unattended. |
@@ -128,16 +127,10 @@ Out of the box Iris is a plain chat bot, which runs anywhere `claude` is
 installed. Tools are opt-in, exposed the way Claude Code already understands them:
 MCP servers launched through `--mcp-config`.
 
-One rule trips people up: under the `default` permission mode, an MCP tool that
-is **not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even
-claim it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that
-tool too. Note `IRIS_ALLOWED_TOOLS` is an approval list, not an exclusive
-boundary: on its own it does not stop the host's built-in tools (Bash, Write,
-Edit, ...) from running, since your `~/.claude/settings.json` may pre-approve
-them. Iris therefore denies the high-reach built-ins by default (shell, file
-writes, subagents: `IRIS_RESTRICT_BUILTIN_TOOLS=true`); Read, Glob, Grep, and web
-search/fetch stay available. Set it to `false`, or use an explicit
-`IRIS_DISALLOWED_TOOLS`, to take full control.
+One rule trips people up: under the `default` permission mode, any tool that is
+**not** in `IRIS_ALLOWED_TOOLS` is silently skipped, and the model may even claim
+it acted. So whenever you point `IRIS_MCP_CONFIG` at a tool, allowlist that tool
+too.
 
 To turn on the bundled memory tool (`remember`, `recall`, `forget`):
 
@@ -153,16 +146,6 @@ To turn on the bundled memory tool (`remember`, `recall`, `forget`):
 
 4. Tell the persona to use it (the example persona notes where).
 
-Token-bearing MCP servers (the bundled Discord, tts, and publish ones) do **not**
-inherit your `IRIS_*` variables: the driver strips them from the `claude` child so
-a tool cannot read your bot token. Give such a server its secret by putting it in
-that server's own `"env"` block in the mcp config file, for example:
-
-```json
-{ "mcpServers": { "discord": { "command": "...", "args": ["..."],
-  "env": { "IRIS_DISCORD_TOKEN": "your-token" } } } }
-```
-
 Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
 `list_channels`, `search_members`. It is a narrow, audited surface (no
@@ -171,6 +154,124 @@ adapter can't, without raw shell. A **history search** tool
 (`iris/mcp/session_search.py`) lets it recall past conversations from the
 transcripts Claude Code already keeps. Point Claude at any other MCP server
 (filesystem, browser, web search, your own) the same way.
+
+### Background jobs
+
+Chat turns are short on purpose. For work that takes minutes to hours (audit
+a repo, batch-process files, deep research), Iris has background jobs: the
+agent records a job and a detached runner executes it as one `claude -p` turn
+with its own grants and a long timeout. Chat stays locked down; **subagents
+are allowed inside jobs only**, so a job can fan out internally while the
+chat denylist still denies `Task`/`Agent`.
+
+Everything is off until you set `IRIS_JOBS=true` and wire the tools:
+
+```
+IRIS_JOBS=true
+IRIS_ALLOWED_TOOLS=...,mcp__jobs__start_job,mcp__jobs__job_status,mcp__jobs__list_jobs,mcp__jobs__cancel_job,mcp__jobs__resume_job
+```
+
+with a `jobs` server entry in your MCP config
+(`python -m iris.mcp.jobs`). The pieces:
+
+- **Grants.** A job always gets subagents. It may request `shell` and
+  `files`, clamped to your `IRIS_JOB_GRANTS` ceiling; refusals are reported,
+  never silent. The job denylist is *derived* from the driver's
+  `DANGEROUS_BUILTINS` (an explicit denylist replaces the default, so it must
+  track the source of truth).
+- **Workspaces.** Jobs that touch a repo name a workspace you registered
+  with `iris workspaces add <name> <path>` (`remove`, `list`). The model only
+  ever speaks names; paths stay on your side of the boundary
+  (`IRIS_WORKSPACES_FILE`).
+- **ARTIFACT hand-back.** A job's report can name files to deliver with
+  `ARTIFACT: relative/path` lines. At most 5 files and 8 MB total are
+  uploaded to the home channel; anything rejected or skipped (escapes, caps,
+  missing files) is named in the report.
+- **Delivery.** When a job finishes you get a Discord ping (plain REST, no
+  model call), and the report folds into your next chat turn via the inbox
+  (`IRIS_INBOX_FILE`), so the agent knows the outcome without polling.
+  Parked and queued jobs launch only when you say so (`resume_job`).
+
+### Job console
+
+When you're at the box where Iris runs, `iris jobs` is a terminal control
+panel over the same job registry — no Discord round-trip, no model, no credit
+spent. `iris jobs` (or `iris jobs list`) prints the table; `iris jobs show
+<id>` gives the full report; and you can act directly:
+
+```bash
+iris jobs run --title "audit a repo" --grant files --workspace myrepo \
+  --instructions "Review the repo, fix flaky tests, report findings."
+iris jobs cancel 3      # kills the runner and its claude turn
+iris jobs resume 4      # launch a parked or queued job
+iris jobs rerun 3       # clone an old job's instructions into a fresh run
+iris jobs artifacts 3   # list a finished job's files
+iris jobs deliver 3     # re-upload them to the home channel
+iris jobs prune --keep 20
+iris jobs --tui         # the full-screen view (needs the [tui] extra)
+```
+
+`iris jobs run` is the one path that creates a job without the model — you
+write the instructions yourself. Its grants are still clamped to the
+`IRIS_JOB_GRANTS` ceiling, and it parks the job when the credit guard says so,
+exactly like the chat path. Actions are atomic-or-refused: if a runner moved a
+job underneath you, the console reports the real state instead of forcing.
+Terminal jobs auto-prune past `IRIS_JOBS_KEEP` (default 50).
+
+### Credit guard
+
+Iris draws from your plan's monthly agent credit; the guard makes the draw
+visible and brakes gently before it runs dry. Every turn's `cost_usd`
+estimate lands in a ledger (`iris usage` prints it; the `usage_report` MCP
+tool lets the agent answer "how much have I burned?"). Set
+`IRIS_USAGE_BUDGET_USD` to enable the brakes: the reminders tick pings the
+home channel once per crossed threshold (`IRIS_USAGE_PING_AT`), new jobs are
+parked at `IRIS_USAGE_PARK_AT`%, and above `IRIS_USAGE_TIGHTEN_AT`% the
+light-model routing gets `IRIS_TIGHTEN_FACTOR`x more aggressive. Chat is
+never blocked, and no model call ever fires from the tick.
+
+### Wiki tools
+
+Point `IRIS_WIKI_DIR` at an Obsidian-style vault and the agent gets
+`wiki_read`, `wiki_write`, `wiki_append`, `wiki_list`, and `wiki_search`
+(server: `python -m iris.mcp.wiki`; allowlist `mcp__wiki__*`). Pages are
+named vault-relative (`Projects/Iris`); the tools validate every name and
+refuse anything that resolves outside the vault. There is no delete tool.
+
+### Event wakes
+
+Reminders fire at a time; wakes fire on an **event**. Declare conditions in
+`IRIS_WAKES_FILE` (a JSON list you author; the model has no tool to touch
+it) and the same `reminders-tick` cadence evaluates them with cheap stat and
+read calls — never a model call. When one fires you get a Discord ping with
+your pre-written message, and the event folds into the agent's next turn.
+
+```json
+[
+  {"name": "build-errors", "kind": "log_pattern",
+   "path": "/home/you/myrepo/run.log", "pattern": "ERROR|Traceback",
+   "message": "the build run hit an error", "cooldown_secs": 3600}
+]
+```
+
+Kinds: `file_exists`, `file_gone`, `file_changed` (all edge-triggered; the
+first observation arms without firing), and `log_pattern` (only bytes
+appended after the rule was armed are scanned; rotation is handled). Two more
+watch a remote URL instead of a local path (the merged-in change watcher):
+`url` fires when the page body changes, and `url_pattern` fires when a regex
+appears in it. They take a `url` field instead of `path`; the tick does one
+bounded HTTP GET per rule (`IRIS_WAKE_HTTP_TIMEOUT`), still with no model call.
+
+```json
+[
+  {"name": "release", "kind": "url_pattern",
+   "url": "https://example.com/downloads", "pattern": "v2\\.\\d+",
+   "message": "a new release is listed", "cooldown_secs": 3600}
+]
+```
+
+`cooldown_secs` absorbs flapping; `"once": true` disarms a rule after its
+first fire. `iris doctor` validates the rules file and names every problem.
 
 ### Reminders
 
@@ -270,10 +371,9 @@ agent maps cleanly onto the official client:
 
 - **Carries over well:** persona, per-conversation memory, shell and file tools,
   web search and fetch, planning, subagent delegation, browser automation (via
-  the Playwright MCP), Claude Code skills (the same `SKILL.md` format), and free
-  local voice both ways (speech-to-text in, text-to-speech out; see Voice).
-- **Re-add as MCP servers:** custom tools, platform admin actions, and history
-  search (Iris ships scoped Discord-actions, history-search, and tts servers).
+  the Playwright MCP), and Claude Code skills (the same `SKILL.md` format).
+- **Re-add as MCP servers:** custom tools, free local text-to-speech and
+  speech-to-text, platform admin actions, history search.
 - **Does not carry over:** anything that needs a paid third-party API key (image
   and video generation, paid search and voice backends), multi-model
   mixture-of-agents reasoning, and Hermes's single-turn tool-chain collapse.
@@ -283,12 +383,12 @@ agent maps cleanly onto the official client:
 
 Early, and honest about what is proven. The core (the driver, sessions, the agent
 loop, and the bundled memory tool) is verified end to end against the real
-`claude` binary and covered by unit tests. The Discord and Telegram message
-loops are wired and their gating (who and where the bot answers) is unit-tested,
-but the full loops have **not** yet been exercised against a live bot connection. Start with `python -m iris chat` to try the brain,
+`claude` binary and covered by unit tests. The Discord and Telegram message loops
+are wired and unit-tested in isolation, but have **not** yet been exercised
+against a live bot connection. Start with `python -m iris chat` to try the brain,
 then wire up a transport.
 
-Roadmap: live-testing the wired transports end to end, and a documented
+Roadmap: a skills loader, the free-local voice MCP servers, and a documented
 feature-survival map against Hermes.
 
 ## Related work

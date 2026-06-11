@@ -28,6 +28,8 @@ from typing import Optional
 
 import time as _time
 
+from iris.memory import DEFAULT_IMPORTANCE, normalize, rank
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows
@@ -82,13 +84,31 @@ def _save(items: list[dict]) -> None:
     os.replace(tmp, MEMORY_FILE)
 
 
+def _fmt(entry: dict) -> str:
+    """One display line for a note, surfacing the signals the model can act on."""
+    note = normalize(entry)
+    marks = []
+    if note["pinned"]:
+        marks.append("PINNED")
+    if note["importance"] != DEFAULT_IMPORTANCE:
+        marks.append(f"imp{note['importance']}")
+    if note["use_count"]:
+        marks.append(f"used{note['use_count']}x")
+    meta = f" <{', '.join(marks)}>" if marks else ""
+    tags = f"  [{', '.join(note['tags'])}]" if note["tags"] else ""
+    return f"#{note['id']} ({note.get('created_at') or '?'}){meta}{tags}: {note['text']}"
+
+
 @mcp.tool()
-def remember(text: str, tags: Optional[str] = None) -> str:
+def remember(text: str, tags: Optional[str] = None, importance: int = DEFAULT_IMPORTANCE,
+             pinned: bool = False) -> str:
     """Save a durable note. Use for facts, preferences, and context worth keeping.
 
     Args:
         text: The note to remember.
         tags: Optional comma-separated tags to make recall easier.
+        importance: 1-5, how much this should outrank other notes (default 3).
+        pinned: Pin a note so it always surfaces near the top of recall.
     """
     with _locked():
         items = _load()
@@ -98,6 +118,10 @@ def remember(text: str, tags: Optional[str] = None) -> str:
             "text": text.strip(),
             "tags": [t.strip() for t in (tags or "").split(",") if t.strip()],
             "created_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "importance": max(1, min(5, int(importance))),
+            "pinned": bool(pinned),
+            "use_count": 0,
+            "last_used": None,
         }
         items.append(entry)
         _save(items)
@@ -106,28 +130,87 @@ def remember(text: str, tags: Optional[str] = None) -> str:
 
 @mcp.tool()
 def recall(query: Optional[str] = None, limit: int = 20) -> str:
-    """Recall saved notes, optionally filtered by a word or tag.
+    """Recall saved notes, ranked by relevance, importance, recency, and pinning.
+
+    Read-only: recall never changes a note's standing. When a recalled note
+    actually informs your reply, call ``mark_useful`` on it so future recall
+    learns to surface it sooner.
 
     Args:
-        query: Optional text to match against note bodies and tags.
-        limit: Maximum number of notes to return (most recent first).
+        query: Optional words or tags to search for; omit to browse top notes.
+        limit: Maximum number of notes to return.
     """
     items = _load()
-    if query:
-        needle = query.lower()
-        items = [
-            i for i in items
-            if needle in str(i.get("text", "")).lower()
-            or any(needle in str(t).lower() for t in i.get("tags", []))
-        ]
     if not items:
-        return "No matching notes." if query else "No notes saved yet."
-    items = items[-limit:][::-1]
-    lines = []
-    for i in items:
-        tags = f"  [{', '.join(i.get('tags', []))}]" if i.get("tags") else ""
-        lines.append(f"#{i.get('id', '?')} ({i.get('created_at', '?')}){tags}: {i.get('text', '')}")
-    return "\n".join(lines)
+        return "No notes saved yet."
+    now = _time.time()
+    ranked = rank(items, query, now, limit)
+    if not ranked:
+        return "No matching notes."
+    return "\n".join(_fmt(i) for i in ranked)
+
+
+@mcp.tool()
+def mark_useful(note_id: int) -> str:
+    """Record that a recalled note actually helped answer the current message.
+
+    This is the one signal that lets memory improve itself: call it sparingly and
+    deliberately, only when a note you recalled genuinely informed your reply. It
+    nudges that note's rank up as a tie-breaker; it never overrides importance,
+    pinning, or relevance.
+
+    Args:
+        note_id: The id of the note that helped (from recall output).
+    """
+    with _locked():
+        items = _load()
+        for entry in items:
+            if entry.get("id") == note_id:
+                entry["use_count"] = max(0, int(entry.get("use_count", 0))) + 1
+                entry["last_used"] = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+                _save(items)
+                return f"Noted: #{note_id} marked useful ({entry['use_count']}x)."
+    return f"No note #{note_id}."
+
+
+@mcp.tool()
+def pin(note_id: int, pinned: bool = True) -> str:
+    """Pin (or unpin) a note so it always surfaces near the top of recall.
+
+    Args:
+        note_id: The id of the note to pin or unpin.
+        pinned: True to pin (default), False to unpin.
+    """
+    with _locked():
+        items = _load()
+        for entry in items:
+            if entry.get("id") == note_id:
+                entry["pinned"] = bool(pinned)
+                _save(items)
+                return f"{'Pinned' if pinned else 'Unpinned'} note #{note_id}."
+    return f"No note #{note_id}."
+
+
+@mcp.tool()
+def set_importance(note_id: int, importance: int) -> str:
+    """Re-weight an existing note's importance (1-5) as you learn what matters.
+
+    Use this when a note turns out to matter more or less than when you saved it,
+    without rewriting it: bump a standing preference up, drop stale trivia down.
+
+    Args:
+        note_id: The id of the note to re-weight.
+        importance: New importance from 1 (trivial) to 5 (always surface).
+    """
+    value = max(1, min(5, int(importance)))
+    with _locked():
+        items = _load()
+        for entry in items:
+            if entry.get("id") == note_id:
+                entry["importance"] = value
+                _save(items)
+                return f"Set note #{note_id} importance to {value}."
+    return f"No note #{note_id}."
 
 
 @mcp.tool()

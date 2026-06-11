@@ -1,0 +1,28 @@
+# Deliver due reminders. This is the oneshot the timer fires; it is not a
+# long-running service. It runs `iris reminders-tick`, which delivers any
+# reminders now due and reschedules recurring ones, then exits.
+#
+# Install alongside iris-reminders.timer:
+#   cp examples/iris-reminders.service ~/.config/systemd/user/iris-reminders.service
+#   cp examples/iris-reminders.timer   ~/.config/systemd/user/iris-reminders.timer
+#   edit the paths below, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now iris-reminders.timer
+#   loginctl enable-linger "$USER"   # keep the timer running after you log out
+# Check it:
+#   systemctl --user list-timers iris-reminders.timer
+#   journalctl --user -u iris-reminders -f
+
+[Unit]
+Description=Iris - deliver due reminders (oneshot, fired by iris-reminders.timer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Absolute path to the iris checkout (where your .env lives).
+WorkingDirectory=%h/iris
+# Use the interpreter from the venv you installed iris into.
+ExecStart=%h/venv/bin/python -m iris reminders-tick
+# claude is not needed here (no model call is made), but a consistent PATH helps.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin

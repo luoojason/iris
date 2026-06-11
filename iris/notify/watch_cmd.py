@@ -80,6 +80,21 @@ def build_notify_driver(config):
     )
 
 
+class _RecordingDriver:
+    """Wrap the triage driver so its one model call lands in the usage ledger."""
+
+    def __init__(self, inner, usage_file: str):
+        self._inner = inner
+        self._usage_file = usage_file
+
+    def run(self, prompt, session_id=None, model=None):
+        result = self._inner.run(prompt, session_id, model)
+        from ..usage import record_turn
+
+        record_turn(self._usage_file, "notify", result)
+        return result
+
+
 def watch(argv, config, *, name=None, force=False, quiet=False,
           runner=None, driver_factory=None, sender=None):
     """Run the command, decide, compose, deliver. Returns the command's exit code."""
@@ -98,6 +113,8 @@ def watch(argv, config, *, name=None, force=False, quiet=False,
         driver = None
         if needs_model(event):
             driver = driver_factory() if driver_factory is not None else build_notify_driver(config)
+            if driver is not None:
+                driver = _RecordingDriver(driver, config.usage_file)
         text = render(event, driver)
         if not deliver_send(text, token=config.discord_token, channel=config.notify_channel, sender=sender):
             print(text)

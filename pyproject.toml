@@ -23,10 +23,8 @@ discord = ["discord.py>=2.3"]
 telegram = ["python-telegram-bot>=20"]
 tui = ["textual>=0.60"]
 memory = ["mcp>=1.2"]
-voice = ["faster-whisper>=1.0"]
-publish = ["requests>=2", "boto3>=1.26"]
 dev = ["pytest>=7", "pytest-asyncio>=0.23", "textual>=0.60", "mcp>=1.2"]
-all = ["discord.py>=2.3", "python-telegram-bot>=20", "textual>=0.60", "mcp>=1.2", "faster-whisper>=1.0", "requests>=2", "boto3>=1.26", "pytest>=7"]
+all = ["discord.py>=2.3", "python-telegram-bot>=20", "textual>=0.60", "mcp>=1.2", "pytest>=7"]
 
 [project.scripts]
 iris = "iris.cli:main"

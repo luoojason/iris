@@ -83,6 +83,50 @@ class Config:
     voice_enabled: bool = False
     voice_model: str = "base"
 
+    # Owner-registered directories jobs may work in (names, never paths, cross
+    # the model boundary). Edited only via `iris workspaces add/remove/list`.
+    workspaces_file: str = "iris-workspaces.json"
+
+    # Background jobs (the hybrid job coordinator). Off by default; everything
+    # below is inert until IRIS_JOBS is set.
+    jobs_enabled: bool = False
+    jobs_file: str = "iris-jobs.json"
+    # The grants ceiling: the most a job may ever be granted beyond subagents.
+    job_grants: list[str] = field(default_factory=list)
+    # Active (pending+running) jobs past this count are queued, not launched.
+    jobs_max: int = 2
+    # Auto-prune terminal jobs (done/failed/cancelled) past this many, keeping
+    # the most recent. Active jobs are never pruned.
+    jobs_keep: int = 50
+    job_timeout: float = 1800.0
+    # Optional model/persona for job turns; empty falls back to the chat model.
+    job_model: str = ""
+    job_persona: str = ""
+    # Where finished background work queues notes for the next chat turn.
+    inbox_file: str = "iris-inbox.json"
+    # The owner's recorded home channel (job pings, artifact uploads).
+    home_channel: str = ""
+
+    # The owner's wiki vault (Obsidian-style). Empty disables the wiki tools.
+    wiki_dir: str = ""
+
+    # Event wakes: owner-authored rules the reminders tick evaluates cheaply
+    # (no model call, ever). The state file is tick-owned bookkeeping.
+    wakes_file: str = "iris-wakes.json"
+    wakes_state: str = "iris-wakes.state.json"
+    # Per-fetch timeout for url / url_pattern wake kinds (the change watcher).
+    wake_http_timeout: float = 15.0
+
+    # Credit guard: the usage ledger always records; the budget (USD-estimate
+    # per month, 0 = off) turns on threshold pings, job parking at park_at%,
+    # and tighter light-model routing at tighten_at%.
+    usage_file: str = "iris-usage.json"
+    usage_budget_usd: float = 0.0
+    usage_tighten_at: float = 80.0
+    usage_park_at: float = 95.0
+    usage_ping_at: list[float] = field(default_factory=lambda: [50.0, 80.0, 95.0])
+    tighten_factor: float = 3.0
+
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
@@ -102,6 +146,17 @@ class Config:
     # Timeout retries are separate: a hung turn rarely recovers by waiting another
     # full timeout, so the default is to report it at once rather than block.
     timeout_max_retries: int = 0
+    # Let the user redirect a turn mid-flight (stream-json transport) instead of
+    # waiting for it to finish. Off by default; the one-shot driver is the safe
+    # fallback. See iris/stream_driver.py.
+    live_interrupt: bool = False
+    # Seconds of silence (no event) before a streaming turn is treated as hung.
+    stream_idle_timeout: float = 300.0
+    # Hard ceiling on a whole streaming turn, however lively.
+    stream_total_timeout: float = 1800.0
+    # Seconds a turn may run before the adapter sends a short interim "on it" line,
+    # so a slow turn never looks like a hang. Only used by the conversation runner.
+    ack_delay: float = 4.0
     # Compact a conversation when a turn's context reaches this many tokens: the
     # accurate trigger, since it catches tool-heavy turns. 0 disables it.
     compact_at_tokens: int = 150000
@@ -134,12 +189,37 @@ class Config:
             skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
             voice_enabled=_truthy(os.environ.get("IRIS_VOICE")),
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
+            workspaces_file=os.environ.get("IRIS_WORKSPACES_FILE", "iris-workspaces.json"),
+            jobs_enabled=_flag(os.environ.get("IRIS_JOBS"), False),
+            jobs_file=os.environ.get("IRIS_JOBS_FILE", "iris-jobs.json"),
+            job_grants=_split(os.environ.get("IRIS_JOB_GRANTS")),
+            jobs_max=int(os.environ.get("IRIS_JOBS_MAX", "2")),
+            jobs_keep=int(os.environ.get("IRIS_JOBS_KEEP", "50")),
+            job_timeout=float(os.environ.get("IRIS_JOB_TIMEOUT", "1800")),
+            job_model=os.environ.get("IRIS_JOB_MODEL", ""),
+            job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
+            inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
+            home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
+            wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
+            wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
+            wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
+            wake_http_timeout=float(os.environ.get("IRIS_WAKE_HTTP_TIMEOUT", "15")),
+            usage_file=os.environ.get("IRIS_USAGE_FILE", "iris-usage.json"),
+            usage_budget_usd=float(os.environ.get("IRIS_USAGE_BUDGET_USD", "0")),
+            usage_tighten_at=float(os.environ.get("IRIS_USAGE_TIGHTEN_AT", "80")),
+            usage_park_at=float(os.environ.get("IRIS_USAGE_PARK_AT", "95")),
+            usage_ping_at=[float(v) for v in _split(os.environ.get("IRIS_USAGE_PING_AT")) or ["50", "80", "95"]],
+            tighten_factor=float(os.environ.get("IRIS_TIGHTEN_FACTOR", "3")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
             max_retries=int(os.environ.get("IRIS_MAX_RETRIES", "2")),
             retry_base_delay=float(os.environ.get("IRIS_RETRY_BASE_DELAY", "2")),
             timeout_max_retries=int(os.environ.get("IRIS_TIMEOUT_RETRIES", "0")),
+            live_interrupt=_truthy(os.environ.get("IRIS_LIVE_INTERRUPT")),
+            stream_idle_timeout=float(os.environ.get("IRIS_STREAM_IDLE_TIMEOUT", "300")),
+            stream_total_timeout=float(os.environ.get("IRIS_STREAM_TOTAL_TIMEOUT", "1800")),
+            ack_delay=float(os.environ.get("IRIS_ACK_DELAY", "4")),
             compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
             notify_channel=os.environ.get("IRIS_NOTIFY_CHANNEL", ""),

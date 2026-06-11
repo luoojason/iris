@@ -82,6 +82,7 @@ DANGEROUS_BUILTINS = (
     "Edit",
     "NotebookEdit",
     "Task",
+    "Agent",  # newer CLIs expose the subagent tool under this alias too
     "KillShell",
     "BashOutput",
 )
@@ -151,6 +152,14 @@ class ClaudeDriver:
     # Keep native auto-memory off so the bundled MCP memory tool is the store.
     disable_auto_memory: bool = True
     add_dirs: Optional[Sequence[str]] = None
+    # Working directory for the claude child. None inherits this process's cwd
+    # (the chat default). The job runner points it away from the agent's own
+    # directory, which holds .env and state files the Read tool must not see.
+    cwd: Optional[str] = None
+    # Called with the claude child's pid right after spawn. The job runner uses
+    # it to record the pid so a cancel can kill the whole claude tree (the
+    # child runs in its own session, so killing the runner alone orphans it).
+    child_pid_callback: Optional[Callable[[int], None]] = None
     timeout: float = 300.0
     # Transient failures (rate limit, overload, in-flight execution errors).
     max_retries: int = 2
@@ -173,9 +182,29 @@ class ClaudeDriver:
             return DANGEROUS_BUILTINS
         return None
 
-    def build_command(self, session_id: Optional[str] = None, model: Optional[str] = None) -> list[str]:
-        """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin."""
-        cmd: list[str] = [self.claude_bin, "-p", "--output-format", "json"]
+    def build_command(
+        self,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+        stream: bool = False,
+    ) -> list[str]:
+        """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin.
+
+        With ``stream=True`` the command uses the realtime stream-json transport
+        (input and output), which is what the live-interrupt driver needs to feed
+        messages into a turn while it runs. Everything else (resume, model,
+        persona, tools, the built-in denylist) is identical, so the one-shot and
+        streaming transports stay in lockstep, including the security hardening.
+        """
+        if stream:
+            cmd: list[str] = [
+                self.claude_bin, "-p",
+                "--input-format", "stream-json",
+                "--output-format", "stream-json",
+                "--verbose",
+            ]
+        else:
+            cmd = [self.claude_bin, "-p", "--output-format", "json"]
         if session_id:
             cmd += ["--resume", session_id]
         chosen_model = model or self.model
@@ -280,8 +309,14 @@ class ClaudeDriver:
             encoding="utf-8",
             errors="replace",
             env=_child_env(self.disable_auto_memory),
+            cwd=self.cwd,
             **kwargs,
         )
+        if self.child_pid_callback is not None:
+            try:
+                self.child_pid_callback(proc.pid)
+            except Exception:
+                log.warning("child pid callback failed", exc_info=True)
         try:
             out, err = proc.communicate(input=prompt, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -295,15 +330,18 @@ class ClaudeDriver:
 
     @staticmethod
     def _kill_tree(proc: "subprocess.Popen") -> None:
-        try:
-            if os.name == "posix":
-                os.killpg(os.getpgid(proc.pid), 9)
+        # Only attempt a process-group kill for a real, positive pid; otherwise
+        # (a non-started or fake process) fall straight through to proc.kill().
+        pid = getattr(proc, "pid", None)
+        if os.name == "posix" and isinstance(pid, int) and pid > 0:
+            try:
+                os.killpg(os.getpgid(pid), 9)
                 return
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+            except Exception:
+                pass
         try:
             proc.kill()
-        except OSError:
+        except Exception:
             pass
 
     def _parse(self, proc, session_id: Optional[str]) -> ClaudeResult:
@@ -319,39 +357,8 @@ class ClaudeDriver:
             )
 
         returncode = getattr(proc, "returncode", 0) or 0
-        is_error = (
-            bool(obj.get("is_error"))
-            or obj.get("subtype") not in (None, "success")
-            or returncode != 0
-        )
-        model = None
-        usage = obj.get("modelUsage")
-        if isinstance(usage, dict) and usage:
-            model = next(iter(usage))
-
-        context_tokens = _context_tokens(obj.get("usage"))
-
-        error = None
-        if is_error:
-            error = (
-                obj.get("error")
-                or obj.get("result")
-                or obj.get("subtype")
-                or f"claude exited {returncode}"
-            )
-
-        return ClaudeResult(
-            text=obj.get("result") or "",
-            session_id=obj.get("session_id") or session_id,
-            is_error=is_error,
-            error=error,
-            cost_usd=obj.get("total_cost_usd"),
-            model=model,
-            duration_ms=obj.get("duration_ms"),
-            num_turns=obj.get("num_turns"),
-            context_tokens=context_tokens,
-            raw=obj,
-        )
+        stderr = (getattr(proc, "stderr", "") or "").strip()
+        return parse_result_event(obj, session_id, returncode=returncode, stderr=stderr)
 
     def _is_rate_limited(self, result: ClaudeResult) -> bool:
         blob = f"{result.error or ''} {result.raw.get('api_error_status', '')}".lower()
@@ -380,6 +387,66 @@ class ClaudeDriver:
         if rate_limited:
             delay *= 4
         self.sleep(delay)
+
+
+def parse_result_event(
+    obj: dict,
+    fallback_session_id: Optional[str] = None,
+    *,
+    returncode: int = 0,
+    stderr: str = "",
+    fold_stderr: bool = False,
+) -> ClaudeResult:
+    """Turn one ``result`` JSON object into a :class:`ClaudeResult`.
+
+    Shared by both transports: the one-shot driver parses the single result it
+    reads from stdout, and the streaming driver parses each ``result`` event off
+    its event stream. ``stderr`` is folded into the error because the stream
+    transport reports some failures (notably a dead ``--resume`` session, "No
+    conversation found ...") only on stderr while the result event carries an
+    empty error field; without the fold the dead-session and overflow retries
+    upstream would never recognize the failure.
+    """
+    is_error = (
+        bool(obj.get("is_error"))
+        or obj.get("subtype") not in (None, "success")
+        or returncode != 0
+    )
+    model = None
+    usage = obj.get("modelUsage")
+    if isinstance(usage, dict) and usage:
+        model = next(iter(usage))
+
+    context_tokens = _context_tokens(obj.get("usage"))
+
+    error = None
+    if is_error:
+        error = (
+            obj.get("error")
+            or obj.get("result")
+            or obj.get("subtype")
+            or f"claude exited {returncode}"
+        )
+        # fold_stderr is set only by the stream transport, where a dead --resume
+        # session reports its cause on stderr while the result event's error field
+        # is empty. The one-shot path leaves it off so its retry classifier never
+        # sees appended stderr noise (which could flip a retryable failure to look
+        # terminal), keeping that path byte-for-byte as before the merge.
+        if fold_stderr and stderr and stderr not in (error or ""):
+            error = f"{error}: {stderr}" if error else stderr
+
+    return ClaudeResult(
+        text=obj.get("result") or "",
+        session_id=obj.get("session_id") or fallback_session_id,
+        is_error=is_error,
+        error=error,
+        cost_usd=obj.get("total_cost_usd"),
+        model=model,
+        duration_ms=obj.get("duration_ms"),
+        num_turns=obj.get("num_turns"),
+        context_tokens=context_tokens,
+        raw=obj,
+    )
 
 
 def _context_tokens(usage) -> Optional[int]:

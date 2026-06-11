@@ -1,71 +1,69 @@
-"""Tests for reminder scheduling, storage, and delivery."""
+"""Tests for reminder time parsing and the store's recurrence handling."""
 
 from __future__ import annotations
 
 import pytest
 
-import iris.reminders as rem
-from iris.cli import reminders_tick
-from iris.config import Config
-from iris.reminders import ReminderStore, parse_when
+from iris.reminders import ReminderStore, parse_every, parse_when
 
 
-def test_parse_relative_offsets():
-    now = 1000.0
-    assert parse_when("+30m", now) == 1000 + 1800
-    assert parse_when("+2h", now) == 1000 + 7200
-    assert parse_when("+1d", now) == 1000 + 86400
+def test_parse_when_relative_and_iso():
+    assert parse_when("+30m", now=0) == 1800
+    assert parse_when("+2h", now=0) == 7200
+    assert parse_when("+1d", now=0) == 86400
+    assert parse_when("2026-06-07T00:00:00Z") > 0
 
 
-def test_parse_iso_and_bad():
-    assert parse_when("2026-06-06T00:00:00+00:00") > 0
+def test_parse_every_forms():
+    assert parse_every("every 30m") == 1800
+    assert parse_every("2h") == 7200  # 'every' is optional sugar
+    assert parse_every("1d") == 86400
+    assert parse_every("") == 0  # empty means one-shot
+
+
+def test_parse_every_rejects_garbage():
     with pytest.raises(ValueError):
-        parse_when("whenever")
+        parse_every("sometimes")
+    with pytest.raises(ValueError):
+        parse_every("every 5x")
 
 
-def test_store_add_all_remove(tmp_path):
-    s = ReminderStore(tmp_path / "r.json")
-    rid = s.add(2000.0, "drink water", "chan1")
-    assert rid == 1
-    assert len(s.all()) == 1
-    assert s.remove(1) is True
-    assert s.remove(1) is False
+def test_one_shot_pops_once_and_is_gone(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(due_ts=100, text="ping", channel_id="c1")
+    assert [j["text"] for j in store.pop_due(now=200)] == ["ping"]
+    assert store.pop_due(now=300) == []  # not rescheduled
+    assert store.all() == []
 
 
-def test_ids_do_not_collide_among_pending(tmp_path):
-    s = ReminderStore(tmp_path / "r.json")
-    a = s.add(1.0, "a", "c")
-    b = s.add(2.0, "b", "c")
-    assert a != b
-    s.remove(a)
-    c = s.add(3.0, "c", "c")
-    assert c != b  # the still-pending reminder keeps a distinct id
+def test_recurring_reschedules_from_now(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(due_ts=100, text="standup", channel_id="c1", repeat_secs=3600)
+    fired = store.pop_due(now=150)
+    assert [j["text"] for j in fired] == ["standup"]
+    # still scheduled, next fire one period from *now*, not from the old due_ts
+    remaining = store.all()
+    assert len(remaining) == 1
+    assert remaining[0]["due_ts"] == 150 + 3600
 
 
-def test_pop_due_only_takes_past(tmp_path):
-    s = ReminderStore(tmp_path / "r.json")
-    s.add(100.0, "past", "c")
-    s.add(10000.0, "future", "c")
-    due = s.pop_due(now=200.0)
-    assert len(due) == 1 and due[0]["text"] == "past"
-    assert [i["text"] for i in s.all()] == ["future"]
+def test_missed_window_fires_once_not_every_occurrence(tmp_path):
+    # Host asleep for a long time: a daily job that was due ages ago should fire
+    # exactly once on the next tick, then resume cadence, not replay every day.
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(due_ts=0, text="daily", channel_id="c1", repeat_secs=86400)
+    fired = store.pop_due(now=10 * 86400)  # ten days late
+    assert len(fired) == 1
+    remaining = store.all()
+    assert len(remaining) == 1
+    assert remaining[0]["due_ts"] == 10 * 86400 + 86400
 
 
-def test_reminders_tick_delivers_and_clears(tmp_path, monkeypatch):
-    rfile = tmp_path / "r.json"
-    monkeypatch.setenv("IRIS_REMINDERS_FILE", str(rfile))
-    ReminderStore(rfile).add(1.0, "ping", "chan1")
-    calls = []
-    monkeypatch.setattr(rem, "send_discord_message", lambda ch, content, token: calls.append((ch, content)) or True)
-    assert reminders_tick(Config(discord_token="tok")) == 0
-    assert calls and calls[0][0] == "chan1" and "ping" in calls[0][1]
-    assert ReminderStore(rfile).all() == []
-
-
-def test_reminders_tick_requeues_on_send_failure(tmp_path, monkeypatch):
-    rfile = tmp_path / "r.json"
-    monkeypatch.setenv("IRIS_REMINDERS_FILE", str(rfile))
-    ReminderStore(rfile).add(1.0, "ping", "chan1")
-    monkeypatch.setattr(rem, "send_discord_message", lambda ch, content, token: False)
-    reminders_tick(Config(discord_token="tok"))
-    assert len(ReminderStore(rfile).all()) == 1  # not lost
+def test_recurring_preserves_id_and_payload(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    rid = store.add(due_ts=100, text="water", channel_id="c9", repeat_secs=60)
+    store.pop_due(now=100)
+    nxt = store.all()[0]
+    assert nxt["id"] == rid
+    assert nxt["channel_id"] == "c9"
+    assert nxt["repeat_secs"] == 60

@@ -106,6 +106,21 @@ def doctor(config: Config, probe: bool = True) -> int:
         print(f"auto-compact: at {' or '.join(triggers)}")
     else:
         print("auto-compact: off")
+    try:
+        from .wakes import doctor_lines
+        for line in doctor_lines(config):
+            print(line)
+    except Exception as exc:
+        print(f"wakes: could not validate the rules file ({exc})")
+    if config.usage_budget_usd > 0:
+        try:
+            from .usage import UsageLedger, level_for, percent_used
+
+            pct = percent_used(UsageLedger(config.usage_file).month(), config.usage_budget_usd)
+            lvl = level_for(pct, config.usage_tighten_at, config.usage_park_at)
+            print(f"credit guard: {pct:.0f}% of ${config.usage_budget_usd:.2f} used this month ({lvl})")
+        except Exception as exc:
+            print(f"credit guard: could not read the ledger ({exc})")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
@@ -168,6 +183,55 @@ def reminders_tick(config: Config) -> int:
         else:
             store.add(job["due_ts"], job["text"], job["channel_id"])  # re-queue on failure
     print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    # The budget check and the wake rules ride the same tick. Neither may
+    # ever take reminder delivery down with it, so both are fail-soft to a
+    # printed line, and neither makes a model call.
+    try:
+        from .usage import budget_tick
+        print(budget_tick(config))
+    except Exception as exc:
+        print(f"budget tick failed: {exc}")
+    try:
+        from .wakes import tick_wakes
+        print(tick_wakes(config))
+    except Exception as exc:
+        print(f"wakes tick failed: {exc}")
+    return 0
+
+
+def usage_cmd(config: Config) -> int:
+    """Print this month's credit draw (a report, not a check; always exits 0)."""
+    from .usage import summary_text
+
+    print(summary_text(config))
+    return 0
+
+
+def workspaces_cmd(config: Config, action: str, name: str = "", path: str = "") -> int:
+    """Owner-side registry of directories jobs may work in (names, not paths)."""
+    from .workspaces import WorkspaceStore
+
+    store = WorkspaceStore(config.workspaces_file)
+    if action == "add":
+        try:
+            resolved = store.add(name, path)
+        except ValueError as exc:
+            print(f"workspaces add: {exc}")
+            return 2
+        print(f"workspace {name} -> {resolved}")
+        return 0
+    if action == "remove":
+        if store.remove(name):
+            print(f"removed workspace {name}")
+            return 0
+        print(f"no workspace named {name}")
+        return 1
+    items = store.list()
+    if not items:
+        print("No workspaces registered. Add one with: iris workspaces add <name> <path>")
+        return 0
+    for ws_name, ws_path in items.items():
+        print(f"{ws_name} -> {ws_path}")
     return 0
 
 
@@ -201,6 +265,33 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    sub.add_parser("usage", help="show this month's credit draw and budget level")
+    job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
+    job_run_parser.add_argument("job_id", type=int)
+    jobs_parser = sub.add_parser("jobs", help="the terminal job console: see and steer background jobs")
+    jobs_parser.add_argument("--tui", action="store_true", help="open the full-screen jobs view")
+    jobs_sub = jobs_parser.add_subparsers(dest="jobs_action")
+    jobs_sub.add_parser("list", help="list jobs (default)")
+    js_show = jobs_sub.add_parser("show", help="show one job in full")
+    js_show.add_argument("job_id", type=int)
+    js_run = jobs_sub.add_parser("run", help="create and launch a job from the terminal")
+    js_run.add_argument("--title", required=True)
+    js_run.add_argument("--instructions", required=True)
+    js_run.add_argument("--grant", default="", help="extra grants, comma-separated: shell,files")
+    js_run.add_argument("--workspace", default="", help="a registered workspace name")
+    for act in ("cancel", "resume", "rerun", "artifacts", "deliver"):
+        p = jobs_sub.add_parser(act, help=f"{act} a job by id")
+        p.add_argument("job_id", type=int)
+    js_prune = jobs_sub.add_parser("prune", help="drop old terminal jobs")
+    js_prune.add_argument("--keep", type=int, default=None)
+    ws_parser = sub.add_parser("workspaces", help="manage the directories jobs may work in")
+    ws_sub = ws_parser.add_subparsers(dest="ws_action")
+    ws_add = ws_sub.add_parser("add", help="register a directory under a name")
+    ws_add.add_argument("name")
+    ws_add.add_argument("path")
+    ws_remove = ws_sub.add_parser("remove", help="unregister a workspace")
+    ws_remove.add_argument("name")
+    ws_sub.add_parser("list", help="list registered workspaces")
     watch_parser = sub.add_parser("watch", help="run a command and ping you when it finishes")
     watch_parser.add_argument("--name", default=None, help="label for the notification")
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
@@ -215,12 +306,27 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
+    command = args.command or "discord"
+
+    # Usage errors must exit before Config.from_env() reads .env into the
+    # process environment; a malformed invocation should have no side effects.
+    watch_cmd: list[str] = []
+    if command == "watch":
+        watch_cmd = list(args.argv)
+        if watch_cmd and watch_cmd[0] == "--":
+            watch_cmd = watch_cmd[1:]
+        if not watch_cmd:
+            print("usage: iris watch [--name N] [--always] [--quiet] -- <command>")
+            return 2
+    if command == "workspaces" and not getattr(args, "ws_action", None):
+        print("usage: iris workspaces {add <name> <path> | remove <name> | list}")
+        return 2
+
     config = Config.from_env()
     # Make any configured skills discoverable before a bot/chat run starts.
     if config.skills_dir:
         from .skills import link_skills
         link_skills(config.skills_dir)
-    command = args.command or "discord"
 
     if command == "doctor":
         return doctor(config, probe=not getattr(args, "no_probe", False))
@@ -230,19 +336,35 @@ def main(argv: list[str] | None = None) -> int:
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
+    if command == "usage":
+        return usage_cmd(config)
+    if command == "workspaces":
+        return workspaces_cmd(
+            config, args.ws_action,
+            name=getattr(args, "name", ""), path=getattr(args, "path", ""),
+        )
+    if command == "job-run":
+        if not config.jobs_enabled:
+            print("job-run: background jobs are disabled (set IRIS_JOBS=true)")
+            return 1
+        from . import jobs as jobs_mod
+        return jobs_mod.run_job(args.job_id, config)
+    if command == "jobs":
+        if getattr(args, "tui", False) and not getattr(args, "jobs_action", None):
+            from .jobs_tui import run as run_jobs_tui
+            return run_jobs_tui(config)
+        # default to the list view when no subcommand is given
+        if not getattr(args, "jobs_action", None):
+            args.jobs_action = "list"
+        from .jobs_console import jobs_command
+        return jobs_command(config, args)
     if command == "tui":
         from .tui import run as run_tui
         run_tui(config)
         return 0
     if command == "watch":
         from .notify.watch_cmd import watch as run_watch
-        cmd = list(args.argv)
-        if cmd and cmd[0] == "--":
-            cmd = cmd[1:]
-        if not cmd:
-            print("usage: iris watch [--name N] [--always] [--quiet] -- <command>")
-            return 2
-        return run_watch(cmd, config, name=args.name, force=args.always, quiet=args.quiet)
+        return run_watch(watch_cmd, config, name=args.name, force=args.always, quiet=args.quiet)
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)
