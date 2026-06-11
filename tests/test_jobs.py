@@ -568,3 +568,82 @@ def test_artifact_upload_failure_is_reported_not_silent(tmp_path):
     assert run_with(env) == 0  # the job still completes
     folded = env["inbox"].drain()
     assert any("failed to upload" in note and "HTTP 413" in note for note in folded)
+
+
+# -- auto-prune + manual prune + rerun (job console foundation) --------------
+
+
+def test_auto_prune_keeps_recent_terminal_jobs(tmp_path):
+    store = JobStore(tmp_path / "jobs.json", keep=2)
+    ids = [store.add(f"t{n}", "x", [], "", "")["id"] for n in range(5)]
+    for i in ids:  # all terminal
+        store.transition(i, ("pending",), "done", finished_ts=float(i))
+    # adding one more prunes terminal jobs down to keep=2 (most recent kept)
+    store.add("fresh", "x", [], "", "")
+    kept = {j["id"] for j in store.all()}
+    # the 2 most-recent terminal (ids 4,5) + the new pending job survive
+    assert ids[4] in kept and ids[3] in kept
+    assert ids[0] not in kept and ids[1] not in kept and ids[2] not in kept
+
+
+def test_auto_prune_never_drops_active_jobs(tmp_path):
+    store = JobStore(tmp_path / "jobs.json", keep=1)
+    a = store.add("active1", "x", [], "", "")["id"]
+    b = store.add("active2", "x", [], "", "")["id"]
+    store.transition(b, ("pending",), "running")
+    # a stays pending, b running; both active. add more terminal churn:
+    for n in range(4):
+        jid = store.add(f"term{n}", "x", [], "", "")["id"]
+        store.transition(jid, ("pending",), "failed")
+    states = {j["id"]: j["state"] for j in store.all()}
+    assert states[a] == "pending" and states[b] == "running"  # never pruned
+    terminal = [j for j in store.all() if j["state"] in ("done", "failed", "cancelled")]
+    assert len(terminal) == 1  # keep=1
+
+
+def test_manual_prune_returns_count_and_keeps_most_recent(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")  # no auto-prune
+    ids = [store.add(f"t{n}", "x", [], "", "")["id"] for n in range(6)]
+    for i in ids:
+        store.transition(i, ("pending",), "cancelled")
+    dropped = store.prune(keep=2)
+    assert dropped == 4
+    remaining = sorted(j["id"] for j in store.all())
+    assert remaining == ids[-2:]  # the 2 highest ids
+
+
+def test_prune_no_op_when_under_cap(tmp_path):
+    store = JobStore(tmp_path / "jobs.json")
+    store.add("a", "x", [], "", "")
+    assert store.prune(keep=50) == 0
+
+
+def test_jobs_keep_config_knob(tmp_path, monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_JOBS_KEEP", "10")
+    assert Config.from_env(dotenv=tmp_path / "none.env").jobs_keep == 10
+    monkeypatch.delenv("IRIS_JOBS_KEEP")
+    assert Config.from_env(dotenv=tmp_path / "none.env").jobs_keep == 50
+
+
+def test_rerun_clones_the_source_job(tmp_path):
+    from iris.jobs import rerun_job
+
+    store = JobStore(tmp_path / "jobs.json")
+    src = store.add("audit", "look hard", ["subagents", "files"], "myrepo", "chan-1")
+    store.transition(src["id"], ("pending",), "done", report="old")
+    clone = rerun_job(store, src["id"], channel_id="chan-2")
+    assert clone is not None
+    assert clone["id"] != src["id"]
+    assert clone["title"] == "audit" and clone["instructions"] == "look hard"
+    assert clone["grants"] == ["subagents", "files"] and clone["workspace"] == "myrepo"
+    assert clone["state"] == "pending" and clone["channel_id"] == "chan-2"
+    assert clone["report"] == ""  # a fresh run, not a copy of the old result
+
+
+def test_rerun_unknown_job_returns_none(tmp_path):
+    from iris.jobs import rerun_job
+
+    assert rerun_job(JobStore(tmp_path / "jobs.json"), 99, channel_id="c") is None

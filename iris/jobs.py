@@ -61,6 +61,7 @@ GRANT_TOOLS = {
 REPORT_FOLD_CAP = 1500
 
 _ACTIVE_STATES = ("pending", "running")
+_TERMINAL_STATES = ("done", "failed", "cancelled")
 
 
 def parse_grants(spec: str) -> list[str]:
@@ -128,8 +129,11 @@ def job_allowed_builtins(grants: list[str]) -> list[str]:
 class JobStore:
     """The job registry: a JSON list with a cross-process lock, like reminders."""
 
-    def __init__(self, path: str | os.PathLike[str]):
+    def __init__(self, path: str | os.PathLike[str], keep: Optional[int] = None):
         self.path = Path(path)
+        # When set, add() auto-prunes terminal jobs past this many. None means
+        # no auto-prune (the default; tests and ad-hoc readers opt out).
+        self.keep = keep
 
     @contextmanager
     def _locked(self):
@@ -191,9 +195,11 @@ class JobStore:
                 "channel_id": channel_id,
             }
             items.append(job)
-            self._save(items)
             returned = dict(job)
             returned["admitted"] = admit_below is None or active < admit_below
+            if self.keep is not None:
+                items, _ = _apply_prune(items, self.keep)
+            self._save(items)
             return returned
 
     def get(self, job_id: int) -> Optional[dict]:
@@ -229,12 +235,65 @@ class JobStore:
                         return None
                     job["state"] = to_state
                     job.update(fields)
+                    result = dict(job)
+                    # Auto-prune when a job lands in a terminal state: that is
+                    # when registry growth happens, and the just-transitioned
+                    # job (highest id) always survives the cull.
+                    if self.keep is not None and to_state in _TERMINAL_STATES:
+                        items, _ = _apply_prune(items, self.keep)
                     self._save(items)
-                    return dict(job)
+                    return result
             return None
+
+    def prune(self, keep: int) -> int:
+        """Drop terminal jobs past the most-recent ``keep``. Returns count dropped."""
+        with self._locked():
+            items = self._load()
+            remaining, dropped = _apply_prune(items, keep)
+            if dropped:
+                self._save(remaining)
+            return dropped
 
     def count_active(self) -> int:
         return sum(1 for j in self._load() if j.get("state") in _ACTIVE_STATES)
+
+
+def _apply_prune(items: list[dict], keep: int) -> tuple[list[dict], int]:
+    """Return (items, dropped) with terminal jobs beyond the newest ``keep`` removed.
+
+    Active jobs (pending/running/parked) are always kept. Recency is by id,
+    which is monotonic, so the highest ids survive.
+    """
+    if keep < 0:
+        return items, 0
+    terminal = [j for j in items if j.get("state") in _TERMINAL_STATES]
+    if len(terminal) <= keep:
+        return items, 0
+    oldest = sorted(terminal, key=lambda j: j.get("id", 0))[: len(terminal) - keep]
+    drop_ids = {j.get("id") for j in oldest}
+    remaining = [
+        j for j in items
+        if not (j.get("state") in _TERMINAL_STATES and j.get("id") in drop_ids)
+    ]
+    return remaining, len(drop_ids)
+
+
+def rerun_job(store: JobStore, job_id: int, channel_id: str) -> Optional[dict]:
+    """Clone a job's instructions/grants/workspace into a fresh pending job.
+
+    Returns the new job record, or None if the source job does not exist. The
+    clone starts clean: no report, error, or artifacts carry over.
+    """
+    src = store.get(job_id)
+    if src is None:
+        return None
+    return store.add(
+        src.get("title", "rerun"),
+        src.get("instructions", ""),
+        list(src.get("grants") or []),
+        src.get("workspace", ""),
+        channel_id,
+    )
 
 
 def repair_dead_runners(store: JobStore) -> int:
@@ -357,7 +416,7 @@ def run_job(
     Exactly one model call happens here (the job turn). Completion is
     delivered without the model: a REST ping plus a fold-back inbox note.
     """
-    store = store or JobStore(config.jobs_file)
+    store = store or JobStore(config.jobs_file, keep=config.jobs_keep)
     workspace_store = workspace_store or WorkspaceStore(config.workspaces_file)
     inbox = inbox or Inbox(config.inbox_file)
     driver_factory = driver_factory or build_job_driver

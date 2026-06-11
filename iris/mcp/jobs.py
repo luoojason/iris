@@ -48,7 +48,8 @@ def _config() -> Config:
 
 
 def _store() -> JobStore:
-    return JobStore(_config().jobs_file)
+    cfg = _config()
+    return JobStore(cfg.jobs_file, keep=cfg.jobs_keep)
 
 
 def _workspaces() -> WorkspaceStore:

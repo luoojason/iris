@@ -95,6 +95,9 @@ class Config:
     job_grants: list[str] = field(default_factory=list)
     # Active (pending+running) jobs past this count are queued, not launched.
     jobs_max: int = 2
+    # Auto-prune terminal jobs (done/failed/cancelled) past this many, keeping
+    # the most recent. Active jobs are never pruned.
+    jobs_keep: int = 50
     job_timeout: float = 1800.0
     # Optional model/persona for job turns; empty falls back to the chat model.
     job_model: str = ""
@@ -191,6 +194,7 @@ class Config:
             jobs_file=os.environ.get("IRIS_JOBS_FILE", "iris-jobs.json"),
             job_grants=_split(os.environ.get("IRIS_JOB_GRANTS")),
             jobs_max=int(os.environ.get("IRIS_JOBS_MAX", "2")),
+            jobs_keep=int(os.environ.get("IRIS_JOBS_KEEP", "50")),
             job_timeout=float(os.environ.get("IRIS_JOB_TIMEOUT", "1800")),
             job_model=os.environ.get("IRIS_JOB_MODEL", ""),
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
