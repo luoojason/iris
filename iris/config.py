@@ -83,6 +83,10 @@ class Config:
     voice_enabled: bool = False
     voice_model: str = "base"
 
+    # Owner-registered directories jobs may work in (names, never paths, cross
+    # the model boundary). Edited only via `iris workspaces add/remove/list`.
+    workspaces_file: str = "iris-workspaces.json"
+
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
@@ -145,6 +149,7 @@ class Config:
             skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
             voice_enabled=_truthy(os.environ.get("IRIS_VOICE")),
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
+            workspaces_file=os.environ.get("IRIS_WORKSPACES_FILE", "iris-workspaces.json"),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),

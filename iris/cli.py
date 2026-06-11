@@ -171,6 +171,34 @@ def reminders_tick(config: Config) -> int:
     return 0
 
 
+def workspaces_cmd(config: Config, action: str, name: str = "", path: str = "") -> int:
+    """Owner-side registry of directories jobs may work in (names, not paths)."""
+    from .workspaces import WorkspaceStore
+
+    store = WorkspaceStore(config.workspaces_file)
+    if action == "add":
+        try:
+            resolved = store.add(name, path)
+        except ValueError as exc:
+            print(f"workspaces add: {exc}")
+            return 2
+        print(f"workspace {name} -> {resolved}")
+        return 0
+    if action == "remove":
+        if store.remove(name):
+            print(f"removed workspace {name}")
+            return 0
+        print(f"no workspace named {name}")
+        return 1
+    items = store.list()
+    if not items:
+        print("No workspaces registered. Add one with: iris workspaces add <name> <path>")
+        return 0
+    for ws_name, ws_path in items.items():
+        print(f"{ws_name} -> {ws_path}")
+    return 0
+
+
 def skills(config: Config) -> int:
     """List the skills the agent can use (and link IRIS_SKILLS_DIR if set)."""
     from .skills import discover, link_skills
@@ -201,6 +229,14 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    ws_parser = sub.add_parser("workspaces", help="manage the directories jobs may work in")
+    ws_sub = ws_parser.add_subparsers(dest="ws_action")
+    ws_add = ws_sub.add_parser("add", help="register a directory under a name")
+    ws_add.add_argument("name")
+    ws_add.add_argument("path")
+    ws_remove = ws_sub.add_parser("remove", help="unregister a workspace")
+    ws_remove.add_argument("name")
+    ws_sub.add_parser("list", help="list registered workspaces")
     watch_parser = sub.add_parser("watch", help="run a command and ping you when it finishes")
     watch_parser.add_argument("--name", default=None, help="label for the notification")
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
@@ -227,6 +263,9 @@ def main(argv: list[str] | None = None) -> int:
         if not watch_cmd:
             print("usage: iris watch [--name N] [--always] [--quiet] -- <command>")
             return 2
+    if command == "workspaces" and not getattr(args, "ws_action", None):
+        print("usage: iris workspaces {add <name> <path> | remove <name> | list}")
+        return 2
 
     config = Config.from_env()
     # Make any configured skills discoverable before a bot/chat run starts.
@@ -242,6 +281,11 @@ def main(argv: list[str] | None = None) -> int:
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
+    if command == "workspaces":
+        return workspaces_cmd(
+            config, args.ws_action,
+            name=getattr(args, "name", ""), path=getattr(args, "path", ""),
+        )
     if command == "tui":
         from .tui import run as run_tui
         run_tui(config)
