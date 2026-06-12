@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from typing import Optional
 
 from . import commands
@@ -103,6 +104,54 @@ class _LiveAdapterHandle:
         self._live.close()
 
 
+def parse_conversation_channel(conversation_id) -> Optional[int]:
+    """The numeric channel id behind a conversation id (``discord:<id>``), or None.
+
+    Pure so the autonomous-resume path is unit-testable without the discord SDK.
+    """
+    if not conversation_id:
+        return None
+    raw = conversation_id.split(":", 1)[1] if ":" in conversation_id else conversation_id
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+async def submit_resume_turn(conversation_id, prompt, *, get_channel, fetch_channel,
+                             runner_for) -> bool:
+    """Queue one autonomous-resume turn into its conversation's runner.
+
+    Free of discord types: the caller passes the cache lookup, the (async) fetch,
+    and the runner factory. Returns True when the turn was queued. Going through
+    the runner means the resume is serialized with any live turns on the
+    conversation, so it can never race the ``claude`` session (the failure mode
+    sessions.py warns about). A channel that cannot be resolved is a no-op.
+    """
+    channel_id = parse_conversation_channel(conversation_id)
+    if channel_id is None:
+        return False
+    channel = get_channel(channel_id)
+    if channel is None and fetch_channel is not None:
+        channel = await fetch_channel(channel_id)
+    if channel is None:
+        return False
+    runner = runner_for(conversation_id, channel)
+    runner.submit(Turn(text=prompt))
+    return True
+
+
+def _resume_parked(config) -> bool:
+    """True when the credit guard says the month is nearly spent. Fail-open:
+    a broken ledger must not silently stall an enabled resume loop forever."""
+    try:
+        from .usage import CreditGuard
+
+        return CreditGuard.from_config(config).should_park()
+    except Exception:
+        return False
+
+
 def thread_name_for(text: str, limit: int = 90) -> str:
     """A Discord thread name from a task's opening message (<= 100-char limit)."""
     name = " ".join((text or "").split())  # collapse whitespace/newlines
@@ -187,6 +236,9 @@ def build_client(config: Config, agent: Agent):
     # One runner per conversation serializes its turns and coalesces messages
     # that arrive while a turn is in flight, so the user can keep talking.
     runners: dict[str, ConversationRunner] = {}
+    # Guards the autonomous-resume loop to a single start (on_ready re-fires on
+    # every reconnect). A list so the on_ready closure can flip it.
+    resume_started: list[bool] = []
 
     def _clean_content(message) -> str:
         text = message.content or ""
@@ -239,9 +291,46 @@ def build_client(config: Config, agent: Agent):
         runners[conversation_id] = runner
         return runner
 
+    async def _resume_loop():
+        # The consumer side of autonomous resume: drain the cross-process queue
+        # the finished background command wrote, gate on credit-park + daily cap,
+        # and submit each accepted request as a turn on the home conversation.
+        # Bounded entirely by config; never starts a conversation from nothing.
+        from .autoresume import ResumeBudget, ResumeQueue, dispatch_resumes
+
+        queue = ResumeQueue(config.resume_queue_file)
+        budget = ResumeBudget(config.resume_state_file, config.auto_resume_max_per_day)
+        while not client.is_closed():
+            await asyncio.sleep(config.resume_poll_secs)
+            accepted: list[tuple[str, str]] = []
+            try:
+                dispatch_resumes(
+                    queue, budget,
+                    now=time.time(),
+                    parked=_resume_parked(config),
+                    submit=lambda conv, prompt: accepted.append((conv, prompt)),
+                )
+            except Exception:
+                log.warning("resume dispatch failed", exc_info=True)
+                continue
+            for conv, prompt in accepted:
+                try:
+                    await submit_resume_turn(
+                        conv, prompt,
+                        get_channel=client.get_channel,
+                        fetch_channel=client.fetch_channel,
+                        runner_for=_runner_for,
+                    )
+                except Exception:
+                    log.warning("could not submit resume for %s", conv, exc_info=True)
+
     @client.event
     async def on_ready():
         log.info("Connected to Discord as %s", client.user)
+        # Start the resume loop once (on_ready fires again on every reconnect).
+        if config.auto_resume and not resume_started:
+            resume_started.append(True)
+            client.loop.create_task(_resume_loop())
 
     @client.event
     async def on_message(message):

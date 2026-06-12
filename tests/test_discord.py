@@ -6,9 +6,73 @@ unit-tested here, but the message-splitting logic is pure and worth pinning.
 
 from __future__ import annotations
 
+import asyncio
+
+from iris.discord_adapter import parse_conversation_channel, submit_resume_turn
 from iris.textutil import chunk_text
 
 DISCORD_LIMIT = 2000
+
+
+def test_parse_conversation_channel():
+    assert parse_conversation_channel("discord:42") == 42
+    assert parse_conversation_channel("42") == 42
+    assert parse_conversation_channel("discord:nope") is None
+    assert parse_conversation_channel("") is None
+    assert parse_conversation_channel(None) is None
+
+
+class _FakeRunner:
+    def __init__(self):
+        self.submitted = []
+
+    def submit(self, turn):
+        self.submitted.append(turn.text)
+
+
+def test_submit_resume_turn_queues_into_the_cached_runner():
+    runner = _FakeRunner()
+
+    async def fetch_channel(cid):
+        raise AssertionError("channel was cached; fetch must not be called")
+
+    ok = asyncio.run(submit_resume_turn(
+        "discord:42", "continue the chain",
+        get_channel=lambda cid: ("channel", cid),
+        fetch_channel=fetch_channel,
+        runner_for=lambda conv, channel: runner,
+    ))
+    assert ok is True
+    assert runner.submitted == ["continue the chain"]
+
+
+def test_submit_resume_turn_fetches_when_not_cached():
+    runner = _FakeRunner()
+    fetched = []
+
+    async def fetch_channel(cid):
+        fetched.append(cid)
+        return ("fetched", cid)
+
+    ok = asyncio.run(submit_resume_turn(
+        "discord:99", "go",
+        get_channel=lambda cid: None,
+        fetch_channel=fetch_channel,
+        runner_for=lambda conv, channel: runner,
+    ))
+    assert ok is True
+    assert fetched == [99]
+    assert runner.submitted == ["go"]
+
+
+def test_submit_resume_turn_rejects_a_bad_conversation_id():
+    ok = asyncio.run(submit_resume_turn(
+        "discord:bad", "go",
+        get_channel=lambda cid: ("channel", cid),
+        fetch_channel=None,
+        runner_for=lambda conv, channel: _FakeRunner(),
+    ))
+    assert ok is False
 
 
 def test_empty_text_is_no_messages():

@@ -316,6 +316,28 @@ def test_run_in_background_needs_the_shell_grant(bg_env):
     assert bg_env["calls"] == []
 
 
+def test_run_in_background_default_does_not_add_resume(bg_env):
+    srv.run_in_background("build.sh", label="b")
+    argv = bg_env["calls"][0][0]
+    assert "--resume" not in argv  # plain background command: ping + fold only
+
+
+def test_run_in_background_autoresume_adds_resume_flag(bg_env):
+    bg_env["config"].auto_resume = True
+    out = srv.run_in_background("build.sh", label="b", autoresume=True)
+    argv = bg_env["calls"][0][0]
+    assert "--resume" in argv
+    assert "continue" in out.lower() or "carry" in out.lower()
+
+
+def test_run_in_background_autoresume_honest_when_master_flag_off(bg_env):
+    bg_env["config"].auto_resume = False
+    out = srv.run_in_background("build.sh", label="b", autoresume=True)
+    argv = bg_env["calls"][0][0]
+    assert "--resume" not in argv  # inert: do not enqueue when the owner has it off
+    assert "off" in out.lower() or "ping" in out.lower()
+
+
 def test_run_in_background_gated_on_jobs(bg_env):
     bg_env["config"].jobs_enabled = False
     out = srv.run_in_background("anything")
