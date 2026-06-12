@@ -408,3 +408,85 @@ def test_raising_driver_restores_inbox_entries(tmp_path):
     with pytest.raises(ClaudeError):
         agent.respond("c1", "hello")
     assert box.drain() == ["job #5 finished: do not lose me"]
+
+
+def test_from_config_wires_standing_orders(tmp_path):
+    from iris.config import Config
+    cfg = Config(
+        session_store_path=str(tmp_path / "s.json"),
+        standing_orders_file=str(tmp_path / "orders.md"),
+    )
+    agent = Agent.from_config(cfg)
+    assert agent.driver.standing_orders_file == cfg.standing_orders_file
+
+
+def test_from_config_wires_the_pinned_memory_digest(tmp_path):
+    import json as _json
+
+    from iris.config import Config
+
+    mem = tmp_path / "mem.json"
+    mem.write_text(_json.dumps([
+        {"id": 1, "text": "owner prefers metric", "pinned": True},
+        {"id": 2, "text": "unpinned chatter"},
+    ]), encoding="utf-8")
+    cfg = Config(session_store_path=str(tmp_path / "s.json"), memory_file=str(mem))
+    agent = Agent.from_config(cfg)
+    assert agent.driver.system_prompt_extra is not None
+    block = agent.driver.system_prompt_extra()
+    assert "owner prefers metric" in block
+    assert "unpinned chatter" not in block
+
+
+def test_memory_digest_supplier_tolerates_a_broken_store(tmp_path):
+    from iris.agent import _memory_digest_supplier
+
+    missing = _memory_digest_supplier(str(tmp_path / "absent.json"), 2400)
+    assert missing() == ""
+    corrupt = tmp_path / "bad.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    assert _memory_digest_supplier(str(corrupt), 2400)() == ""
+
+
+def test_memory_digest_supplier_halves_budget_when_hot(tmp_path):
+    import json as _json
+
+    from iris.agent import _memory_digest_supplier
+
+    mem = tmp_path / "mem.json"
+    mem.write_text(_json.dumps([
+        {"id": 1, "text": "f" * 200, "pinned": True},
+    ]), encoding="utf-8")
+
+    class HotGuard:
+        def level(self):
+            return "tighten"
+
+    # the note fits the full budget but not half of it
+    cool = _memory_digest_supplier(str(mem), 400)
+    hot = _memory_digest_supplier(str(mem), 400, guard=HotGuard())
+    assert "fff" in cool()
+    assert hot() == ""
+
+
+def test_respond_skips_the_session_write_after_a_reset(tmp_path):
+    # A reset that lands while a turn is in flight (e.g. via !new or !stop) must
+    # win: the finishing turn must not resurrect the session the user cleared.
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "old")
+
+    class ResettingDriver:
+        model = None
+
+        def __init__(self, agent_box):
+            self.agent_box = agent_box
+
+        def run(self, prompt, session_id=None, model=None):
+            self.agent_box[0].reset("c1")  # the user reset mid-turn
+            return ClaudeResult(text="hi", session_id="brand-new", is_error=False)
+
+    box = []
+    agent = Agent(ResettingDriver(box), store)
+    box.append(agent)
+    agent.respond("c1", "hello")
+    assert store.get("c1") is None  # the reset stuck; no resurrection

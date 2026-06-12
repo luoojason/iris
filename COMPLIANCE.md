@@ -62,9 +62,27 @@ not "free."
   actually arrives (one `claude -p` per message), so it burns **zero idle
   inference**. A naive always-listening process that re-runs a turn on every
   poll timeout would quietly drain the credit; Iris does not work that way.
+- The one deliberate exception is **scheduled jobs** (`IRIS_SCHEDULED_JOBS`,
+  off by default): the clock may launch work that was recorded verbatim in
+  advance — never a conversation, never anything composed at fire time. Two
+  recording paths exist: `iris schedule` at the keyboard, and (only if you
+  allowlist it) the `schedule_job` chat tool, which records job rules the
+  model wrote down when you asked — those are capped in number
+  (`IRIS_SCHEDULES_MAX_MODEL_RULES`), visible in `iris schedule list`, and
+  can never carry a shell command. A *job* firing goes through the same
+  gated launch as every other job (grants re-clamped, parked when the credit
+  guard runs hot, monthly fire cap, no-overlap guard) and lands in the usage
+  ledger. A *script* firing (`--command`, owner-CLI only) runs your shell
+  command with zero model calls; only its failure-triage call can spend
+  credit, it is ledger-recorded, and it is skipped at the park level. Set a
+  budget (`IRIS_USAGE_BUDGET_USD`) before enabling any of this: the guard's
+  park level is the aggregate backstop, and `iris usage` projects your
+  month-end pace.
 - To stretch the credit further: use `IRIS_MODEL=claude-haiku-4-5-...` for a
   cheaper brain, keep personas and context lean, and avoid wiring tools that
-  balloon the prompt.
+  balloon the prompt. The `browser` job grant is the heaviest tool Iris can
+  wire (page snapshots bill like big pastes), and its profile holds only
+  logins to your own accounts — browsing as someone else is out of scope.
 
 Claim your monthly agent credit once in your Claude account, or programmatic
 requests will not draw from it.

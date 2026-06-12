@@ -210,3 +210,174 @@ def test_live_runner_closes_handle_when_send_fails():
         assert closed == [True]
 
     asyncio.run(go())
+
+
+# -- cancel / stop control -----------------------------------------------------
+
+
+def test_cancel_clears_the_queue_and_reports_running():
+    async def go():
+        gate = asyncio.Event()
+
+        async def run_turn(prompt, has_attachments):
+            await gate.wait()
+            return "done"
+
+        sent = []
+
+        async def send(text):
+            sent.append(text)
+
+        runner = ConversationRunner(run_turn=run_turn, send=send,
+                                    ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="one"))
+        await asyncio.sleep(0)  # let the worker pick it up
+        runner.submit(Turn(text="two"))  # queued behind the in-flight turn
+        assert runner.busy
+        assert runner.pending == 1
+        running = runner.cancel()
+        assert running is True
+        assert runner.pending == 0
+        gate.set()  # the orphaned turn finishes in the background, reply discarded
+        await asyncio.sleep(0.01)
+        assert sent == []  # nothing was sent after cancel
+
+    asyncio.run(go())
+
+
+def test_cancel_when_idle_reports_not_running():
+    async def go():
+        runner, sent, _ = _runner()
+        assert runner.cancel() is False
+        assert runner.pending == 0
+
+    asyncio.run(go())
+
+
+def test_pending_property_counts_queued_turns():
+    async def go():
+        gate = asyncio.Event()
+
+        async def run_turn(prompt, has_attachments):
+            await gate.wait()
+            return "x"
+
+        async def send(text):
+            pass
+
+        runner = ConversationRunner(run_turn=run_turn, send=send,
+                                    ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="a"))
+        await asyncio.sleep(0)
+        runner.submit(Turn(text="b"))
+        runner.submit(Turn(text="c"))
+        assert runner.pending == 2
+        gate.set()
+
+    asyncio.run(go())
+
+
+def test_cancel_calls_the_on_cancel_hook_and_suppresses_the_reply():
+    async def go():
+        gate = asyncio.Event()
+        cancelled = []
+
+        async def run_turn(prompt, has_attachments):
+            await gate.wait()
+            return f"reply to {prompt}"
+
+        sent = []
+
+        async def send(text):
+            sent.append(text)
+
+        runner = ConversationRunner(run_turn=run_turn, send=send, ack_line=lambda: None,
+                                    ack_delay=10, on_cancel=lambda: cancelled.append(True))
+        runner.submit(Turn(text="one"))
+        await asyncio.sleep(0)
+        assert runner.cancel() is True
+        assert cancelled == [True]
+        gate.set()  # the turn finishes, but its reply is suppressed
+        await asyncio.sleep(0.02)
+        assert sent == []
+
+    asyncio.run(go())
+
+
+def test_after_cancel_a_new_message_runs_with_no_double_worker():
+    async def go():
+        gate = asyncio.Event()
+        seen = []
+
+        async def run_turn(prompt, has_attachments):
+            seen.append(prompt)
+            if prompt == "one":
+                await gate.wait()
+            return f"done: {prompt}"
+
+        sent = []
+
+        async def send(text):
+            sent.append(text)
+
+        runner = ConversationRunner(run_turn=run_turn, send=send, ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="one"))
+        await asyncio.sleep(0)
+        runner.cancel()
+        gate.set()
+        await asyncio.sleep(0.02)
+        # a fresh message after the cancel runs normally and is sent
+        runner.submit(Turn(text="two"))
+        await asyncio.sleep(0.02)
+        assert "done: two" in sent
+        assert "done: one" not in sent  # the cancelled reply was suppressed
+        assert not runner.busy  # exactly one worker, now idle
+
+    asyncio.run(go())
+
+
+def test_live_cancel_during_begin_suppresses_the_reply():
+    """A !stop that lands while begin() is still acquiring the lock must suppress
+    the reply, not let it through. The cancel generation has to be captured before
+    begin(), mirroring the one-shot path."""
+    from iris.conversation import LiveConversationRunner
+
+    async def go():
+        begun = asyncio.Event()
+        release = asyncio.Event()
+        sent: list[str] = []
+
+        class FakeHandle:
+            async def begin(self):
+                begun.set()
+                await release.wait()  # park inside begin(), as lock-acquire would
+
+            def is_open(self):
+                return False
+
+            async def inject(self, text):
+                return False
+
+            async def result(self):
+                return "reply to one"
+
+            async def aftermath(self):
+                return ["a stray follow-up"]
+
+            def close(self):
+                pass
+
+        async def send(text):
+            sent.append(text)
+
+        runner = LiveConversationRunner(
+            start_turn=lambda prompt, has_attachments: FakeHandle(),
+            send=send, ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="one"))
+        await begun.wait()           # the worker is parked inside begin()
+        assert runner.cancel() is True
+        release.set()                # begin() completes; the turn runs to result
+        await asyncio.sleep(0.02)
+        assert sent == []            # the reply and stray are both suppressed
+
+    asyncio.run(go())

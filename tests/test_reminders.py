@@ -67,3 +67,45 @@ def test_recurring_preserves_id_and_payload(tmp_path):
     assert nxt["id"] == rid
     assert nxt["channel_id"] == "c9"
     assert nxt["repeat_secs"] == 60
+
+
+# -- follow-up kinds ----------------------------------------------------------
+
+
+def test_add_stores_kind_and_origin(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(100.0, "check the deploy", "c1", kind="followup", origin="model")
+    item = store.all()[0]
+    assert item["kind"] == "followup"
+    assert item["origin"] == "model"
+
+
+def test_plain_add_keeps_the_old_record_shape(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(100.0, "stand up", "c1")
+    item = store.all()[0]
+    assert "kind" not in item and "origin" not in item
+
+
+def test_render_reminder_distinguishes_followups():
+    from iris.reminders import render_reminder
+
+    plain = render_reminder({"text": "stand up"})
+    promised = render_reminder({"text": "the deploy", "kind": "followup"})
+    assert plain == "Reminder: stand up"
+    assert promised.startswith("Follow-up")
+    assert "the deploy" in promised
+
+
+def test_requeue_preserves_identity_as_one_shot(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(100.0, "check it", "c1", repeat_secs=60, kind="followup", origin="model")
+    due = store.pop_due(now=150.0)  # the recurrence reschedules itself in place
+    store.requeue(due[0])
+    items = store.all()
+    requeued = [i for i in items if i.get("due_ts") == 100.0]
+    assert len(requeued) == 1
+    assert requeued[0]["kind"] == "followup"
+    assert requeued[0]["origin"] == "model"
+    # the firing goes back one-shot; its next occurrence is already queued
+    assert int(requeued[0].get("repeat_secs", 0) or 0) == 0

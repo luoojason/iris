@@ -94,6 +94,20 @@ def doctor(config: Config, probe: bool = True) -> int:
         print(f"  signed in (model: {res.model or 'claude default'})")
     print(f"model: {config.model or '(claude default)'}")
     print(f"persona: {config.persona_file or '(none)'}")
+    from pathlib import Path
+
+    if config.standing_orders_file:
+        orders = Path(config.standing_orders_file)
+        if not orders.exists():
+            print(f"standing orders: MISSING file {config.standing_orders_file}")
+        else:
+            size = orders.stat().st_size
+            print(f"standing orders: {config.standing_orders_file} ({size} bytes)")
+            if size > 2048:
+                print("WARNING: standing orders are over 2KB. Every byte is appended to")
+                print("  the system prompt and re-billed on every turn; trim the file.")
+    else:
+        print("standing orders: (none)")
     print(f"mcp tools: {config.mcp_config or '(none)'}")
     print(f"allowed tools: {', '.join(config.allowed_tools) if config.allowed_tools else '(none)'}")
     print(f"voice transcription: {'on (' + config.voice_model + ')' if config.voice_enabled else 'off'}")
@@ -121,6 +135,30 @@ def doctor(config: Config, probe: bool = True) -> int:
             print(f"credit guard: {pct:.0f}% of ${config.usage_budget_usd:.2f} used this month ({lvl})")
         except Exception as exc:
             print(f"credit guard: could not read the ledger ({exc})")
+    if config.jobs_enabled:
+        # A workspace that contains the agent's own state directory hands a
+        # files-granted job the pen that writes the schedules (commands the
+        # clock will run) and every other registry. Warn loudly.
+        try:
+            from .workspaces import WorkspaceStore
+
+            state_dir = Path(config.schedules_file).resolve().parent
+            for ws_name, ws_path in WorkspaceStore(config.workspaces_file).list().items():
+                ws = Path(ws_path).resolve()
+                if ws == state_dir or ws in state_dir.parents:
+                    print(f"WARNING: workspace {ws_name!r} ({ws_path}) contains the agent's state")
+                    print("  files (schedules, registries, .env). A files-granted job there can")
+                    print("  rewrite them — including putting commands on the clock. Register a")
+                    print("  narrower directory instead.")
+        except Exception as exc:
+            print(f"workspaces: could not check the registry ({exc})")
+    if "browser" in config.job_grants:
+        if shutil.which("npx"):
+            print("browser grant: on (Playwright MCP via npx)")
+        else:
+            print("WARNING: 'browser' is in IRIS_JOB_GRANTS but npx is not on PATH,")
+            print("  so the Playwright MCP server cannot launch. Install Node.js, or")
+            print("  point IRIS_BROWSER_MCP_CMD at a working launch command.")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
@@ -169,20 +207,23 @@ def reminders_tick(config: Config) -> int:
     """Deliver any reminders that are now due. Run from cron or a systemd timer."""
     import os
 
-    from .reminders import ReminderStore, send_discord_message
+    from . import reminders as rmod
 
-    if not config.discord_token:
-        print("reminders-tick: IRIS_DISCORD_TOKEN is not set")
-        return 1
-    store = ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
-    due = store.pop_due()
-    sent = 0
-    for job in due:
-        if send_discord_message(job["channel_id"], f"Reminder: {job['text']}", config.discord_token):
-            sent += 1
-        else:
-            store.add(job["due_ts"], job["text"], job["channel_id"])  # re-queue on failure
-    print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    # Reminder delivery needs the bot token (a REST post), but the budget,
+    # wakes, and schedules ticks below do not all need it (a schedule launch is
+    # token-free), so a missing token skips only delivery, not the whole tick.
+    if config.discord_token:
+        store = rmod.ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
+        due = store.pop_due()
+        sent = 0
+        for job in due:
+            if rmod.send_discord_message(job["channel_id"], rmod.render_reminder(job), config.discord_token):
+                sent += 1
+            else:
+                store.requeue(job)  # retried on the next tick
+        print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    else:
+        print("reminders-tick: IRIS_DISCORD_TOKEN not set; skipping reminder delivery")
     # The budget check and the wake rules ride the same tick. Neither may
     # ever take reminder delivery down with it, so both are fail-soft to a
     # printed line, and neither makes a model call.
@@ -196,6 +237,11 @@ def reminders_tick(config: Config) -> int:
         print(tick_wakes(config))
     except Exception as exc:
         print(f"wakes tick failed: {exc}")
+    try:
+        from .schedules import tick_schedules
+        print(tick_schedules(config))
+    except Exception as exc:
+        print(f"schedules tick failed: {exc}")
     return 0
 
 
@@ -232,6 +278,52 @@ def workspaces_cmd(config: Config, action: str, name: str = "", path: str = "") 
         return 0
     for ws_name, ws_path in items.items():
         print(f"{ws_name} -> {ws_path}")
+    return 0
+
+
+def schedule_cmd(config: Config, args) -> int:
+    """Owner-side authoring of scheduled jobs (the clock may start these)."""
+    from .schedules import ScheduleStore, add_rule, describe_rule
+
+    store = ScheduleStore(config.schedules_file)
+    action = getattr(args, "schedule_action", None) or "list"
+    if action == "add":
+        try:
+            rule = add_rule(
+                store,
+                title=args.title,
+                when=args.at,
+                every=args.every,
+                instructions=args.instructions,
+                command=getattr(args, "script_command", ""),
+                grants=args.grant,
+                workspace=args.workspace,
+                cap=args.cap,
+                default_cap=config.schedule_monthly_cap,
+            )
+        except ValueError as exc:
+            print(f"schedule add: {exc}")
+            return 2
+        print(f"Recorded schedule {describe_rule(rule)}")
+        if not config.scheduled_jobs_enabled:
+            print("Note: IRIS_SCHEDULED_JOBS is not set, so this rule is inert "
+                  "until you enable it (and restart the reminders timer).")
+        return 0
+    if action == "remove":
+        if store.remove(args.rule_id):
+            print(f"Removed schedule #{args.rule_id}.")
+            return 0
+        print(f"No schedule #{args.rule_id}.")
+        return 1
+    rules = store.all()
+    if not rules:
+        print("No schedules recorded. Add one with: iris schedule add "
+              "--title <t> --at <when> [--every 1d] --instructions <prompt>")
+        return 0
+    for rule in rules:
+        print(describe_rule(rule))
+    if not config.scheduled_jobs_enabled:
+        print("(IRIS_SCHEDULED_JOBS is off: nothing fires.)")
     return 0
 
 
@@ -284,6 +376,24 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("job_id", type=int)
     js_prune = jobs_sub.add_parser("prune", help="drop old terminal jobs")
     js_prune.add_argument("--keep", type=int, default=None)
+    sched_parser = sub.add_parser("schedule", help="owner-authored scheduled jobs (the clock may start these)")
+    sched_sub = sched_parser.add_subparsers(dest="schedule_action")
+    sc_add = sched_sub.add_parser("add", help="record a schedule rule")
+    sc_add.add_argument("--title", required=True)
+    sc_add.add_argument("--at", required=True, help="first firing: +30m, +2h, +1d, or an ISO datetime (UTC)")
+    sc_add.add_argument("--every", default="", help="recurrence: every 30m / 2h / 1d (omit for one-shot)")
+    sc_add.add_argument("--instructions", default="", help="the job prompt (a job rule)")
+    # dest must NOT be the auto-derived "command": that collides with the
+    # top-level subparsers' dest="command" and clobbers the subcommand name,
+    # routing `schedule add --command ...` to the default (Discord) runner.
+    sc_add.add_argument("--command", dest="script_command", default="",
+                        help="a shell command instead (a script rule, zero model calls)")
+    sc_add.add_argument("--grant", default="", help="job grants, comma-separated: shell,files")
+    sc_add.add_argument("--workspace", default="", help="a registered workspace name")
+    sc_add.add_argument("--cap", type=int, default=None, help="monthly fire cap (default IRIS_SCHEDULE_MONTHLY_CAP)")
+    sc_remove = sched_sub.add_parser("remove", help="remove a schedule rule")
+    sc_remove.add_argument("rule_id", type=int)
+    sched_sub.add_parser("list", help="list schedule rules (default)")
     ws_parser = sub.add_parser("workspaces", help="manage the directories jobs may work in")
     ws_sub = ws_parser.add_subparsers(dest="ws_action")
     ws_add = ws_sub.add_parser("add", help="register a directory under a name")
@@ -338,6 +448,8 @@ def main(argv: list[str] | None = None) -> int:
         return reminders_tick(config)
     if command == "usage":
         return usage_cmd(config)
+    if command == "schedule":
+        return schedule_cmd(config, args)
     if command == "workspaces":
         return workspaces_cmd(
             config, args.ws_action,

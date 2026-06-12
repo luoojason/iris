@@ -38,6 +38,34 @@ SEED_TEMPLATE = (
 )
 
 
+def _memory_digest_supplier(path: str, max_bytes: int, guard=None):
+    """A per-turn supplier of the pinned-memory block for the system prompt.
+
+    Reads the memory store fresh each turn — the model pins and unpins through
+    the MCP tool while the bot runs — and halves the byte budget while the
+    credit guard is running hot. Never raises: a missing or broken store reads
+    as no digest, and the next turn proceeds without it.
+    """
+    import json
+    from pathlib import Path
+
+    from .memory import pinned_digest
+
+    def supply() -> str:
+        try:
+            entries = json.loads(Path(path).read_text("utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(entries, list):
+            return ""
+        budget = max_bytes
+        if guard is not None and guard.level() in ("tighten", "park"):
+            budget = max_bytes // 2
+        return pinned_digest(entries, time.time(), budget)
+
+    return supply
+
+
 def _fold_prompt(entries: list[str], text: str) -> str:
     """Prefix a turn's prompt with the notes background work left behind."""
     notes = "\n".join(f"- {entry}" for entry in entries)
@@ -150,6 +178,11 @@ class Agent:
             )
             routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
         with self._lock_for(conversation_id):
+            # Captured under the lock: a reset that lands mid-turn (the user
+            # sent !new or !stop) advances the epoch, and the guard below then
+            # refuses to write this now-stale session back, so a finishing turn
+            # never resurrects a conversation the user just cleared.
+            epoch = self._epoch_for(conversation_id)
             folded: list[str] = []
             if self.inbox is not None:
                 folded = self.inbox.drain()
@@ -176,7 +209,7 @@ class Agent:
                 # The turn that took the notes failed; put them back so the
                 # next turn re-delivers them instead of losing them.
                 self.inbox.restore(folded)
-            if result.session_id:
+            if result.session_id and self._epoch_for(conversation_id) == epoch:
                 self.store.set(conversation_id, result.session_id)
             if self.guard is not None:
                 self.guard.record("chat", result)
@@ -313,6 +346,7 @@ class Agent:
             claude_bin=config.claude_bin,
             model=config.model,
             append_system_prompt_file=config.persona_file,
+            standing_orders_file=config.standing_orders_file,
             mcp_config=config.mcp_config,
             permission_mode=config.permission_mode,
             allowed_tools=config.allowed_tools or None,
@@ -340,6 +374,12 @@ class Agent:
         inbox = Inbox(config.inbox_file)
         from .usage import CreditGuard
         guard = CreditGuard.from_config(config)
+        # The pinned-memory digest: tier-0 memory the model never has to ask
+        # for. Wired after the guard exists so a hot month shrinks the block.
+        if config.memory_file and config.memory_digest_bytes > 0:
+            driver.system_prompt_extra = _memory_digest_supplier(
+                config.memory_file, config.memory_digest_bytes, guard
+            )
         return cls(
             driver,
             store,

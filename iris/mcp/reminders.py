@@ -15,17 +15,32 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise SystemExit("Needs the MCP SDK: pip install 'iris-agent[memory]'") from exc
 
-from iris.reminders import ReminderStore, fmt_ts, parse_every, parse_when
+from iris.reminders import KINDS, ReminderStore, fmt_ts, parse_every, parse_when
 
 STORE = ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
 DEFAULT_CHANNEL = os.environ.get("IRIS_DISCORD_HOME_CHANNEL", "")
+# A ceiling on how many reminders the agent may have pending at once, so a
+# runaway turn (or a prompt-injected loop) cannot fill the schedule. Owner-made
+# reminders do not count against it. None means "read the env lazily": the
+# claude child strips IRIS_* from this server's spawn env, so the knob must
+# come from .env in the working directory at call time, not import time.
+MAX_PENDING: Optional[int] = None
+
+
+def _max_pending() -> int:
+    if MAX_PENDING is not None:
+        return MAX_PENDING
+    from iris.config import load_dotenv
+
+    load_dotenv()
+    return int(os.environ.get("IRIS_REMINDERS_MAX_PENDING", "25"))
 
 mcp = FastMCP("iris-reminders")
 
 
 @mcp.tool()
 def schedule_reminder(text: str, when: str, channel_id: Optional[str] = None,
-                      every: Optional[str] = None) -> str:
+                      every: Optional[str] = None, kind: Optional[str] = None) -> str:
     """Schedule a reminder message to be delivered later, once or on a repeat.
 
     Args:
@@ -34,18 +49,29 @@ def schedule_reminder(text: str, when: str, channel_id: Optional[str] = None,
         channel_id: Channel to send to; defaults to the home channel.
         every: Optional recurrence: 'every 30m', 'every 2h', 'every 1d'. Omit for
             a one-shot reminder. After each delivery it reschedules from that moment.
+        kind: Pass 'followup' when you are scheduling a follow-up to something
+            you promised to do later; it is delivered as a follow-up the owner
+            can resume by replying. Omit for a plain reminder.
     """
     channel = channel_id or DEFAULT_CHANNEL
     if not channel:
         return "No channel to send to (set IRIS_DISCORD_HOME_CHANNEL or pass channel_id)."
+    kind = (kind or "").strip().lower()
+    if kind and kind not in KINDS:
+        return f"Unknown reminder kind {kind!r}; use 'followup' or omit it."
+    pending = sum(1 for item in STORE.all() if item.get("origin") == "model")
+    if pending >= _max_pending():
+        return (f"You already have {pending} pending reminders, the most allowed. "
+                "Cancel some with cancel_reminder before scheduling more.")
     try:
         due = parse_when(when)
         repeat_secs = parse_every(every or "")
     except ValueError as exc:
         return str(exc)
-    reminder_id = STORE.add(due, text, channel, repeat_secs)
+    reminder_id = STORE.add(due, text, channel, repeat_secs, kind=kind, origin="model")
     cadence = f", repeating {every.strip()}" if repeat_secs else ""
-    return f"Reminder #{reminder_id} set for {fmt_ts(due)}{cadence}: {text}"
+    label = "Follow-up" if kind == "followup" else "Reminder"
+    return f"{label} #{reminder_id} set for {fmt_ts(due)}{cadence}: {text}"
 
 
 @mcp.tool()
@@ -59,7 +85,8 @@ def list_reminders() -> str:
         period = int(i.get("repeat_secs", 0) or 0)
         cadence = f" (every {period // 3600}h)" if period and period % 3600 == 0 else (
             f" (every {period // 60}m)" if period else "")
-        lines.append(f"#{i['id']} at {fmt_ts(i['due_ts'])}{cadence}: {i['text']}")
+        tag = f" [{i['kind']}]" if i.get("kind") else ""
+        lines.append(f"#{i['id']} at {fmt_ts(i['due_ts'])}{cadence}{tag}: {i['text']}")
     return "\n".join(lines)
 
 

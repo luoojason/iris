@@ -216,3 +216,73 @@ def test_parked_reply_still_reports_clamped_grants(env, monkeypatch, tmp_path):
     reply = srv.start_job("big", "work", grants="shell, files")
     assert "PARKED" in reply
     assert "Refused grants" in reply and "shell" in reply
+
+
+# -- scheduled jobs ------------------------------------------------------------
+
+
+@pytest.fixture
+def sched_env(tmp_path, monkeypatch):
+    config = Config(
+        jobs_enabled=True,
+        scheduled_jobs_enabled=True,
+        jobs_file=str(tmp_path / "jobs.json"),
+        schedules_file=str(tmp_path / "sched.json"),
+        workspaces_file=str(tmp_path / "ws.json"),
+        job_grants=["files"],
+        home_channel="home-1",
+    )
+    monkeypatch.setattr(srv, "_CONFIG", config)
+    return config
+
+
+def test_schedule_job_records_a_model_rule(sched_env):
+    from iris.schedules import ScheduleStore
+
+    reply = srv.schedule_job("nightly check", "run the repo health check",
+                             when="+1h", every="every 1d")
+    assert "#1" in reply
+    rule = ScheduleStore(sched_env.schedules_file).get(1)
+    assert rule["created_by"] == "model"
+    assert rule["instructions"] == "run the repo health check"
+    assert rule["enabled"] is True
+
+
+def test_schedule_job_is_gated_on_the_flag(sched_env, monkeypatch):
+    sched_env.scheduled_jobs_enabled = False
+    reply = srv.schedule_job("t", "i", when="+1h")
+    assert "IRIS_SCHEDULED_JOBS" in reply
+    from iris.schedules import ScheduleStore
+
+    assert ScheduleStore(sched_env.schedules_file).all() == []
+
+
+def test_schedule_job_never_takes_a_command(sched_env):
+    # The model writes job instructions only; shell commands on a clock are
+    # owner-CLI territory. The tool simply has no command parameter, and the
+    # rule it creates must be a job rule.
+    from iris.schedules import ScheduleStore
+
+    srv.schedule_job("t", "instructions here", when="+1h")
+    rule = ScheduleStore(sched_env.schedules_file).get(1)
+    assert rule["command"] == ""
+
+
+def test_list_and_cancel_schedules(sched_env):
+    srv.schedule_job("nightly", "check things", when="+1h", every="every 1d")
+    listing = srv.list_schedules()
+    assert "nightly" in listing and "#1" in listing
+    reply = srv.cancel_schedule(1)
+    assert "Cancelled" in reply
+    assert "No schedules" in srv.list_schedules()
+
+
+def test_schedule_job_caps_model_created_rules(sched_env, monkeypatch):
+    monkeypatch.setattr(srv, "MAX_MODEL_RULES", 2)
+    srv.schedule_job("a", "i", when="+1h")
+    srv.schedule_job("b", "i", when="+1h")
+    out = srv.schedule_job("c", "i", when="+1h")
+    assert "cancel" in out.lower()
+    from iris.schedules import ScheduleStore
+
+    assert len(ScheduleStore(sched_env.schedules_file).all()) == 2

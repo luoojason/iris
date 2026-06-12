@@ -38,6 +38,7 @@ import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -143,6 +144,14 @@ class ClaudeDriver:
     model: Optional[str] = None
     append_system_prompt_file: Optional[str] = None
     append_system_prompt: Optional[str] = None
+    # Owner-edited rules appended to the system prompt on every turn (standing
+    # orders: durable behavior, not facts). Re-read per command build, so edits
+    # take effect on the next turn with no restart.
+    standing_orders_file: Optional[str] = None
+    # Called on every command build for an extra system-prompt block (the agent
+    # wires the pinned-memory digest here). Must be cheap; a raising supplier is
+    # logged and skipped so it can never break a turn.
+    system_prompt_extra: Optional[Callable[[], Optional[str]]] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: Optional[Sequence[str]] = None
@@ -210,10 +219,21 @@ class ClaudeDriver:
         chosen_model = model or self.model
         if chosen_model:
             cmd += ["--model", chosen_model]
-        if self.append_system_prompt_file:
+        # The CLI rejects --append-system-prompt and --append-system-prompt-file
+        # together ("Cannot use both ... Please use only one."), so never emit
+        # both. When there is inline content (standing orders / the pinned
+        # digest), fold the persona file into it and pass one inline flag;
+        # otherwise keep the persona on the file flag (out of argv).
+        extra = self._append_system_prompt_value()
+        if extra and self.append_system_prompt_file:
+            persona = self._read_text(self.append_system_prompt_file)
+            merged = "\n\n".join(p for p in (persona, extra) if p)
+            if merged:
+                cmd += ["--append-system-prompt", merged]
+        elif extra:
+            cmd += ["--append-system-prompt", extra]
+        elif self.append_system_prompt_file:
             cmd += ["--append-system-prompt-file", self.append_system_prompt_file]
-        if self.append_system_prompt:
-            cmd += ["--append-system-prompt", self.append_system_prompt]
         if self.mcp_config:
             # --strict-mcp-config so the bot uses only our tools, not whatever
             # MCP servers the operator happens to have in ~/.claude.json.
@@ -228,6 +248,39 @@ class ClaudeDriver:
         for directory in self.add_dirs or []:
             cmd += ["--add-dir", directory]
         return cmd
+
+    @staticmethod
+    def _read_text(path: str) -> str:
+        """Read a system-prompt file, degrading an unreadable file to ''."""
+        try:
+            return Path(path).read_text("utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            log.warning("system prompt file unreadable: %s", path)
+            return ""
+
+    def _append_system_prompt_value(self) -> Optional[str]:
+        """The merged ``--append-system-prompt`` value: static text + standing orders.
+
+        Merged into one flag value (the CLI takes the option once); the standing
+        orders file is read fresh on every call so the owner can edit it live.
+        An unreadable file degrades to a warning, never a failed turn.
+        """
+        parts = []
+        if self.append_system_prompt:
+            parts.append(self.append_system_prompt)
+        if self.standing_orders_file:
+            text = self._read_text(self.standing_orders_file)
+            if text:
+                parts.append(text)
+        if self.system_prompt_extra is not None:
+            try:
+                extra = (self.system_prompt_extra() or "").strip()
+            except Exception:
+                log.warning("system prompt extra supplier failed", exc_info=True)
+                extra = ""
+            if extra:
+                parts.append(extra)
+        return "\n\n".join(parts) if parts else None
 
     def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None) -> ClaudeResult:
         """Run one turn, retrying transient failures (rate limits, overload).

@@ -649,3 +649,118 @@ def test_auto_prune_keep_zero_never_reuses_ids(tmp_path):
     store.transition(j1, ("pending",), "done")  # auto-prune fires, keep=0
     j2 = store.add("b", "x", [], "", "")["id"]
     assert j2 > j1  # monotonic despite keep=0
+
+
+# -- browser grant --------------------------------------------------------------
+
+
+def test_browser_is_a_known_grant_with_no_builtin_unlocks():
+    from iris.jobs import job_allowed_builtins, parse_grants
+
+    assert parse_grants("browser") == ["browser"]
+    # it unlocks no dangerous built-ins; the capability arrives via MCP
+    assert job_allowed_builtins(["browser"]) == []
+    assert job_disallowed(["browser"]) == job_disallowed([])
+
+
+def test_browser_grant_is_clamped_by_the_ceiling():
+    from iris.jobs import clamp_grants
+
+    granted, clamped = clamp_grants(["browser"], [])
+    assert "browser" not in granted and clamped == ["browser"]
+    granted, clamped = clamp_grants(["browser"], ["browser"])
+    assert "browser" in granted and clamped == []
+
+
+def test_browser_grant_wires_the_playwright_mcp(tmp_path):
+    import json as _json
+
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_profile_dir=str(tmp_path / "profile"))
+    job = {"grants": ["subagents", "browser"], "workspace": ""}
+    driver = build_job_driver(config, job, None)
+    assert driver.mcp_config is not None
+    spec = _json.loads(open(driver.mcp_config, encoding="utf-8").read())
+    server = spec["mcpServers"]["playwright"]
+    assert "--user-data-dir" in server["args"]
+    profile = server["args"][server["args"].index("--user-data-dir") + 1]
+    assert profile == str((tmp_path / "profile").resolve())
+    assert "mcp__playwright" in driver.allowed_tools
+
+
+def test_no_browser_grant_means_no_mcp_config(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"])
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    assert driver.mcp_config is None
+    assert not any("playwright" in t for t in (driver.allowed_tools or []))
+
+
+def test_browser_mcp_command_is_owner_configurable(tmp_path):
+    import json as _json
+
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_mcp_cmd="node /opt/playwright-mcp/cli.js --headless",
+                    browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    spec = _json.loads(open(driver.mcp_config, encoding="utf-8").read())
+    server = spec["mcpServers"]["playwright"]
+    assert server["command"] == "node"
+    assert "/opt/playwright-mcp/cli.js" in server["args"]
+
+
+def test_browser_config_knobs(tmp_path, monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_BROWSER_MCP_CMD", "npx custom-mcp")
+    monkeypatch.setenv("IRIS_BROWSER_PROFILE_DIR", "/tmp/prof")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.browser_mcp_cmd == "npx custom-mcp"
+    assert cfg.browser_profile_dir == "/tmp/prof"
+
+
+def test_browser_grant_denies_only_the_code_execution_tools_by_default(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    denied = list(driver.disallowed_tools)
+    # in-page code execution stays denied: a human does not need it to use a site
+    assert "mcp__playwright__browser_evaluate" in denied
+    assert "mcp__playwright__browser_run_code_unsafe" in denied
+    # uploads are allowed by default now (a human uploads profile pics, docs)
+    assert "mcp__playwright__browser_file_upload" not in denied
+    # the derived built-in denylist is still intact underneath
+    for tool in job_disallowed(["browser"]):
+        assert tool in denied
+
+
+def test_browser_deny_list_is_configurable(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_deny_tools=["browser_file_upload"],
+                    browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    denied = list(driver.disallowed_tools)
+    assert "mcp__playwright__browser_file_upload" in denied
+    assert "mcp__playwright__browser_evaluate" not in denied
+
+
+def test_browser_deny_list_empty_denies_no_mcp_tools(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_deny_tools=[], browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    assert not any("playwright" in t for t in driver.disallowed_tools)
+    # the built-in denylist is untouched by the browser knob
+    for tool in job_disallowed(["browser"]):
+        assert tool in driver.disallowed_tools

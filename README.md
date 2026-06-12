@@ -121,6 +121,29 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 | `IRIS_MCP_CONFIG` | MCP tool config (gives the agent tools). |
 | `IRIS_PERMISSION_MODE` + `IRIS_ALLOWED_TOOLS` | Control which tools run unattended. |
 
+### Control commands
+
+A message that is exactly a bang command is handled before the brain runs, so
+it costs zero inference and works even mid-turn:
+
+| Command | What it does |
+| --- | --- |
+| `!usage` | This month's spend and projected month-end pace. |
+| `!jobs` | Recent background jobs and their states. |
+| `!schedules` | Recorded scheduled jobs (when enabled). |
+| `!status` | Whether a reply is in flight here, queue depth, active jobs. |
+| `!stop` | Stop the reply being written in this conversation. |
+| `!stop <id>` | Cancel background job `#id` (alias `!cancel <id>`) — kills its process group. |
+| `!new` | Start a fresh conversation here (aliases `!reset`, `!forget`, `!newchat`). |
+| `!help` | List the commands. |
+
+They run through the same access rules as any message (the allowlist, and the
+mention gate in channels), so use them in a DM or thread, or `@mention` the bot
+in a channel. `!stop <id>` is the real kill switch for autonomous work: a chat
+`!stop` drops the pending reply, but cancelling a *job* terminates its actual
+process group. Unknown `!words` and prose like `!help me with X` fall through to
+the agent untouched.
+
 ## Tools via MCP
 
 Out of the box Iris is a plain chat bot, which runs anywhere `claude` is
@@ -145,6 +168,16 @@ To turn on the bundled memory tool (`remember`, `recall`, `forget`):
    ```
 
 4. Tell the persona to use it (the example persona notes where).
+
+**Pinned notes load on every turn.** Top pinned memories render into the
+system prompt each turn (`IRIS_MEMORY_DIGEST_BYTES`, default 2400 bytes,
+`0` to turn off) so the agent knows them without a recall call. Two costs to
+understand: every digest byte is re-billed on every turn, and the digest is
+a trust escalation — notes are model-written, so a hostile page the agent
+read and was tricked into pinning would echo into the system prompt from
+then on. The digest frames notes as data-not-instructions, but if Iris
+browses untrusted content regularly, audit what is pinned now and then
+(`recall` shows PINNED entries) or lower the budget.
 
 Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
@@ -174,11 +207,37 @@ IRIS_ALLOWED_TOOLS=...,mcp__jobs__start_job,mcp__jobs__job_status,mcp__jobs__lis
 with a `jobs` server entry in your MCP config
 (`python -m iris.mcp.jobs`). The pieces:
 
-- **Grants.** A job always gets subagents. It may request `shell` and
-  `files`, clamped to your `IRIS_JOB_GRANTS` ceiling; refusals are reported,
-  never silent. The job denylist is *derived* from the driver's
+- **Grants.** A job always gets subagents. It may request `shell`, `files`,
+  and `browser`, clamped to your `IRIS_JOB_GRANTS` ceiling; refusals are
+  reported, never silent. The job denylist is *derived* from the driver's
   `DANGEROUS_BUILTINS` (an explicit denylist replaces the default, so it must
   track the source of truth).
+- **The browser grant.** `browser` wires the official Playwright MCP server
+  into the job (needs Node/npx; `iris doctor` checks). The browser drives a
+  real Chromium with its own **persistent profile**
+  (`IRIS_BROWSER_PROFILE_DIR`) — an agent-owned cookie jar, never your real
+  browser profile — and the job's strict MCP config exposes nothing else. The
+  deny list (`IRIS_BROWSER_DENY_TOOLS`) blocks only in-page code execution by
+  default; file upload is allowed so the agent can do what a person does.
+  Two cautions: browser turns are token-heavy (snapshots bill like big
+  pastes), and any site the profile is logged into is reachable by whoever can
+  start jobs, so keep the bot locked to your own user id.
+
+  **Giving Iris its own browser identity.** Because the profile persists, you
+  can give Iris a standing identity: create a dedicated email, log its browser
+  into that account and any others once, and it stays logged in across jobs.
+  For sign-ups, the clean pattern is to keep the verification loop inside the
+  browser — Iris opens the account's webmail, reads the confirmation email, and
+  clicks the link, all in one session — rather than wiring a separate mail
+  tool. Two realities to plan around: bot defenses (CAPTCHA, phone/SMS
+  verification, Cloudflare) will block automated signup on a fraction of sites,
+  so treat it as collaborative — Iris screenshots and asks you for the step it
+  can't pass; and headless Chromium is more detectable, so for fewer blocks run
+  headed under a virtual display
+  (`IRIS_BROWSER_MCP_CMD=xvfb-run -a npx @playwright/mcp@latest`). A standing
+  logged-in identity is a real capability surface: set `IRIS_ALLOWED_USER_IDS`
+  to yourself before enabling it, and remember many sites' terms prohibit
+  automated accounts. Logged-in browsing is for your own accounts only.
 - **Workspaces.** Jobs that touch a repo name a workspace you registered
   with `iris workspaces add <name> <path>` (`remove`, `list`). The model only
   ever speaks names; paths stay on your side of the boundary
@@ -285,7 +344,34 @@ Run the tick every minute, e.g. with cron:
 * * * * * cd /path/to/iris && IRIS_DISCORD_TOKEN=... /path/to/venv/bin/python -m iris reminders-tick
 ```
 
-or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set them. The brain can read and edit files and run commands in directories
+or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set them.
+
+### Scheduled jobs
+
+`IRIS_SCHEDULED_JOBS=true` (off by default, separate from `IRIS_JOBS`) lets
+the reminders tick launch **owner-authored** background jobs on a schedule —
+a morning briefing, a nightly repo check. This is the one deliberate
+relaxation of the zero-idle-inference rule, and the line it keeps is: *the
+clock may start a job you recorded verbatim; it may never start a
+conversation or anything you didn't write down.* Rules are authored with
+`iris schedule add --title briefing --at 2026-06-13T07:30:00Z --every 1d
+--instructions "..."` (or `--command` for a zero-model script run through
+`iris watch`),
+live in their own store the reminders tool cannot write, and a job firing
+goes through the same gated launch path as every other job: grants
+re-clamped to `IRIS_JOB_GRANTS`, parked when the credit guard is hot,
+admission-capped, plus a per-rule monthly fire cap (only actual starts
+consume it) and a no-overlap guard on both rule kinds — a job rule skips
+while its previous job is still running (stale parked/queued clones are
+cancelled and replaced), a script rule skips while its previous process is
+alive. Script rules are the lighter tier: they bypass the job machinery on
+purpose (no grants, no job record), make zero model calls on success, and
+their failure-triage call honors the park level. The chat tools
+(`mcp__jobs__schedule_job`, `list_schedules`, `cancel_schedule`) can record
+**job rules only** when you ask in Discord — capped at
+`IRIS_SCHEDULES_MAX_MODEL_RULES` (default 10) so a runaway turn cannot mint
+clock-driven work, and never a shell command. Set a usage budget before
+enabling: the credit guard is the aggregate backstop. The brain can read and edit files and run commands in directories
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 

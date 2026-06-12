@@ -65,6 +65,9 @@ class Config:
     # (if it also clears the other trivial checks). Raise to route more aggressively.
     trivial_max_chars: int = 140
     persona_file: Optional[str] = None
+    # Owner-edited standing orders (durable rules, not facts) appended to the
+    # system prompt every turn. Keep it small: every byte is re-billed per turn.
+    standing_orders_file: Optional[str] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: list[str] = field(default_factory=list)
@@ -105,10 +108,29 @@ class Config:
     # Optional model/persona for job turns; empty falls back to the chat model.
     job_model: str = ""
     job_persona: str = ""
+    # The browser job grant: how to launch the Playwright MCP server, and the
+    # isolated profile directory it gets (never the owner's real browser
+    # profile). Only used when a job is granted 'browser'.
+    browser_mcp_cmd: str = "npx @playwright/mcp@latest --headless"
+    browser_profile_dir: str = "iris-browser-profile"
+    # Playwright MCP tools a browser job may not call even though the server is
+    # allowed. The default denies only in-page code execution (arbitrary JS in
+    # an authenticated page); file upload is allowed so the agent can do what a
+    # human does. Set IRIS_BROWSER_DENY_TOOLS to retune (empty denies none).
+    browser_deny_tools: list[str] = field(
+        default_factory=lambda: ["browser_evaluate", "browser_run_code_unsafe"])
     # Where finished background work queues notes for the next chat turn.
     inbox_file: str = "iris-inbox.json"
     # The owner's recorded home channel (job pings, artifact uploads).
     home_channel: str = ""
+
+    # Scheduled jobs: the one place the clock may start work, and only work
+    # the owner pre-recorded verbatim (see iris/schedules.py). Off by default,
+    # gated separately from IRIS_JOBS. schedule_monthly_cap is the default
+    # per-rule monthly fire cap (a rule can set its own).
+    scheduled_jobs_enabled: bool = False
+    schedules_file: str = "iris-schedules.json"
+    schedule_monthly_cap: int = 62
 
     # The owner's wiki vault (Obsidian-style). Empty disables the wiki tools.
     wiki_dir: str = ""
@@ -129,6 +151,12 @@ class Config:
     usage_park_at: float = 95.0
     usage_ping_at: list[float] = field(default_factory=lambda: [50.0, 80.0, 95.0])
     tighten_factor: float = 3.0
+
+    # The memory tool's store, and the byte budget for the pinned-memory digest
+    # rendered into the system prompt every turn (0 = no digest). The budget
+    # halves while the credit guard is running hot.
+    memory_file: str = "iris-memory.json"
+    memory_digest_bytes: int = 2400
 
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
@@ -182,6 +210,7 @@ class Config:
             light_model=os.environ.get("IRIS_MODEL_LIGHT", ""),
             trivial_max_chars=int(os.environ.get("IRIS_TRIVIAL_MAX_CHARS", "140")),
             persona_file=os.environ.get("IRIS_PERSONA_FILE") or None,
+            standing_orders_file=os.environ.get("IRIS_STANDING_ORDERS_FILE") or None,
             mcp_config=os.environ.get("IRIS_MCP_CONFIG") or None,
             permission_mode=os.environ.get("IRIS_PERMISSION_MODE", "default"),
             allowed_tools=_split(os.environ.get("IRIS_ALLOWED_TOOLS")),
@@ -202,8 +231,19 @@ class Config:
             job_timeout=float(os.environ.get("IRIS_JOB_TIMEOUT", "1800")),
             job_model=os.environ.get("IRIS_JOB_MODEL", ""),
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
+            browser_mcp_cmd=os.environ.get(
+                "IRIS_BROWSER_MCP_CMD", "npx @playwright/mcp@latest --headless"),
+            browser_profile_dir=os.environ.get(
+                "IRIS_BROWSER_PROFILE_DIR", "iris-browser-profile"),
+            browser_deny_tools=(
+                _split(os.environ["IRIS_BROWSER_DENY_TOOLS"])
+                if "IRIS_BROWSER_DENY_TOOLS" in os.environ
+                else ["browser_evaluate", "browser_run_code_unsafe"]),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
+            scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),
+            schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
+            schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),
             wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
             wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
             wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
@@ -214,6 +254,8 @@ class Config:
             usage_park_at=float(os.environ.get("IRIS_USAGE_PARK_AT", "95")),
             usage_ping_at=[float(v) for v in _split(os.environ.get("IRIS_USAGE_PING_AT")) or ["50", "80", "95"]],
             tighten_factor=float(os.environ.get("IRIS_TIGHTEN_FACTOR", "3")),
+            memory_file=os.environ.get("IRIS_MEMORY_FILE", "iris-memory.json"),
+            memory_digest_bytes=int(os.environ.get("IRIS_MEMORY_DIGEST_BYTES", "2400")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),

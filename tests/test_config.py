@@ -113,3 +113,55 @@ def test_notify_defaults():
     assert cfg.notify_channel == ""
     assert cfg.watch_min_seconds == 30.0
     assert cfg.notify_persona is None
+
+
+def test_from_env_reads_standing_orders_file(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_STANDING_ORDERS_FILE", "orders.md")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.standing_orders_file == "orders.md"
+
+
+def test_standing_orders_file_defaults_to_none(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.standing_orders_file is None
+
+
+def test_from_env_reads_memory_digest_knobs(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_MEMORY_FILE", "m.json")
+    monkeypatch.setenv("IRIS_MEMORY_DIGEST_BYTES", "1200")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.memory_file == "m.json"
+    assert cfg.memory_digest_bytes == 1200
+
+
+def test_memory_digest_defaults(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.memory_file == "iris-memory.json"
+    assert cfg.memory_digest_bytes == 2400
+
+
+def test_browser_deny_tools_default_and_override(tmp_path, monkeypatch):
+    import os as _os
+    for key in list(_os.environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.browser_deny_tools == ["browser_evaluate", "browser_run_code_unsafe"]
+    monkeypatch.setenv("IRIS_BROWSER_DENY_TOOLS", "browser_evaluate")
+    cfg2 = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg2.browser_deny_tools == ["browser_evaluate"]
+    monkeypatch.setenv("IRIS_BROWSER_DENY_TOOLS", "")  # explicit empty = deny none
+    cfg3 = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg3.browser_deny_tools == []

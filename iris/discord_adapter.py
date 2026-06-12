@@ -16,6 +16,7 @@ import logging
 import random
 from typing import Optional
 
+from . import commands
 from .agent import Agent, LiveTurn
 from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
@@ -27,7 +28,6 @@ from .transcribe import build_transcriber, transcribe_audio
 log = logging.getLogger("iris.discord")
 
 DISCORD_LIMIT = 2000
-RESET_COMMANDS = {"!reset", "!forget", "!newchat"}
 
 # Short, varied interim lines for a turn that runs long. Kept casual and in
 # Iris's voice; one is picked at random so a slow stretch does not read like a
@@ -251,10 +251,40 @@ def build_client(config: Config, agent: Agent):
         conversation_id = f"discord:{message.channel.id}"
         prompt = _clean_content(message)
 
-        if prompt in RESET_COMMANDS:
-            agent.reset(conversation_id)
-            runners.pop(conversation_id, None)  # drop any queued-but-unsent turns
-            await message.channel.send("Started a fresh conversation.")
+        # Bang commands (!usage, !jobs, !stop, ...) are a zero-inference control
+        # plane: handled here, before the brain ever runs, and never submitted
+        # to a turn. parse() returns None for ordinary messages and for unknown
+        # !words, so real messages fall straight through.
+        cmd = commands.parse(prompt)
+        if cmd is not None:
+            def _reset() -> None:
+                agent.reset(conversation_id)
+                runners.pop(conversation_id, None)  # drop queued-but-unsent turns
+
+            def _stop() -> str:
+                runner = runners.pop(conversation_id, None)
+                if runner is not None and runner.cancel():
+                    return ("Okay - dropped the queued messages and I won't send the "
+                            "reply I'm working on. (A chat reply finishes in the "
+                            "background; to stop a running job, use !stop <id>.)")
+                return "Nothing is running here right now."
+
+            def _status_fields() -> dict:
+                runner = runners.get(conversation_id)
+                return {
+                    "busy": bool(runner and runner.busy),
+                    "pending": runner.pending if runner else 0,
+                    "session_turns": agent.store.turns(conversation_id),
+                }
+
+            try:
+                reply = commands.dispatch(cmd, config, reset=_reset, stop=_stop,
+                                          status_fields=_status_fields)
+            except Exception:
+                log.warning("command %s failed", cmd.name, exc_info=True)
+                reply = f"Couldn't run !{cmd.name} just now."
+            for piece in chunk_text(reply, DISCORD_LIMIT):
+                await message.channel.send(piece)
             return
 
         task_title = prompt  # the user's words, for naming a thread (before describe)

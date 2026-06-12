@@ -74,3 +74,34 @@ def test_run_command_runs_a_real_subprocess():
     assert rc == 3
     assert "hello" in tail
     assert duration_s >= 0
+
+
+def test_failure_triage_skips_the_model_when_the_credit_guard_is_parked(tmp_path):
+    from iris.config import Config
+    from iris.notify.watch_cmd import watch
+    from iris.usage import UsageLedger
+
+    class Turn:
+        cost_usd = 9.9
+        context_tokens = 0
+
+    config = Config(usage_file=str(tmp_path / "u.json"), usage_budget_usd=10.0,
+                    usage_park_at=95.0, notify_channel="chan", discord_token="tok")
+    UsageLedger(config.usage_file).record("chat", Turn())
+    built = []
+
+    def factory():
+        built.append(True)
+
+        class D:
+            def run(self, *a, **kw):
+                raise AssertionError("the model must not be called at park level")
+        return D()
+
+    sent = []
+    rc = watch(["false"], config, runner=lambda argv: (1, 2.0, "boom"),
+               driver_factory=factory,
+               sender=lambda channel, text, token: sent.append(text) or True)
+    assert rc == 1
+    assert built == []  # the triage driver was never built
+    assert sent and "failed" in sent[0]  # templated line still delivered

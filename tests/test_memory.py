@@ -101,3 +101,55 @@ def test_rank_respects_limit_and_is_deterministic():
 def test_score_returns_none_for_dropped_note():
     assert score(_note(1, "blue"), ["finance"], NOW) is None
     assert score(_note(1, "blue"), [], NOW) is not None  # no query, kept
+
+
+# -- pinned digest (the always-loaded tier) -----------------------------------
+
+
+def _pnote(nid, text, pinned=False, importance=3):
+    return {"id": nid, "text": text, "pinned": pinned, "importance": importance,
+            "created_at": "2026-06-01T00:00:00Z"}
+
+
+def test_pinned_digest_renders_only_pinned():
+    from iris.memory import pinned_digest
+
+    entries = [_pnote(1, "owner prefers metric", pinned=True),
+               _pnote(2, "passing chatter about lunch")]
+    out = pinned_digest(entries, now_ts=1.75e9)
+    assert "owner prefers metric" in out
+    assert "lunch" not in out
+
+
+def test_pinned_digest_empty_when_nothing_pinned():
+    from iris.memory import pinned_digest
+
+    assert pinned_digest([_pnote(1, "unpinned")], now_ts=1.75e9) == ""
+    assert pinned_digest([], now_ts=1.75e9) == ""
+
+
+def test_pinned_digest_orders_by_importance():
+    from iris.memory import pinned_digest
+
+    entries = [_pnote(1, "minor fact", pinned=True, importance=1),
+               _pnote(2, "major fact", pinned=True, importance=5)]
+    out = pinned_digest(entries, now_ts=1.75e9)
+    assert out.index("major fact") < out.index("minor fact")
+
+
+def test_pinned_digest_respects_byte_budget():
+    from iris.memory import pinned_digest
+
+    big = _pnote(1, "x" * 5000, pinned=True, importance=5)
+    small = _pnote(2, "small pinned fact", pinned=True, importance=1)
+    out = pinned_digest([big, small], now_ts=1.75e9, max_bytes=300)
+    # the oversize note is skipped whole; the small one still fits
+    assert "small pinned fact" in out
+    assert "xxxx" not in out
+    assert len(out.encode("utf-8")) <= 300
+
+
+def test_pinned_digest_zero_budget_is_off():
+    from iris.memory import pinned_digest
+
+    assert pinned_digest([_pnote(1, "fact", pinned=True)], now_ts=1.75e9, max_bytes=0) == ""
