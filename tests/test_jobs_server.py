@@ -286,3 +286,58 @@ def test_schedule_job_caps_model_created_rules(sched_env, monkeypatch):
     from iris.schedules import ScheduleStore
 
     assert len(ScheduleStore(sched_env.schedules_file).all()) == 2
+
+
+# -- run_in_background: long compute without a model-turn timeout ---------------
+
+
+@pytest.fixture
+def bg_env(tmp_path, monkeypatch):
+    config = Config(jobs_enabled=True, job_grants=["shell"],
+                    workspaces_file=str(tmp_path / "ws.json"), home_channel="home-1")
+    monkeypatch.setattr(srv, "_CONFIG", config)
+    calls = []
+    monkeypatch.setattr(srv, "_launch_watch", lambda argv, cwd: calls.append((argv, cwd)))
+    return {"config": config, "calls": calls, "tmp": tmp_path}
+
+
+def test_run_in_background_spawns_a_detached_watch(bg_env):
+    out = srv.run_in_background("build_video.sh xqc", label="build xqc")
+    assert "background" in out.lower()
+    argv = bg_env["calls"][0][0]
+    assert "watch" in argv and argv[-1].endswith("build_video.sh xqc")
+    assert argv[argv.index("--name") + 1] == "build xqc"
+
+
+def test_run_in_background_needs_the_shell_grant(bg_env):
+    bg_env["config"].job_grants = []
+    out = srv.run_in_background("anything")
+    assert "shell" in out.lower()
+    assert bg_env["calls"] == []
+
+
+def test_run_in_background_gated_on_jobs(bg_env):
+    bg_env["config"].jobs_enabled = False
+    out = srv.run_in_background("anything")
+    assert "disabled" in out.lower()
+    assert bg_env["calls"] == []
+
+
+def test_run_in_background_runs_in_a_named_workspace(bg_env):
+    from iris.workspaces import WorkspaceStore
+    WorkspaceStore(bg_env["config"].workspaces_file).add("clipper", str(bg_env["tmp"]))
+    srv.run_in_background("./build_video.sh xqc", workspace="clipper")
+    inner = bg_env["calls"][0][0][-1]
+    assert inner.startswith("cd ") and "build_video.sh xqc" in inner
+    assert str(bg_env["tmp"]) in inner
+
+
+def test_run_in_background_unknown_workspace_refuses(bg_env):
+    out = srv.run_in_background("x", workspace="nope")
+    assert "No workspace" in out
+    assert bg_env["calls"] == []
+
+
+def test_run_in_background_empty_command_refuses(bg_env):
+    out = srv.run_in_background("   ")
+    assert bg_env["calls"] == []

@@ -293,6 +293,63 @@ def cancel_schedule(rule_id: int) -> str:
     return f"No schedule #{rule_id}."
 
 
+def _launch_watch(argv, cwd):
+    """Spawn a detached ``iris watch`` (test seam). start_new_session detaches
+    it into its own process group so it survives this turn ending."""
+    import subprocess
+
+    subprocess.Popen(
+        argv, cwd=cwd,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+@mcp.tool()
+def run_in_background(command: str, label: str = "", workspace: str = "") -> str:
+    """Run a long shell command detached and get pinged when it finishes.
+
+    Use this for long COMPUTE that should not occupy a chat turn or a job (both
+    time out): video builds and renders, big downloads, batch processing. The
+    command runs to completion however long it takes - no model turn is held
+    open, so there is no timeout - and the home channel is pinged on success or
+    failure. This is for shell work, not browser work.
+
+    Args:
+        command: the shell command to run.
+        label: a short name for the completion ping.
+        workspace: a registered workspace name to run it in (its directory
+            becomes the working directory; e.g. "clipper" for video builds).
+    """
+    import shlex
+    import sys
+
+    config = _config()
+    if not config.jobs_enabled:
+        return _DISABLED
+    if "shell" not in config.job_grants:
+        return ("Running background commands needs the 'shell' grant in the "
+                "owner's IRIS_JOB_GRANTS ceiling.")
+    if not (command or "").strip():
+        return "Give a command to run."
+    inner = command
+    if workspace:
+        path = _workspaces().resolve(workspace)
+        if path is None:
+            names = ", ".join(_workspaces().list()) or "none registered"
+            return f"No workspace named {workspace!r} (registered: {names})."
+        inner = f"cd {shlex.quote(path)} && {command}"
+    name = ((label or command).strip())[:60]
+    # iris watch runs the command and pings the notify channel on completion
+    # (templated on success, one model call to interpret a failure). It loads
+    # .env from this server's cwd, so spawn with the inherited cwd.
+    argv = [sys.executable, "-m", "iris", "watch", "--name", name, "--", "/bin/sh", "-c", inner]
+    _launch_watch(argv, None)
+    return (f"Started '{name}' in the background. It runs to completion however long "
+            f"it takes (no model turn is held open, so no timeout), and I will ping "
+            f"the home channel when it finishes.")
+
+
 def main() -> None:
     mcp.run()
 
