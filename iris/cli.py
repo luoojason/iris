@@ -292,7 +292,7 @@ def schedule_cmd(config: Config, args) -> int:
                 when=args.at,
                 every=args.every,
                 instructions=args.instructions,
-                command=args.command,
+                command=getattr(args, "script_command", ""),
                 grants=args.grant,
                 workspace=args.workspace,
                 cap=args.cap,
@@ -380,7 +380,11 @@ def main(argv: list[str] | None = None) -> int:
     sc_add.add_argument("--at", required=True, help="first firing: +30m, +2h, +1d, or an ISO datetime (UTC)")
     sc_add.add_argument("--every", default="", help="recurrence: every 30m / 2h / 1d (omit for one-shot)")
     sc_add.add_argument("--instructions", default="", help="the job prompt (a job rule)")
-    sc_add.add_argument("--command", default="", help="a shell command instead (a script rule, zero model calls)")
+    # dest must NOT be the auto-derived "command": that collides with the
+    # top-level subparsers' dest="command" and clobbers the subcommand name,
+    # routing `schedule add --command ...` to the default (Discord) runner.
+    sc_add.add_argument("--command", dest="script_command", default="",
+                        help="a shell command instead (a script rule, zero model calls)")
     sc_add.add_argument("--grant", default="", help="job grants, comma-separated: shell,files")
     sc_add.add_argument("--workspace", default="", help="a registered workspace name")
     sc_add.add_argument("--cap", type=int, default=None, help="monthly fire cap (default IRIS_SCHEDULE_MONTHLY_CAP)")

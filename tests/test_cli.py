@@ -257,3 +257,25 @@ def test_doctor_warns_when_a_workspace_contains_the_state_files(tmp_path, capsys
            probe=False)
     out = capsys.readouterr().out
     assert "everything" in out and "state" in out
+
+
+def test_schedule_add_through_the_real_parser_creates_a_script_rule(tmp_path, monkeypatch):
+    # Regression: the --command option must not collide with the subparser's
+    # own dest="command", or `iris schedule add --command ...` falls through to
+    # the Discord runner instead of recording the rule. Goes through main() so
+    # the real argparse path (not a hand-built Namespace) is exercised.
+    from iris.cli import main
+    from iris.schedules import ScheduleStore
+
+    monkeypatch.chdir(tmp_path)
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_SCHEDULES_FILE", str(tmp_path / "s.json"))
+    rc = main(["schedule", "add", "--title", "backup", "--at", "+1h",
+               "--every", "every 1d", "--command", "echo hi"])
+    assert rc == 0
+    rules = ScheduleStore(tmp_path / "s.json").all()
+    assert len(rules) == 1
+    assert rules[0]["command"] == "echo hi"
+    assert rules[0]["instructions"] == ""
