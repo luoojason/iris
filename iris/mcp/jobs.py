@@ -306,7 +306,8 @@ def _launch_watch(argv, cwd):
 
 
 @mcp.tool()
-def run_in_background(command: str, label: str = "", workspace: str = "") -> str:
+def run_in_background(command: str, label: str = "", workspace: str = "",
+                     autoresume: bool = False) -> str:
     """Run a long shell command detached and get pinged when it finishes.
 
     Use this for long COMPUTE that should not occupy a chat turn or a job (both
@@ -320,6 +321,11 @@ def run_in_background(command: str, label: str = "", workspace: str = "") -> str
         label: a short name for the completion ping.
         workspace: a registered workspace name to run it in (its directory
             becomes the working directory; e.g. "clipper" for video builds).
+        autoresume: set True when this is a step in a chain you should continue
+            on your own - when it finishes, you'll get one follow-up turn in the
+            home channel with the result, so you can do the next step (e.g.
+            schedule the uploads after a build) without the owner poking you.
+            Default False just pings. Inert unless the owner enabled it.
     """
     import shlex
     import sys
@@ -343,12 +349,24 @@ def run_in_background(command: str, label: str = "", workspace: str = "") -> str
     # iris watch runs the command and pings the notify channel on completion
     # (templated on success, one model call to interpret a failure). It loads
     # .env from this server's cwd, so spawn with the inherited cwd.
-    argv = [sys.executable, "-m", "iris", "watch", "--name", name, "--fold",
-            "--", "/bin/sh", "-c", inner]
+    argv = [sys.executable, "-m", "iris", "watch", "--name", name, "--fold"]
+    # Only arm autonomous resume when the owner turned it on AND has a home
+    # channel for the resume to land in — the same three conditions watch checks
+    # before it enqueues. Keeping the argv and the reply honest means the model
+    # is never told the chain self-continues when it actually won't.
+    will_resume = bool(autoresume and config.auto_resume and config.home_channel)
+    if will_resume:
+        argv.append("--resume")
+    argv += ["--", "/bin/sh", "-c", inner]
     _launch_watch(argv, None)
-    return (f"Started '{name}' in the background. It runs to completion however long "
+    base = (f"Started '{name}' in the background. It runs to completion however long "
             f"it takes (no model turn is held open, so no timeout), and I will ping "
             f"the home channel when it finishes.")
+    if will_resume:
+        return base + " When it finishes I'll continue the chain automatically and report back."
+    if autoresume:
+        return base + " (Auto-resume is off, so I'll ping with the result instead of continuing on my own.)"
+    return base
 
 
 def main() -> None:

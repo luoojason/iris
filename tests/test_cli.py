@@ -65,6 +65,21 @@ def test_watch_runs_command_and_returns_its_code(tmp_path, monkeypatch):
     assert seen["name"] == "build"
 
 
+def test_watch_resume_flag_reaches_the_call(tmp_path, monkeypatch):
+    from iris.cli import main
+    import iris.notify.watch_cmd as wc
+    seen = {}
+
+    def fake_watch(argv, config, **kwargs):
+        seen["resume"] = kwargs.get("resume")
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(wc, "watch", fake_watch)
+    main(["watch", "--name", "build", "--fold", "--resume", "--", "true"])
+    assert seen["resume"] is True
+
+
 def test_doctor_reports_missing_binary():
     from iris.cli import doctor
     from iris.config import Config
@@ -80,6 +95,30 @@ def _fake_claude(tmp_path):
     fake.write_text("#!/bin/sh\necho fake-claude 0.0.0\n", encoding="utf-8")
     fake.chmod(0o755)
     return str(fake)
+
+
+def test_doctor_warns_auto_resume_without_home_channel(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    rc = doctor(Config(claude_bin=_fake_claude(tmp_path), auto_resume=True,
+                       home_channel=""), probe=False)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "auto-resume" in out.lower()
+    assert "WARNING" in out
+
+
+def test_doctor_reports_auto_resume_when_configured(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    rc = doctor(Config(claude_bin=_fake_claude(tmp_path), auto_resume=True,
+                       home_channel="123"), probe=False)
+    out = capsys.readouterr().out
+    assert rc == 0
+    line = [ln for ln in out.splitlines() if "auto-resume" in ln.lower()][0]
+    assert "12" in line  # the per-day cap is surfaced
 
 
 def test_doctor_reports_standing_orders(tmp_path, capsys):

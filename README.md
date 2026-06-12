@@ -47,7 +47,9 @@ Discord message ──> Iris ──> claude -p "<message>" --resume <session>
 
 It is **event-driven on purpose.** Iris only calls the model when a message
 arrives, so it burns no idle inference. That is what keeps it inside your monthly
-agent credit rather than draining it in the background.
+agent credit rather than draining it in the background. Two opt-in, off-by-default
+exceptions relax this on a tight leash — scheduled jobs and autonomous resume,
+both described below — and neither can ever start a conversation from nothing.
 
 ## Quickstart
 
@@ -373,6 +375,24 @@ clock-driven work, and never a shell command. Set a usage budget before
 enabling: the credit guard is the aggregate backstop. The brain can read and edit files and run commands in directories
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
+
+### Autonomous resume
+
+`IRIS_AUTO_RESUME=true` (off by default) is the second deliberate relaxation of
+the zero-idle-inference rule. A background command you launched through Iris with
+`run_in_background(autoresume=True)` may, when it finishes, fire **one** follow-up
+turn on the home channel — so a chain like "build the videos, then schedule the
+uploads" carries itself to the next step instead of waiting for you to message
+Iris again. The line it keeps: *a resume exists only because you launched the
+task; the clock still never starts a conversation from nothing.* It is bounded
+off-by-default, armed only per launch, capped per UTC day
+(`IRIS_AUTO_RESUME_MAX_PER_DAY`, default 12), and **dropped** (not fired) when the
+credit guard parks. The finished command (a detached `iris watch --resume`) only
+enqueues a request to a file-backed queue; the **bot process** drains it on a
+poll loop (`IRIS_RESUME_POLL_SECS`, default 20s) and runs the turn through the
+same per-conversation runner as a typed message, so the resume can never race the
+live `claude` session. When a resume is dropped, the ordinary completion note
+still folds into your next message — nothing is lost.
 
 ### Voice messages
 

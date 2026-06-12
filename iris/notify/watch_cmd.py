@@ -112,25 +112,44 @@ def _guard_parked(config) -> bool:
 
 
 def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
-          runner=None, driver_factory=None, sender=None):
+          resume=False, runner=None, driver_factory=None, sender=None):
     """Run the command, decide, compose, deliver. Returns the command's exit code.
 
     With ``fold=True`` a concise completion note is also appended to the
     fold-back inbox, so an Iris-launched background command (run_in_background)
     surfaces in her next turn's context and she can continue the plan with the
-    result in hand. The owner still has to send that next message: nothing here
-    starts a model turn on its own (zero idle inference).
+    result in hand. The owner still has to send that next message: the fold path
+    alone starts no model turn (zero idle inference).
+
+    With ``resume=True`` AND the owner having turned autonomous resume on
+    (``IRIS_AUTO_RESUME``), a resume request is also enqueued so the bot fires
+    one follow-up turn on the home conversation — the chain carries itself
+    forward. This is the bounded relaxation of zero idle inference; it is inert
+    unless both the per-launch flag and the master flag are set.
     """
     exit_code, duration_s, tail = run_command(argv, runner=runner)
     title = name or " ".join(argv)
+    status = "finished" if exit_code == 0 else f"failed (exit {exit_code})"
     if fold and getattr(config, "inbox_file", ""):
-        status = "finished" if exit_code == 0 else f"failed (exit {exit_code})"
         note = f"background command '{title}' {status}."
         if (tail or "").strip():
             note += " Last output: " + (tail or "").strip()[-400:]
         try:
             from ..inbox import Inbox
             Inbox(config.inbox_file).append(note)
+        except Exception:
+            pass
+    if resume and getattr(config, "auto_resume", False) and getattr(config, "home_channel", ""):
+        prompt = (
+            f"[auto] Your background task '{title}' just {status}. "
+            "If the plan has a next step, do it now, then tell me what happened."
+        )
+        if (tail or "").strip():
+            prompt += " Last output: " + (tail or "").strip()[-400:]
+        try:
+            from ..autoresume import ResumeQueue
+            ResumeQueue(config.resume_queue_file).enqueue(
+                f"discord:{config.home_channel}", prompt)
         except Exception:
             pass
     event = Event(

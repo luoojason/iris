@@ -62,7 +62,7 @@ not "free."
   actually arrives (one `claude -p` per message), so it burns **zero idle
   inference**. A naive always-listening process that re-runs a turn on every
   poll timeout would quietly drain the credit; Iris does not work that way.
-- The one deliberate exception is **scheduled jobs** (`IRIS_SCHEDULED_JOBS`,
+- One deliberate exception is **scheduled jobs** (`IRIS_SCHEDULED_JOBS`,
   off by default): the clock may launch work that was recorded verbatim in
   advance — never a conversation, never anything composed at fire time. Two
   recording paths exist: `iris schedule` at the keyboard, and (only if you
@@ -78,6 +78,18 @@ not "free."
   budget (`IRIS_USAGE_BUDGET_USD`) before enabling any of this: the guard's
   park level is the aggregate backstop, and `iris usage` projects your
   month-end pace.
+- The second deliberate exception is **autonomous resume** (`IRIS_AUTO_RESUME`,
+  off by default): a background command *you* launched through Iris with
+  `autoresume=True` may, when it finishes, fire one follow-up turn on the home
+  channel so a chain ("build the videos, then schedule the uploads") carries
+  itself to the next step instead of waiting for you to poke it. It is never
+  inference from nothing — a resume exists only because you launched the task —
+  and it is bounded four ways: off unless you set the flag, armed only per
+  launch, capped per UTC day (`IRIS_AUTO_RESUME_MAX_PER_DAY`, default 12), and
+  dropped (not fired) when the credit guard parks. The follow-up runs in the
+  bot process through the same per-conversation runner as a typed message, so it
+  cannot race the live session. When a resume is dropped, nothing is lost: the
+  ordinary completion note still folds into your next message.
 - To stretch the credit further: use `IRIS_MODEL=claude-haiku-4-5-...` for a
   cheaper brain, keep personas and context lean, and avoid wiring tools that
   balloon the prompt. The `browser` job grant is the heaviest tool Iris can
