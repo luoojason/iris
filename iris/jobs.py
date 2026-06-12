@@ -61,8 +61,10 @@ GRANT_TOOLS = {
     "browser": (),
 }
 
-# How much of a report travels in the fold-back note and the Discord ping.
+# How much of a report folds back into the next chat turn (context economy).
+# The Discord ping carries the FULL report, split across messages.
 REPORT_FOLD_CAP = 1500
+DISCORD_MESSAGE_LIMIT = 2000
 
 _ACTIVE_STATES = ("pending", "running")
 _TERMINAL_STATES = ("done", "failed", "cancelled")
@@ -513,16 +515,22 @@ def run_job(
     token = config.discord_token
 
     def deliver(text: str, problems: list = ()) -> bool:
-        # Truncate the report part first, THEN append problem lines, so a
-        # long report can never push a skip notice out of the message.
-        note = _head(text)
+        # Discord gets the FULL report, split across messages so nothing the job
+        # said is ever cut. The fold-back inbox note stays capped so a long
+        # report cannot blow the next chat turn's context budget.
+        full = (text or "").strip()
         for problem in problems:
-            note += "\n" + problem
+            full += "\n" + str(problem)
         delivered = True
         if channel and token:
-            delivered = bool(send_message(channel, note, token))
-            if not delivered:
-                log.warning("could not ping channel %s for job %s", channel, job_id)
+            from .textutil import chunk_text
+            for piece in chunk_text(full, DISCORD_MESSAGE_LIMIT):
+                if not send_message(channel, piece, token):
+                    delivered = False
+                    log.warning("could not ping channel %s for job %s", channel, job_id)
+        note = _head(text)
+        for problem in problems:
+            note += "\n" + str(problem)
         inbox.append(note)
         return delivered
 

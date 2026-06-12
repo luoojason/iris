@@ -455,9 +455,12 @@ def test_artifact_problems_survive_a_long_report(tmp_path):
     env = runner_env(tmp_path, workspace=ws,
                      result=ClaudeResult(text=long_report, session_id=None, is_error=False))
     assert run_with(env) == 0
-    text = env["pings"][0][1]
-    assert "missing.bin" in text  # the skip note outlives report truncation
-    assert "truncated" in text
+    # delivered in full to Discord (the skip note is never cut)
+    discord = " ".join(t for _, t in env["pings"])
+    assert "missing.bin" in discord
+    # and it survives in the capped fold-back too, after the truncated report
+    folded = env["inbox"].drain()[0]
+    assert "missing.bin" in folded and "truncated" in folded
 
 
 def test_ping_success_marks_report_delivered(tmp_path):
@@ -764,3 +767,17 @@ def test_browser_deny_list_empty_denies_no_mcp_tools(tmp_path):
     # the built-in denylist is untouched by the browser knob
     for tool in job_disallowed(["browser"]):
         assert tool in driver.disallowed_tools
+
+
+def test_run_job_delivers_a_long_report_in_full_across_messages(tmp_path):
+    # The Discord ping must carry the WHOLE report (split across messages),
+    # never cut; only the fold-back into the next chat turn stays capped.
+    report = " ".join(f"line{i}" for i in range(700))  # ~5 KB, well over one message
+    env = runner_env(tmp_path, result=ClaudeResult(text=report, session_id="s", is_error=False))
+    assert run_with(env) == 0
+    joined = " ".join(t for _, t in env["pings"])
+    assert "line0" in joined and "line699" in joined          # head AND tail both delivered
+    assert len(env["pings"]) >= 2                              # split into multiple messages
+    assert all(len(t) <= 2000 for _, t in env["pings"])       # each under the Discord limit
+    folded = env["inbox"].drain()
+    assert len(folded) == 1 and len(folded[0]) <= 1600         # fold-back stays capped
