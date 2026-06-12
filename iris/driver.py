@@ -148,6 +148,10 @@ class ClaudeDriver:
     # orders: durable behavior, not facts). Re-read per command build, so edits
     # take effect on the next turn with no restart.
     standing_orders_file: Optional[str] = None
+    # Called on every command build for an extra system-prompt block (the agent
+    # wires the pinned-memory digest here). Must be cheap; a raising supplier is
+    # logged and skipped so it can never break a turn.
+    system_prompt_extra: Optional[Callable[[], Optional[str]]] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: Optional[Sequence[str]] = None
@@ -253,6 +257,14 @@ class ClaudeDriver:
                 text = ""
             if text:
                 parts.append(text)
+        if self.system_prompt_extra is not None:
+            try:
+                extra = (self.system_prompt_extra() or "").strip()
+            except Exception:
+                log.warning("system prompt extra supplier failed", exc_info=True)
+                extra = ""
+            if extra:
+                parts.append(extra)
         return "\n\n".join(parts) if parts else None
 
     def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None) -> ClaudeResult:

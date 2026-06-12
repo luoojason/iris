@@ -363,3 +363,29 @@ def test_standing_orders_apply_to_the_stream_transport_too(tmp_path):
     d = ClaudeDriver(standing_orders_file=str(orders), runner=make_runner([]))
     cmd = d.build_command(stream=True)
     assert cmd[cmd.index("--append-system-prompt") + 1] == "rule"
+
+
+# -- system prompt extra supplier ---------------------------------------------
+
+
+def test_system_prompt_extra_is_merged_last(tmp_path):
+    orders = tmp_path / "orders.md"
+    orders.write_text("rules first", encoding="utf-8")
+    d = ClaudeDriver(
+        standing_orders_file=str(orders),
+        system_prompt_extra=lambda: "digest last",
+        runner=make_runner([]),
+    )
+    cmd = d.build_command()
+    value = cmd[cmd.index("--append-system-prompt") + 1]
+    assert value.index("rules first") < value.index("digest last")
+    assert cmd.count("--append-system-prompt") == 1
+
+
+def test_system_prompt_extra_failure_never_breaks_a_turn():
+    def boom():
+        raise RuntimeError("store unreadable")
+
+    d = ClaudeDriver(system_prompt_extra=boom, runner=make_runner([]))
+    cmd = d.build_command()  # must not raise
+    assert "--append-system-prompt" not in cmd

@@ -38,6 +38,34 @@ SEED_TEMPLATE = (
 )
 
 
+def _memory_digest_supplier(path: str, max_bytes: int, guard=None):
+    """A per-turn supplier of the pinned-memory block for the system prompt.
+
+    Reads the memory store fresh each turn — the model pins and unpins through
+    the MCP tool while the bot runs — and halves the byte budget while the
+    credit guard is running hot. Never raises: a missing or broken store reads
+    as no digest, and the next turn proceeds without it.
+    """
+    import json
+    from pathlib import Path
+
+    from .memory import pinned_digest
+
+    def supply() -> str:
+        try:
+            entries = json.loads(Path(path).read_text("utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(entries, list):
+            return ""
+        budget = max_bytes
+        if guard is not None and guard.level() in ("tighten", "park"):
+            budget = max_bytes // 2
+        return pinned_digest(entries, time.time(), budget)
+
+    return supply
+
+
 def _fold_prompt(entries: list[str], text: str) -> str:
     """Prefix a turn's prompt with the notes background work left behind."""
     notes = "\n".join(f"- {entry}" for entry in entries)
@@ -341,6 +369,12 @@ class Agent:
         inbox = Inbox(config.inbox_file)
         from .usage import CreditGuard
         guard = CreditGuard.from_config(config)
+        # The pinned-memory digest: tier-0 memory the model never has to ask
+        # for. Wired after the guard exists so a hot month shrinks the block.
+        if config.memory_file and config.memory_digest_bytes > 0:
+            driver.system_prompt_extra = _memory_digest_supplier(
+                config.memory_file, config.memory_digest_bytes, guard
+            )
         return cls(
             driver,
             store,

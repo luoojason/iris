@@ -133,6 +133,12 @@ class Config:
     usage_ping_at: list[float] = field(default_factory=lambda: [50.0, 80.0, 95.0])
     tighten_factor: float = 3.0
 
+    # The memory tool's store, and the byte budget for the pinned-memory digest
+    # rendered into the system prompt every turn (0 = no digest). The budget
+    # halves while the credit guard is running hot.
+    memory_file: str = "iris-memory.json"
+    memory_digest_bytes: int = 2400
+
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
@@ -218,6 +224,8 @@ class Config:
             usage_park_at=float(os.environ.get("IRIS_USAGE_PARK_AT", "95")),
             usage_ping_at=[float(v) for v in _split(os.environ.get("IRIS_USAGE_PING_AT")) or ["50", "80", "95"]],
             tighten_factor=float(os.environ.get("IRIS_TIGHTEN_FACTOR", "3")),
+            memory_file=os.environ.get("IRIS_MEMORY_FILE", "iris-memory.json"),
+            memory_digest_bytes=int(os.environ.get("IRIS_MEMORY_DIGEST_BYTES", "2400")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),

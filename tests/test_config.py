@@ -130,3 +130,23 @@ def test_standing_orders_file_defaults_to_none(tmp_path, monkeypatch):
             monkeypatch.delenv(key, raising=False)
     cfg = Config.from_env(dotenv=tmp_path / "none.env")
     assert cfg.standing_orders_file is None
+
+
+def test_from_env_reads_memory_digest_knobs(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_MEMORY_FILE", "m.json")
+    monkeypatch.setenv("IRIS_MEMORY_DIGEST_BYTES", "1200")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.memory_file == "m.json"
+    assert cfg.memory_digest_bytes == 1200
+
+
+def test_memory_digest_defaults(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.memory_file == "iris-memory.json"
+    assert cfg.memory_digest_bytes == 2400
