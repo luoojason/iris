@@ -72,3 +72,58 @@ def test_doctor_reports_missing_binary():
     # A bogus binary name: doctor must fail cleanly without any network call.
     rc = doctor(Config(claude_bin="iris-no-such-claude-binary"), probe=False)
     assert rc == 1
+
+
+def _fake_claude(tmp_path):
+    """A stand-in 'claude' executable so doctor's local checks pass offline."""
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\necho fake-claude 0.0.0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    return str(fake)
+
+
+def test_doctor_reports_standing_orders(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    orders = tmp_path / "orders.md"
+    orders.write_text("Always answer in metric.", encoding="utf-8")
+    rc = doctor(
+        Config(claude_bin=_fake_claude(tmp_path), standing_orders_file=str(orders)),
+        probe=False,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "standing orders" in out
+    assert "WARNING" not in out.split("standing orders")[1].split("\n")[0]
+
+
+def test_doctor_warns_on_oversize_standing_orders(tmp_path, capsys):
+    # Every standing-orders byte is re-billed on every turn; flag a bloated file.
+    from iris.cli import doctor
+    from iris.config import Config
+
+    orders = tmp_path / "orders.md"
+    orders.write_text("x" * 3000, encoding="utf-8")
+    doctor(
+        Config(claude_bin=_fake_claude(tmp_path), standing_orders_file=str(orders)),
+        probe=False,
+    )
+    out = capsys.readouterr().out
+    assert "standing orders" in out
+    assert "2KB" in out or "2 KB" in out
+
+
+def test_doctor_flags_missing_standing_orders_file(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    doctor(
+        Config(
+            claude_bin=_fake_claude(tmp_path),
+            standing_orders_file=str(tmp_path / "absent.md"),
+        ),
+        probe=False,
+    )
+    out = capsys.readouterr().out
+    assert "standing orders" in out and "MISSING" in out

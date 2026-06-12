@@ -307,3 +307,59 @@ def test_child_pid_callback_errors_do_not_break_the_turn(monkeypatch):
 
     result = ClaudeDriver(child_pid_callback=explode).run("hi")
     assert not result.is_error
+
+
+# -- standing orders ----------------------------------------------------------
+
+
+def test_standing_orders_content_is_appended(tmp_path):
+    orders = tmp_path / "orders.md"
+    orders.write_text("Always answer in metric.", encoding="utf-8")
+    d = ClaudeDriver(standing_orders_file=str(orders), runner=make_runner([]))
+    cmd = d.build_command()
+    assert cmd[cmd.index("--append-system-prompt") + 1] == "Always answer in metric."
+
+
+def test_standing_orders_reread_on_every_command(tmp_path):
+    # Edits take effect on the next turn with no restart.
+    orders = tmp_path / "orders.md"
+    orders.write_text("rule one", encoding="utf-8")
+    d = ClaudeDriver(standing_orders_file=str(orders), runner=make_runner([]))
+    first = d.build_command()
+    orders.write_text("rule two", encoding="utf-8")
+    second = d.build_command()
+    assert first[first.index("--append-system-prompt") + 1] == "rule one"
+    assert second[second.index("--append-system-prompt") + 1] == "rule two"
+
+
+def test_standing_orders_concatenate_after_static_append(tmp_path):
+    orders = tmp_path / "orders.md"
+    orders.write_text("orders text", encoding="utf-8")
+    d = ClaudeDriver(
+        append_system_prompt="static text",
+        standing_orders_file=str(orders),
+        runner=make_runner([]),
+    )
+    cmd = d.build_command()
+    assert cmd.count("--append-system-prompt") == 1  # one flag, merged value
+    value = cmd[cmd.index("--append-system-prompt") + 1]
+    assert value.startswith("static text")
+    assert value.endswith("orders text")
+
+
+def test_standing_orders_missing_or_blank_file_is_skipped(tmp_path):
+    d = ClaudeDriver(standing_orders_file=str(tmp_path / "absent.md"), runner=make_runner([]))
+    assert "--append-system-prompt" not in d.build_command()
+    blank = tmp_path / "blank.md"
+    blank.write_text("  \n\n", encoding="utf-8")
+    d2 = ClaudeDriver(standing_orders_file=str(blank), runner=make_runner([]))
+    assert "--append-system-prompt" not in d2.build_command()
+
+
+def test_standing_orders_apply_to_the_stream_transport_too(tmp_path):
+    # Both transports must stay in lockstep, hardening and persona alike.
+    orders = tmp_path / "orders.md"
+    orders.write_text("rule", encoding="utf-8")
+    d = ClaudeDriver(standing_orders_file=str(orders), runner=make_runner([]))
+    cmd = d.build_command(stream=True)
+    assert cmd[cmd.index("--append-system-prompt") + 1] == "rule"

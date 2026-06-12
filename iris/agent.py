@@ -313,6 +313,7 @@ class Agent:
             claude_bin=config.claude_bin,
             model=config.model,
             append_system_prompt_file=config.persona_file,
+            standing_orders_file=config.standing_orders_file,
             mcp_config=config.mcp_config,
             permission_mode=config.permission_mode,
             allowed_tools=config.allowed_tools or None,

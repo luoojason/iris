@@ -113,3 +113,20 @@ def test_notify_defaults():
     assert cfg.notify_channel == ""
     assert cfg.watch_min_seconds == 30.0
     assert cfg.notify_persona is None
+
+
+def test_from_env_reads_standing_orders_file(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_STANDING_ORDERS_FILE", "orders.md")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.standing_orders_file == "orders.md"
+
+
+def test_standing_orders_file_defaults_to_none(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.standing_orders_file is None

@@ -94,6 +94,20 @@ def doctor(config: Config, probe: bool = True) -> int:
         print(f"  signed in (model: {res.model or 'claude default'})")
     print(f"model: {config.model or '(claude default)'}")
     print(f"persona: {config.persona_file or '(none)'}")
+    if config.standing_orders_file:
+        from pathlib import Path
+
+        orders = Path(config.standing_orders_file)
+        if not orders.exists():
+            print(f"standing orders: MISSING file {config.standing_orders_file}")
+        else:
+            size = orders.stat().st_size
+            print(f"standing orders: {config.standing_orders_file} ({size} bytes)")
+            if size > 2048:
+                print("WARNING: standing orders are over 2KB. Every byte is appended to")
+                print("  the system prompt and re-billed on every turn; trim the file.")
+    else:
+        print("standing orders: (none)")
     print(f"mcp tools: {config.mcp_config or '(none)'}")
     print(f"allowed tools: {', '.join(config.allowed_tools) if config.allowed_tools else '(none)'}")
     print(f"voice transcription: {'on (' + config.voice_model + ')' if config.voice_enabled else 'off'}")

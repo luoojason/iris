@@ -408,3 +408,13 @@ def test_raising_driver_restores_inbox_entries(tmp_path):
     with pytest.raises(ClaudeError):
         agent.respond("c1", "hello")
     assert box.drain() == ["job #5 finished: do not lose me"]
+
+
+def test_from_config_wires_standing_orders(tmp_path):
+    from iris.config import Config
+    cfg = Config(
+        session_store_path=str(tmp_path / "s.json"),
+        standing_orders_file=str(tmp_path / "orders.md"),
+    )
+    agent = Agent.from_config(cfg)
+    assert agent.driver.standing_orders_file == cfg.standing_orders_file

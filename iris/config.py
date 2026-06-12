@@ -65,6 +65,9 @@ class Config:
     # (if it also clears the other trivial checks). Raise to route more aggressively.
     trivial_max_chars: int = 140
     persona_file: Optional[str] = None
+    # Owner-edited standing orders (durable rules, not facts) appended to the
+    # system prompt every turn. Keep it small: every byte is re-billed per turn.
+    standing_orders_file: Optional[str] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: list[str] = field(default_factory=list)
@@ -182,6 +185,7 @@ class Config:
             light_model=os.environ.get("IRIS_MODEL_LIGHT", ""),
             trivial_max_chars=int(os.environ.get("IRIS_TRIVIAL_MAX_CHARS", "140")),
             persona_file=os.environ.get("IRIS_PERSONA_FILE") or None,
+            standing_orders_file=os.environ.get("IRIS_STANDING_ORDERS_FILE") or None,
             mcp_config=os.environ.get("IRIS_MCP_CONFIG") or None,
             permission_mode=os.environ.get("IRIS_PERMISSION_MODE", "default"),
             allowed_tools=_split(os.environ.get("IRIS_ALLOWED_TOOLS")),

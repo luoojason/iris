@@ -38,6 +38,7 @@ import os
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -143,6 +144,10 @@ class ClaudeDriver:
     model: Optional[str] = None
     append_system_prompt_file: Optional[str] = None
     append_system_prompt: Optional[str] = None
+    # Owner-edited rules appended to the system prompt on every turn (standing
+    # orders: durable behavior, not facts). Re-read per command build, so edits
+    # take effect on the next turn with no restart.
+    standing_orders_file: Optional[str] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: Optional[Sequence[str]] = None
@@ -212,8 +217,9 @@ class ClaudeDriver:
             cmd += ["--model", chosen_model]
         if self.append_system_prompt_file:
             cmd += ["--append-system-prompt-file", self.append_system_prompt_file]
-        if self.append_system_prompt:
-            cmd += ["--append-system-prompt", self.append_system_prompt]
+        appended = self._append_system_prompt_value()
+        if appended:
+            cmd += ["--append-system-prompt", appended]
         if self.mcp_config:
             # --strict-mcp-config so the bot uses only our tools, not whatever
             # MCP servers the operator happens to have in ~/.claude.json.
@@ -228,6 +234,26 @@ class ClaudeDriver:
         for directory in self.add_dirs or []:
             cmd += ["--add-dir", directory]
         return cmd
+
+    def _append_system_prompt_value(self) -> Optional[str]:
+        """The merged ``--append-system-prompt`` value: static text + standing orders.
+
+        Merged into one flag value (the CLI takes the option once); the standing
+        orders file is read fresh on every call so the owner can edit it live.
+        An unreadable file degrades to a warning, never a failed turn.
+        """
+        parts = []
+        if self.append_system_prompt:
+            parts.append(self.append_system_prompt)
+        if self.standing_orders_file:
+            try:
+                text = Path(self.standing_orders_file).read_text("utf-8").strip()
+            except OSError:
+                log.warning("standing orders file unreadable: %s", self.standing_orders_file)
+                text = ""
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts) if parts else None
 
     def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None) -> ClaudeResult:
         """Run one turn, retrying transient failures (rate limits, overload).
