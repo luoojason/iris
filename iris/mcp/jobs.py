@@ -204,6 +204,75 @@ def resume_job(job_id: int) -> str:
     return f"Resumed job #{job_id} ({job['title']})."
 
 
+_SCHEDULES_DISABLED = ("Scheduled jobs are disabled. The owner can set "
+                       "IRIS_SCHEDULED_JOBS=true (jobs too: IRIS_JOBS=true).")
+
+
+def _schedule_store():
+    from iris.schedules import ScheduleStore
+
+    return ScheduleStore(_config().schedules_file)
+
+
+@mcp.tool()
+def schedule_job(title: str, instructions: str, when: str, every: str = "",
+                 grants: str = "", workspace: str = "") -> str:
+    """Record a scheduled job: the clock will launch it as a background job.
+
+    Only schedule what the owner explicitly asked to have run on a clock; the
+    instructions are recorded verbatim and fire without further review. Each
+    firing is a normal background job (grants clamped, credit-guard parked,
+    capped per month).
+
+    Args:
+        title: A short label for the schedule.
+        when: First firing: +30m, +2h, +1d, or an ISO datetime (UTC).
+        every: Recurrence: 'every 30m', 'every 2h', 'every 1d'. Omit for one-shot.
+        instructions: The full prompt the scheduled job will run.
+        grants: Extra capabilities, comma-separated: 'shell', 'files'.
+        workspace: A registered workspace name the job may work in.
+    """
+    config = _config()
+    if not (config.jobs_enabled and config.scheduled_jobs_enabled):
+        return _SCHEDULES_DISABLED
+    from iris.schedules import add_rule, describe_rule
+
+    try:
+        rule = add_rule(
+            _schedule_store(), title=title, when=when, every=every,
+            instructions=instructions, grants=grants, workspace=workspace,
+            created_by="model", default_cap=config.schedule_monthly_cap,
+        )
+    except ValueError as exc:
+        return str(exc)
+    return f"Recorded schedule {describe_rule(rule)}"
+
+
+@mcp.tool()
+def list_schedules() -> str:
+    """List the recorded schedule rules."""
+    config = _config()
+    if not (config.jobs_enabled and config.scheduled_jobs_enabled):
+        return _SCHEDULES_DISABLED
+    from iris.schedules import describe_rule
+
+    rules = _schedule_store().all()
+    if not rules:
+        return "No schedules recorded."
+    return "\n".join(describe_rule(rule) for rule in rules)
+
+
+@mcp.tool()
+def cancel_schedule(rule_id: int) -> str:
+    """Remove a schedule rule by id."""
+    config = _config()
+    if not (config.jobs_enabled and config.scheduled_jobs_enabled):
+        return _SCHEDULES_DISABLED
+    if _schedule_store().remove(rule_id):
+        return f"Cancelled schedule #{rule_id}."
+    return f"No schedule #{rule_id}."
+
+
 def main() -> None:
     mcp.run()
 

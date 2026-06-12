@@ -113,6 +113,14 @@ class Config:
     # The owner's recorded home channel (job pings, artifact uploads).
     home_channel: str = ""
 
+    # Scheduled jobs: the one place the clock may start work, and only work
+    # the owner pre-recorded verbatim (see iris/schedules.py). Off by default,
+    # gated separately from IRIS_JOBS. schedule_monthly_cap is the default
+    # per-rule monthly fire cap (a rule can set its own).
+    scheduled_jobs_enabled: bool = False
+    schedules_file: str = "iris-schedules.json"
+    schedule_monthly_cap: int = 62
+
     # The owner's wiki vault (Obsidian-style). Empty disables the wiki tools.
     wiki_dir: str = ""
 
@@ -214,6 +222,9 @@ class Config:
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
+            scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),
+            schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
+            schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),
             wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
             wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
             wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),

@@ -121,6 +121,23 @@ def record_turn(path: str, source: str, result) -> None:
         log.warning("could not record usage for source %s", source, exc_info=True)
 
 
+def month_pace(cost: float, now: Optional[float] = None) -> tuple[float, int, int]:
+    """Linear month-end projection: (projected_cost, day_of_month, days_in_month).
+
+    Elapsed time is floored at one full day so the first hours of a month do
+    not project a few cents into a thousand-dollar scare.
+    """
+    import calendar
+
+    now = time.time() if now is None else now
+    dt = datetime.fromtimestamp(now, timezone.utc)
+    days_in_month = calendar.monthrange(dt.year, dt.month)[1]
+    elapsed_days = (dt.day - 1) + (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
+    elapsed_days = max(elapsed_days, 1.0)
+    projected = cost * days_in_month / elapsed_days
+    return projected, dt.day, days_in_month
+
+
 def percent_used(entry: dict, budget: float) -> float:
     """Percent of the monthly budget spent; 0 when no budget is configured."""
     if not budget or budget <= 0:
@@ -210,6 +227,12 @@ def summary_text(config: Config, now: Optional[float] = None) -> str:
             lines.append("pinged: " + ", ".join(sorted(entry["pinged"], key=float)) + "%")
     else:
         lines.append(f"spend: ${entry['cost_usd']:.2f} (no budget set; the guard is off)")
+    if entry.get("cost_usd", 0) > 0:
+        projected, day, days = month_pace(float(entry["cost_usd"]), now)
+        pace = f"pace: ${projected:.2f} by month end (day {day} of {days})"
+        if config.usage_budget_usd > 0:
+            pace += " — over budget" if projected > config.usage_budget_usd else " — within budget"
+        lines.append(pace)
     if entry.get("by_source"):
         parts = [f"{src} ${cost:.2f}" for src, cost in sorted(entry["by_source"].items())]
         lines.append("by source: " + ", ".join(parts))
@@ -235,9 +258,11 @@ def budget_tick(config: Config, now: Optional[float] = None, send=None) -> str:
     for threshold in sorted(config.usage_ping_at):
         if pct < threshold or f"{threshold:g}" in pinged:
             continue
+        projected, _, _ = month_pace(float(entry.get("cost_usd", 0.0)), now)
         text = (
             f"credit guard: {pct:.0f}% of the ${config.usage_budget_usd:.2f} "
-            f"monthly budget is used (crossed {threshold:g}%)"
+            f"monthly budget is used (crossed {threshold:g}%); "
+            f"on pace for ${projected:.0f} by month end"
         )
         if channel and config.discord_token and send(channel, text, config.discord_token):
             ledger.mark_pinged(threshold, now)

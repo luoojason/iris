@@ -156,3 +156,73 @@ def test_reminders_tick_renders_followups_and_requeues_failures(tmp_path, monkey
     assert followup.startswith("Follow-up")
     requeued = store.all()
     assert len(requeued) == 1 and requeued[0]["text"] == "stand up"
+
+
+def test_reminders_tick_runs_the_schedules_tick(tmp_path, monkeypatch, capsys):
+    from iris.cli import reminders_tick
+    from iris.config import Config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("IRIS_REMINDERS_FILE", str(tmp_path / "r.json"))
+    rc = reminders_tick(Config(discord_token="tok", usage_file=str(tmp_path / "u.json"),
+                               wakes_file=str(tmp_path / "w.json"),
+                               wakes_state=str(tmp_path / "w.state.json"),
+                               schedules_file=str(tmp_path / "s.json")))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "schedules: off" in out  # gated off by default, but the hook runs
+
+
+def test_schedule_cmd_add_list_remove(tmp_path, capsys):
+    import argparse
+
+    from iris.cli import schedule_cmd
+    from iris.config import Config
+
+    config = Config(schedules_file=str(tmp_path / "s.json"),
+                    scheduled_jobs_enabled=True, jobs_enabled=True)
+
+    def ns(**kw):
+        return argparse.Namespace(**kw)
+
+    rc = schedule_cmd(config, ns(schedule_action="add", title="briefing",
+                                 at="+1h", every="every 1d",
+                                 instructions="morning briefing", command="",
+                                 grant="", workspace="", cap=None))
+    assert rc == 0
+    rc = schedule_cmd(config, ns(schedule_action="list"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "briefing" in out and "#1" in out
+    rc = schedule_cmd(config, ns(schedule_action="remove", rule_id=1))
+    assert rc == 0
+    schedule_cmd(config, ns(schedule_action="list"))
+    assert "No schedules" in capsys.readouterr().out
+
+
+def test_schedule_cmd_warns_when_the_flag_is_off(tmp_path, capsys):
+    import argparse
+
+    from iris.cli import schedule_cmd
+    from iris.config import Config
+
+    config = Config(schedules_file=str(tmp_path / "s.json"))
+    rc = schedule_cmd(config, argparse.Namespace(
+        schedule_action="add", title="t", at="+1h", every="",
+        instructions="do", command="", grant="", workspace="", cap=None))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "IRIS_SCHEDULED_JOBS" in out  # recorded, but inert until enabled
+
+
+def test_schedule_cmd_rejects_bad_rules(tmp_path, capsys):
+    import argparse
+
+    from iris.cli import schedule_cmd
+    from iris.config import Config
+
+    config = Config(schedules_file=str(tmp_path / "s.json"))
+    rc = schedule_cmd(config, argparse.Namespace(
+        schedule_action="add", title="t", at="+1h", every="",
+        instructions="", command="", grant="", workspace="", cap=None))
+    assert rc == 2

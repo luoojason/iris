@@ -210,6 +210,11 @@ def reminders_tick(config: Config) -> int:
         print(tick_wakes(config))
     except Exception as exc:
         print(f"wakes tick failed: {exc}")
+    try:
+        from .schedules import tick_schedules
+        print(tick_schedules(config))
+    except Exception as exc:
+        print(f"schedules tick failed: {exc}")
     return 0
 
 
@@ -246,6 +251,52 @@ def workspaces_cmd(config: Config, action: str, name: str = "", path: str = "") 
         return 0
     for ws_name, ws_path in items.items():
         print(f"{ws_name} -> {ws_path}")
+    return 0
+
+
+def schedule_cmd(config: Config, args) -> int:
+    """Owner-side authoring of scheduled jobs (the clock may start these)."""
+    from .schedules import ScheduleStore, add_rule, describe_rule
+
+    store = ScheduleStore(config.schedules_file)
+    action = getattr(args, "schedule_action", None) or "list"
+    if action == "add":
+        try:
+            rule = add_rule(
+                store,
+                title=args.title,
+                when=args.at,
+                every=args.every,
+                instructions=args.instructions,
+                command=args.command,
+                grants=args.grant,
+                workspace=args.workspace,
+                cap=args.cap,
+                default_cap=config.schedule_monthly_cap,
+            )
+        except ValueError as exc:
+            print(f"schedule add: {exc}")
+            return 2
+        print(f"Recorded schedule {describe_rule(rule)}")
+        if not config.scheduled_jobs_enabled:
+            print("Note: IRIS_SCHEDULED_JOBS is not set, so this rule is inert "
+                  "until you enable it (and restart the reminders timer).")
+        return 0
+    if action == "remove":
+        if store.remove(args.rule_id):
+            print(f"Removed schedule #{args.rule_id}.")
+            return 0
+        print(f"No schedule #{args.rule_id}.")
+        return 1
+    rules = store.all()
+    if not rules:
+        print("No schedules recorded. Add one with: iris schedule add "
+              "--title <t> --at <when> [--every 1d] --instructions <prompt>")
+        return 0
+    for rule in rules:
+        print(describe_rule(rule))
+    if not config.scheduled_jobs_enabled:
+        print("(IRIS_SCHEDULED_JOBS is off: nothing fires.)")
     return 0
 
 
@@ -298,6 +349,20 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("job_id", type=int)
     js_prune = jobs_sub.add_parser("prune", help="drop old terminal jobs")
     js_prune.add_argument("--keep", type=int, default=None)
+    sched_parser = sub.add_parser("schedule", help="owner-authored scheduled jobs (the clock may start these)")
+    sched_sub = sched_parser.add_subparsers(dest="schedule_action")
+    sc_add = sched_sub.add_parser("add", help="record a schedule rule")
+    sc_add.add_argument("--title", required=True)
+    sc_add.add_argument("--at", required=True, help="first firing: +30m, +2h, +1d, or an ISO datetime (UTC)")
+    sc_add.add_argument("--every", default="", help="recurrence: every 30m / 2h / 1d (omit for one-shot)")
+    sc_add.add_argument("--instructions", default="", help="the job prompt (a job rule)")
+    sc_add.add_argument("--command", default="", help="a shell command instead (a script rule, zero model calls)")
+    sc_add.add_argument("--grant", default="", help="job grants, comma-separated: shell,files")
+    sc_add.add_argument("--workspace", default="", help="a registered workspace name")
+    sc_add.add_argument("--cap", type=int, default=None, help="monthly fire cap (default IRIS_SCHEDULE_MONTHLY_CAP)")
+    sc_remove = sched_sub.add_parser("remove", help="remove a schedule rule")
+    sc_remove.add_argument("rule_id", type=int)
+    sched_sub.add_parser("list", help="list schedule rules (default)")
     ws_parser = sub.add_parser("workspaces", help="manage the directories jobs may work in")
     ws_sub = ws_parser.add_subparsers(dest="ws_action")
     ws_add = ws_sub.add_parser("add", help="register a directory under a name")
@@ -352,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
         return reminders_tick(config)
     if command == "usage":
         return usage_cmd(config)
+    if command == "schedule":
+        return schedule_cmd(config, args)
     if command == "workspaces":
         return workspaces_cmd(
             config, args.ws_action,

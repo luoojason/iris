@@ -285,7 +285,25 @@ Run the tick every minute, e.g. with cron:
 * * * * * cd /path/to/iris && IRIS_DISCORD_TOKEN=... /path/to/venv/bin/python -m iris reminders-tick
 ```
 
-or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set them. The brain can read and edit files and run commands in directories
+or a systemd timer. Allowlist the `mcp__reminders__*` tools to let the agent set them.
+
+### Scheduled jobs
+
+`IRIS_SCHEDULED_JOBS=true` (off by default, separate from `IRIS_JOBS`) lets
+the reminders tick launch **owner-authored** background jobs on a schedule —
+a morning briefing, a nightly repo check. This is the one deliberate
+relaxation of the zero-idle-inference rule, and the line it keeps is: *the
+clock may start a job you recorded verbatim; it may never start a
+conversation or anything you didn't write down.* Rules are authored with
+`iris schedule add --title briefing --at 2026-06-13T07:30:00Z --every 1d
+--instructions "..."` (or `--command` for a zero-model script run through
+`iris watch`),
+live in their own store the reminders tool cannot write, and every firing
+goes through the same gated launch path as every other job: grants
+re-clamped to `IRIS_JOB_GRANTS`, parked when the credit guard is hot,
+admission-capped, plus a per-rule monthly fire cap and a no-overlap guard.
+The chat tools (`mcp__jobs__schedule_job`, `list_schedules`,
+`cancel_schedule`) can record rules too, when you ask in Discord. The brain can read and edit files and run commands in directories
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 

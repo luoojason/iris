@@ -415,3 +415,71 @@ def test_guard_parks_at_exactly_park_at(tmp_path):
     guard = CreditGuard.from_config(config)
     UsageLedger(config.usage_file).record("chat", result(cost=9.5))  # exactly 95%
     assert guard.should_park() is True
+
+
+# -- burn-rate forecast --------------------------------------------------------
+
+
+def test_month_pace_projects_linearly():
+    from datetime import datetime, timezone
+
+    from iris.usage import month_pace
+
+    # exactly mid-month in a 30-day month: $50 so far projects to $100
+    mid = datetime(2026, 6, 16, 0, 0, tzinfo=timezone.utc).timestamp()
+    projected, day, days = month_pace(50.0, mid)
+    assert days == 30 and day == 16
+    assert abs(projected - 100.0) < 0.5
+
+
+def test_month_pace_does_not_explode_on_day_one():
+    from datetime import datetime, timezone
+
+    from iris.usage import month_pace
+
+    start = datetime(2026, 6, 1, 0, 30, tzinfo=timezone.utc).timestamp()
+    projected, day, days = month_pace(1.0, start)
+    # floored at one elapsed day: at most cost * days_in_month
+    assert projected <= 1.0 * days + 0.01
+
+
+def test_summary_text_includes_the_pace_line(tmp_path):
+    from datetime import datetime, timezone
+
+    from iris.config import Config
+    from iris.usage import UsageLedger, summary_text
+
+    mid = datetime(2026, 6, 16, 0, 0, tzinfo=timezone.utc).timestamp()
+
+    class Turn:
+        cost_usd = 50.0
+        context_tokens = 10
+
+    config = Config(usage_file=str(tmp_path / "u.json"), usage_budget_usd=80.0)
+    UsageLedger(config.usage_file).record("chat", Turn(), now=mid)
+    out = summary_text(config, now=mid)
+    assert "pace" in out
+    assert "$100" in out
+    assert "over budget" in out
+
+
+def test_budget_tick_ping_includes_the_pace(tmp_path):
+    from datetime import datetime, timezone
+
+    from iris.config import Config
+    from iris.usage import UsageLedger, budget_tick
+
+    mid = datetime(2026, 6, 16, 0, 0, tzinfo=timezone.utc).timestamp()
+
+    class Turn:
+        cost_usd = 50.0
+        context_tokens = 10
+
+    config = Config(
+        usage_file=str(tmp_path / "u.json"), usage_budget_usd=80.0,
+        usage_ping_at=[50.0], home_channel="home-1", discord_token="tok",
+    )
+    UsageLedger(config.usage_file).record("chat", Turn(), now=mid)
+    sent = []
+    budget_tick(config, now=mid, send=lambda ch, text, tok: sent.append(text) or True)
+    assert sent and "on pace for" in sent[0]
