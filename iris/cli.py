@@ -159,6 +159,14 @@ def doctor(config: Config, probe: bool = True) -> int:
             print("WARNING: 'browser' is in IRIS_JOB_GRANTS but npx is not on PATH,")
             print("  so the Playwright MCP server cannot launch. Install Node.js, or")
             print("  point IRIS_BROWSER_MCP_CMD at a working launch command.")
+    if config.auto_resume:
+        if config.home_channel:
+            print(f"auto-resume: on (home channel {config.home_channel}, "
+                  f"max {config.auto_resume_max_per_day}/day, dropped when parked)")
+        else:
+            print("WARNING: IRIS_AUTO_RESUME is on but IRIS_DISCORD_HOME_CHANNEL is")
+            print("  empty, so a finished background task has nowhere to resume and")
+            print("  auto-resume will silently do nothing. Set the home channel.")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")

@@ -97,6 +97,30 @@ def _fake_claude(tmp_path):
     return str(fake)
 
 
+def test_doctor_warns_auto_resume_without_home_channel(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    rc = doctor(Config(claude_bin=_fake_claude(tmp_path), auto_resume=True,
+                       home_channel=""), probe=False)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "auto-resume" in out.lower()
+    assert "WARNING" in out
+
+
+def test_doctor_reports_auto_resume_when_configured(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    rc = doctor(Config(claude_bin=_fake_claude(tmp_path), auto_resume=True,
+                       home_channel="123"), probe=False)
+    out = capsys.readouterr().out
+    assert rc == 0
+    line = [ln for ln in out.splitlines() if "auto-resume" in ln.lower()][0]
+    assert "12" in line  # the per-day cap is surfaced
+
+
 def test_doctor_reports_standing_orders(tmp_path, capsys):
     from iris.cli import doctor
     from iris.config import Config
