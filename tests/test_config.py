@@ -150,3 +150,18 @@ def test_memory_digest_defaults(tmp_path, monkeypatch):
     cfg = Config.from_env(dotenv=tmp_path / "none.env")
     assert cfg.memory_file == "iris-memory.json"
     assert cfg.memory_digest_bytes == 2400
+
+
+def test_browser_deny_tools_default_and_override(tmp_path, monkeypatch):
+    import os as _os
+    for key in list(_os.environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.browser_deny_tools == ["browser_evaluate", "browser_run_code_unsafe"]
+    monkeypatch.setenv("IRIS_BROWSER_DENY_TOOLS", "browser_evaluate")
+    cfg2 = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg2.browser_deny_tools == ["browser_evaluate"]
+    monkeypatch.setenv("IRIS_BROWSER_DENY_TOOLS", "")  # explicit empty = deny none
+    cfg3 = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg3.browser_deny_tools == []

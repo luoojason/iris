@@ -213,14 +213,31 @@ with a `jobs` server entry in your MCP config
   `DANGEROUS_BUILTINS` (an explicit denylist replaces the default, so it must
   track the source of truth).
 - **The browser grant.** `browser` wires the official Playwright MCP server
-  into the job (needs Node/npx; `iris doctor` checks). The browser runs
-  headless with its own persistent profile (`IRIS_BROWSER_PROFILE_DIR`) — an
-  agent-owned cookie jar, never your real browser profile — and the job's
-  strict MCP config exposes nothing else. Two cautions: browser turns are
-  token-heavy (snapshots bill like big pastes), and any site the profile is
-  logged into is reachable by whoever can start jobs, so keep the bot
-  locked to your own user id. Logged-in browsing is for your own accounts
-  only.
+  into the job (needs Node/npx; `iris doctor` checks). The browser drives a
+  real Chromium with its own **persistent profile**
+  (`IRIS_BROWSER_PROFILE_DIR`) — an agent-owned cookie jar, never your real
+  browser profile — and the job's strict MCP config exposes nothing else. The
+  deny list (`IRIS_BROWSER_DENY_TOOLS`) blocks only in-page code execution by
+  default; file upload is allowed so the agent can do what a person does.
+  Two cautions: browser turns are token-heavy (snapshots bill like big
+  pastes), and any site the profile is logged into is reachable by whoever can
+  start jobs, so keep the bot locked to your own user id.
+
+  **Giving Iris its own browser identity.** Because the profile persists, you
+  can give Iris a standing identity: create a dedicated email, log its browser
+  into that account and any others once, and it stays logged in across jobs.
+  For sign-ups, the clean pattern is to keep the verification loop inside the
+  browser — Iris opens the account's webmail, reads the confirmation email, and
+  clicks the link, all in one session — rather than wiring a separate mail
+  tool. Two realities to plan around: bot defenses (CAPTCHA, phone/SMS
+  verification, Cloudflare) will block automated signup on a fraction of sites,
+  so treat it as collaborative — Iris screenshots and asks you for the step it
+  can't pass; and headless Chromium is more detectable, so for fewer blocks run
+  headed under a virtual display
+  (`IRIS_BROWSER_MCP_CMD=xvfb-run -a npx @playwright/mcp@latest`). A standing
+  logged-in identity is a real capability surface: set `IRIS_ALLOWED_USER_IDS`
+  to yourself before enabling it, and remember many sites' terms prohibit
+  automated accounts. Logged-in browsing is for your own accounts only.
 - **Workspaces.** Jobs that touch a repo name a workspace you registered
   with `iris workspaces add <name> <path>` (`remove`, `list`). The model only
   ever speaks names; paths stay on your side of the boundary

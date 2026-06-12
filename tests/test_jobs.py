@@ -725,16 +725,42 @@ def test_browser_config_knobs(tmp_path, monkeypatch):
     assert cfg.browser_profile_dir == "/tmp/prof"
 
 
-def test_browser_grant_denies_the_code_execution_tools(tmp_path):
+def test_browser_grant_denies_only_the_code_execution_tools_by_default(tmp_path):
     from iris.jobs import build_job_driver
 
     config = Config(jobs_enabled=True, job_grants=["browser"],
                     browser_profile_dir=str(tmp_path / "p"))
     driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
     denied = list(driver.disallowed_tools)
+    # in-page code execution stays denied: a human does not need it to use a site
     assert "mcp__playwright__browser_evaluate" in denied
     assert "mcp__playwright__browser_run_code_unsafe" in denied
-    assert "mcp__playwright__browser_file_upload" in denied
+    # uploads are allowed by default now (a human uploads profile pics, docs)
+    assert "mcp__playwright__browser_file_upload" not in denied
     # the derived built-in denylist is still intact underneath
     for tool in job_disallowed(["browser"]):
         assert tool in denied
+
+
+def test_browser_deny_list_is_configurable(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_deny_tools=["browser_file_upload"],
+                    browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    denied = list(driver.disallowed_tools)
+    assert "mcp__playwright__browser_file_upload" in denied
+    assert "mcp__playwright__browser_evaluate" not in denied
+
+
+def test_browser_deny_list_empty_denies_no_mcp_tools(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_deny_tools=[], browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    assert not any("playwright" in t for t in driver.disallowed_tools)
+    # the built-in denylist is untouched by the browser knob
+    for tool in job_disallowed(["browser"]):
+        assert tool in driver.disallowed_tools

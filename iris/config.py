@@ -113,6 +113,12 @@ class Config:
     # profile). Only used when a job is granted 'browser'.
     browser_mcp_cmd: str = "npx @playwright/mcp@latest --headless"
     browser_profile_dir: str = "iris-browser-profile"
+    # Playwright MCP tools a browser job may not call even though the server is
+    # allowed. The default denies only in-page code execution (arbitrary JS in
+    # an authenticated page); file upload is allowed so the agent can do what a
+    # human does. Set IRIS_BROWSER_DENY_TOOLS to retune (empty denies none).
+    browser_deny_tools: list[str] = field(
+        default_factory=lambda: ["browser_evaluate", "browser_run_code_unsafe"])
     # Where finished background work queues notes for the next chat turn.
     inbox_file: str = "iris-inbox.json"
     # The owner's recorded home channel (job pings, artifact uploads).
@@ -229,6 +235,10 @@ class Config:
                 "IRIS_BROWSER_MCP_CMD", "npx @playwright/mcp@latest --headless"),
             browser_profile_dir=os.environ.get(
                 "IRIS_BROWSER_PROFILE_DIR", "iris-browser-profile"),
+            browser_deny_tools=(
+                _split(os.environ["IRIS_BROWSER_DENY_TOOLS"])
+                if "IRIS_BROWSER_DENY_TOOLS" in os.environ
+                else ["browser_evaluate", "browser_run_code_unsafe"]),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
             scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),

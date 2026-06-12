@@ -61,16 +61,6 @@ GRANT_TOOLS = {
     "browser": (),
 }
 
-# Playwright MCP tools a browser job may NOT call even though the server is
-# allowed: in-page code execution turns "browse" into "run scripts inside any
-# site the profile is logged into", and file upload is a local-file exfil
-# channel. Deny rules outrank the server-level allow.
-BROWSER_DENY_TOOLS = (
-    "browser_evaluate",
-    "browser_run_code_unsafe",
-    "browser_file_upload",
-)
-
 # How much of a report travels in the fold-back note and the Discord ping.
 REPORT_FOLD_CAP = 1500
 
@@ -429,12 +419,12 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         mcp_config = write_browser_mcp_config(config)
         # The bare server name pre-approves every tool the server exposes;
         # --strict-mcp-config (set by the driver whenever mcp_config is given)
-        # keeps the job from seeing any other server on the host. The in-page
-        # code-execution tools are then denied by name on top (deny outranks
-        # allow), so 'browser' means browse, not script-in-an-authed-page.
+        # keeps the job from seeing any other server on the host. The
+        # owner-configured deny list (default: in-page code execution only) is
+        # then applied by name on top, since deny outranks allow.
         allowed = allowed + ["mcp__playwright"]
         disallowed = disallowed + tuple(
-            f"mcp__playwright__{tool}" for tool in BROWSER_DENY_TOOLS
+            f"mcp__playwright__{tool}" for tool in config.browser_deny_tools
         )
     return ClaudeDriver(
         claude_bin=config.claude_bin,
