@@ -159,8 +159,8 @@ class ResumeBudget:
             day = _utc_day(now)
             count = int(state.get("count", 0)) if state.get("day") == day else 0
             if count >= self.cap:
-                state["day"], state["count"] = day, count
-                self._save(state)
+                # Reaching this branch means state["day"] == day and count is
+                # already at the cap, so the file holds the right values; no save.
                 return False
             state["day"], state["count"] = day, count + 1
             self._save(state)
@@ -181,14 +181,19 @@ def dispatch_resumes(queue: ResumeQueue, budget: ResumeBudget, *, now: float,
     """
     items = queue.drain()
     fired = 0
+    budget_exhausted = False
     for item in items:
         conversation_id = item.get("conversation_id")
         prompt = item.get("prompt")
         if not conversation_id or not prompt:
             continue
-        if parked:
+        if parked or budget_exhausted:
             continue
         if not budget.take(now):
+            # The day's cap is spent; stop hitting the budget store for the
+            # rest of this batch (every further take would just relock and
+            # refuse). The dropped requests still sit in the fold-back inbox.
+            budget_exhausted = True
             continue
         submit(conversation_id, prompt)
         fired += 1

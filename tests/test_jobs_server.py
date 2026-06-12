@@ -338,6 +338,17 @@ def test_run_in_background_autoresume_honest_when_master_flag_off(bg_env):
     assert "off" in out.lower() or "ping" in out.lower()
 
 
+def test_run_in_background_autoresume_honest_without_a_home_channel(bg_env):
+    # Master flag on but no home channel: watch would have nowhere to resume, so
+    # the reply must not promise self-continuation and the flag must not be set.
+    bg_env["config"].auto_resume = True
+    bg_env["config"].home_channel = ""
+    out = srv.run_in_background("build.sh", label="b", autoresume=True)
+    argv = bg_env["calls"][0][0]
+    assert "--resume" not in argv
+    assert "off" in out.lower() or "ping" in out.lower()
+
+
 def test_run_in_background_gated_on_jobs(bg_env):
     bg_env["config"].jobs_enabled = False
     out = srv.run_in_background("anything")

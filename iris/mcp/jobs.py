@@ -350,10 +350,11 @@ def run_in_background(command: str, label: str = "", workspace: str = "",
     # (templated on success, one model call to interpret a failure). It loads
     # .env from this server's cwd, so spawn with the inherited cwd.
     argv = [sys.executable, "-m", "iris", "watch", "--name", name, "--fold"]
-    # Only arm autonomous resume when the owner turned it on; otherwise the flag
-    # would be inert at the watch end anyway, but keeping the argv honest makes
-    # the spawned command match what actually happens.
-    will_resume = bool(autoresume and config.auto_resume)
+    # Only arm autonomous resume when the owner turned it on AND has a home
+    # channel for the resume to land in — the same three conditions watch checks
+    # before it enqueues. Keeping the argv and the reply honest means the model
+    # is never told the chain self-continues when it actually won't.
+    will_resume = bool(autoresume and config.auto_resume and config.home_channel)
     if will_resume:
         argv.append("--resume")
     argv += ["--", "/bin/sh", "-c", inner]
