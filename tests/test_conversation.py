@@ -275,3 +275,62 @@ def test_pending_property_counts_queued_turns():
         gate.set()
 
     asyncio.run(go())
+
+
+def test_cancel_calls_the_on_cancel_hook_and_suppresses_the_reply():
+    async def go():
+        gate = asyncio.Event()
+        cancelled = []
+
+        async def run_turn(prompt, has_attachments):
+            await gate.wait()
+            return f"reply to {prompt}"
+
+        sent = []
+
+        async def send(text):
+            sent.append(text)
+
+        runner = ConversationRunner(run_turn=run_turn, send=send, ack_line=lambda: None,
+                                    ack_delay=10, on_cancel=lambda: cancelled.append(True))
+        runner.submit(Turn(text="one"))
+        await asyncio.sleep(0)
+        assert runner.cancel() is True
+        assert cancelled == [True]
+        gate.set()  # the turn finishes, but its reply is suppressed
+        await asyncio.sleep(0.02)
+        assert sent == []
+
+    asyncio.run(go())
+
+
+def test_after_cancel_a_new_message_runs_with_no_double_worker():
+    async def go():
+        gate = asyncio.Event()
+        seen = []
+
+        async def run_turn(prompt, has_attachments):
+            seen.append(prompt)
+            if prompt == "one":
+                await gate.wait()
+            return f"done: {prompt}"
+
+        sent = []
+
+        async def send(text):
+            sent.append(text)
+
+        runner = ConversationRunner(run_turn=run_turn, send=send, ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="one"))
+        await asyncio.sleep(0)
+        runner.cancel()
+        gate.set()
+        await asyncio.sleep(0.02)
+        # a fresh message after the cancel runs normally and is sent
+        runner.submit(Turn(text="two"))
+        await asyncio.sleep(0.02)
+        assert "done: two" in sent
+        assert "done: one" not in sent  # the cancelled reply was suppressed
+        assert not runner.busy  # exactly one worker, now idle
+
+    asyncio.run(go())

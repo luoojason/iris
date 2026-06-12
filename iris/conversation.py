@@ -79,14 +79,20 @@ class ConversationRunner:
         ack_line: Callable[[], Optional[str]],
         typing: Optional[Typing] = None,
         ack_delay: float = 4.0,
+        on_cancel: Optional[Callable[[], None]] = None,
     ) -> None:
         self._run_turn = run_turn
         self._send = send
         self._ack_line = ack_line
         self._typing = typing
         self._ack_delay = ack_delay
+        self._on_cancel = on_cancel
         self._pending: list[Turn] = []
         self._worker: Optional[asyncio.Task] = None
+        # Bumped by cancel(); an in-flight turn captures it at the start and
+        # suppresses its own reply if it changed, so a stop never delivers the
+        # answer the user just told us to drop.
+        self._cancel_gen = 0
 
     @property
     def busy(self) -> bool:
@@ -97,19 +103,22 @@ class ConversationRunner:
         return len(self._pending)
 
     def cancel(self) -> bool:
-        """Stop the in-flight reply and drop queued turns. True if one was running.
+        """Drop queued turns and suppress the in-flight reply. True if one ran.
 
-        Best-effort by design: the running turn's ``claude`` subprocess finishes
-        in its own thread and its reply is discarded, so this stops the output
-        and clears the backlog rather than killing the model call mid-flight.
-        The harder kill switch is cancelling a background *job* (``!stop <id>``),
-        which does terminate the job's process group.
+        Deliberately does NOT cancel the worker task. The worker is parked in a
+        blocking ``to_thread(agent.respond)`` whose thread (and the conversation
+        lock it holds) cannot be interrupted by cancelling the awaiting task;
+        doing so would orphan the thread holding the lock and wedge the next
+        turn. Instead the running turn finishes naturally and releases its lock,
+        but its reply is suppressed via the cancel generation, and the queue is
+        cleared. ``on_cancel`` lets the adapter do the real kill where one
+        exists (a streaming turn, or a background job via ``!stop <id>``).
         """
         running = self.busy
         self._pending.clear()
-        if self._worker is not None:
-            self._worker.cancel()
-            self._worker = None
+        self._cancel_gen += 1
+        if self._on_cancel is not None:
+            self._on_cancel()
         return running
 
     def submit(self, turn: Turn) -> None:
@@ -143,6 +152,7 @@ class ConversationRunner:
                 self._worker = asyncio.ensure_future(self._drain())
 
     async def _run_one(self, prompt: str, has_attachments: bool) -> None:
+        gen = self._cancel_gen
         ack_task = asyncio.ensure_future(self._delayed_ack())
         try:
             cm = self._typing() if self._typing is not None else None
@@ -153,7 +163,9 @@ class ConversationRunner:
                 text = await self._run_turn(prompt, has_attachments)
         finally:
             ack_task.cancel()
-        if text:
+        # A cancel() during the turn bumps the generation; honor it by dropping
+        # the reply the user asked us to stop.
+        if text and self._cancel_gen == gen:
             await self._send(text)
 
     async def _delayed_ack(self) -> None:
@@ -215,15 +227,18 @@ class LiveConversationRunner:
         ack_line: Callable[[], Optional[str]],
         typing: Optional[Typing] = None,
         ack_delay: float = 4.0,
+        on_cancel: Optional[Callable[[], None]] = None,
     ) -> None:
         self._start_turn = start_turn
         self._send = send
         self._ack_line = ack_line
         self._typing = typing
         self._ack_delay = ack_delay
+        self._on_cancel = on_cancel
         self._pending: list[Turn] = []
         self._live: Optional[LiveHandle] = None
         self._worker: Optional[asyncio.Task] = None
+        self._cancel_gen = 0
 
     @property
     def busy(self) -> bool:
@@ -236,18 +251,20 @@ class LiveConversationRunner:
     def cancel(self) -> bool:
         """Stop the in-flight live turn and drop queued turns. True if one ran.
 
-        Closing the live handle releases the conversation lock immediately, so
-        the live path frees faster than the one-shot path; the stream subprocess
-        may still wind down on its own but its output is no longer sent.
+        Closing the live handle releases the conversation lock and ends the
+        stream, so the live path can be stopped for real (unlike the one-shot
+        path, whose thread cannot be interrupted). The worker task is left to
+        unwind on its own; the cancel generation suppresses any reply that lands
+        from a turn closing concurrently.
         """
         running = self.busy or (self._live is not None and self._live.is_open())
         self._pending.clear()
+        self._cancel_gen += 1
         live = self._live
         if live is not None:
             live.close()
-        if self._worker is not None:
-            self._worker.cancel()
-            self._worker = None
+        if self._on_cancel is not None:
+            self._on_cancel()
         return running
 
     def submit(self, turn: Turn) -> None:
@@ -303,6 +320,7 @@ class LiveConversationRunner:
             await self._send("Something went wrong starting that one. Try again in a moment.")
             return
         self._live = handle
+        gen = self._cancel_gen
         # close() releases the per-conversation lock and is idempotent. It MUST run
         # on every exit path: a send failure or a non-ClaudeError from result()
         # (e.g. a session-store IO error) would otherwise leak the lock and wedge
@@ -318,13 +336,13 @@ class LiveConversationRunner:
                     reply = await handle.result()
             finally:
                 ack_task.cancel()
-            if reply:
+            if reply and self._cancel_gen == gen:
                 await self._send(reply)
             # aftermath waits the process out and surfaces any stray follow-up
             # (a message that raced the close boundary).
             strays = await handle.aftermath()
             for stray in strays:
-                if stray:
+                if stray and self._cancel_gen == gen:
                     await self._send(stray)
         finally:
             handle.close()

@@ -178,6 +178,11 @@ class Agent:
             )
             routed = "light" if model else ("default" if reason == "light-disabled" else "strong")
         with self._lock_for(conversation_id):
+            # Captured under the lock: a reset that lands mid-turn (the user
+            # sent !new or !stop) advances the epoch, and the guard below then
+            # refuses to write this now-stale session back, so a finishing turn
+            # never resurrects a conversation the user just cleared.
+            epoch = self._epoch_for(conversation_id)
             folded: list[str] = []
             if self.inbox is not None:
                 folded = self.inbox.drain()
@@ -204,7 +209,7 @@ class Agent:
                 # The turn that took the notes failed; put them back so the
                 # next turn re-delivers them instead of losing them.
                 self.inbox.restore(folded)
-            if result.session_id:
+            if result.session_id and self._epoch_for(conversation_id) == epoch:
                 self.store.set(conversation_id, result.session_id)
             if self.guard is not None:
                 self.guard.record("chat", result)

@@ -467,3 +467,26 @@ def test_memory_digest_supplier_halves_budget_when_hot(tmp_path):
     hot = _memory_digest_supplier(str(mem), 400, guard=HotGuard())
     assert "fff" in cool()
     assert hot() == ""
+
+
+def test_respond_skips_the_session_write_after_a_reset(tmp_path):
+    # A reset that lands while a turn is in flight (e.g. via !new or !stop) must
+    # win: the finishing turn must not resurrect the session the user cleared.
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "old")
+
+    class ResettingDriver:
+        model = None
+
+        def __init__(self, agent_box):
+            self.agent_box = agent_box
+
+        def run(self, prompt, session_id=None, model=None):
+            self.agent_box[0].reset("c1")  # the user reset mid-turn
+            return ClaudeResult(text="hi", session_id="brand-new", is_error=False)
+
+    box = []
+    agent = Agent(ResettingDriver(box), store)
+    box.append(agent)
+    agent.respond("c1", "hello")
+    assert store.get("c1") is None  # the reset stuck; no resurrection

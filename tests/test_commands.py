@@ -100,8 +100,12 @@ def test_schedules_off_when_disabled(tmp_path):
 
 
 def test_status_reports_busy_queue_and_jobs(tmp_path):
+    import os
+
     config = Config(jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"))
-    JobStore(config.jobs_file).add("j", "i", ["subagents"], "", "h", state="running")
+    store = JobStore(config.jobs_file)
+    store.add("j", "i", ["subagents"], "", "h", state="running")
+    store.update(1, pid=os.getpid())  # a live pid so repair leaves it active
     out = commands.render_status(config, busy=True, pending=2, session_turns=5)
     assert "writing" in out.lower() or "reply" in out.lower()
     assert "2" in out and "5" in out
@@ -174,3 +178,44 @@ def test_dispatch_stop_with_id_cancels_the_job(tmp_path):
 def test_dispatch_usage(tmp_path):
     out = _dispatch("!usage", Config(usage_file=str(tmp_path / "u.json")))
     assert "month:" in out
+
+
+# -- review hardening: stop-arg digit guard ------------------------------------
+
+
+def test_stop_with_prose_falls_through_to_the_agent():
+    # "!stop the war", "!cancel that order" are real messages, not job cancels.
+    for msg in ("!stop now", "!stop it", "!stop the war", "!cancel that", "!stop please"):
+        assert commands.parse(msg) is None, msg
+
+
+def test_stop_accepts_only_plain_digits_as_a_job_id():
+    assert commands.parse("!stop 7").arg == "7"
+    assert commands.parse("!cancel 7").name == "stop" and commands.parse("!cancel 7").arg == "7"
+    # signs, separators, non-ascii digits are not job ids -> fall through
+    for bad in ("!stop -7", "!stop +7", "!stop 1_000", "!stop 7x"):
+        assert commands.parse(bad) is None, bad
+
+
+def test_bang_space_word_is_not_a_stop_command():
+    assert commands.parse("! stop the war") is None
+
+
+# -- review hardening: status repairs, jobs tolerate missing timestamps --------
+
+
+def test_status_does_not_count_a_crashed_job_as_active(tmp_path):
+    config = Config(jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"))
+    store = JobStore(config.jobs_file)
+    store.add("j", "i", ["subagents"], "", "h", state="running")  # no pid -> dead
+    out = commands.render_status(config, busy=False, pending=0, session_turns=0)
+    assert "0 background job(s) active" in out
+    assert store.get(1)["state"] == "failed"  # repaired on the touch, like !jobs
+
+
+def test_jobs_tolerates_a_row_with_no_timestamp(tmp_path):
+    import json
+    path = tmp_path / "jobs.json"
+    path.write_text(json.dumps([{"id": 1, "title": "x", "state": "pending"}]), encoding="utf-8")
+    out = commands.render_jobs(Config(jobs_enabled=True, jobs_file=str(path)))
+    assert "#1" in out  # must not raise on a missing created_ts

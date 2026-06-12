@@ -71,6 +71,12 @@ def parse(text: str) -> Optional[Command]:
     arg = parts[1].strip() if len(parts) > 1 else ""
     if arg and name in _NO_ARG:
         return None  # trailing text on a no-arg command -> it is prose
+    # `stop` takes an optional job id and nothing else: a non-digit arg means
+    # the message is prose ("!stop the war", "!cancel that order"), so it falls
+    # through to the brain rather than being swallowed as a failed job cancel.
+    # str.isdigit() also rejects signs, separators, and non-ascii digit forms.
+    if name == "stop" and arg and not (arg.isdigit() and arg.isascii()):
+        return None
     return Command(name, arg)
 
 
@@ -93,7 +99,9 @@ def render_jobs(config: Config, limit: int = 10) -> str:
         return "No jobs recorded."
     lines = []
     for job in reversed(jobs[-max(1, int(limit)):]):
-        when = job.get("finished_ts") or job.get("started_ts") or job.get("created_ts")
+        # A foreign or hand-edited row may carry no timestamp; default to 0 so
+        # a single odd row never crashes the whole listing (fmt_ts handles 0).
+        when = job.get("finished_ts") or job.get("started_ts") or job.get("created_ts") or 0
         lines.append(f"#{job['id']} [{job['state']}] {job['title']} ({fmt_ts(when)})")
     return "\n".join(lines)
 
@@ -116,9 +124,11 @@ def render_status(config: Config, *, busy: bool, pending: int, session_turns: in
     if session_turns:
         parts.append(f"{session_turns} turns in this conversation")
     if config.jobs_enabled:
-        from .jobs import JobStore
+        from .jobs import JobStore, repair_dead_runners
 
-        active = JobStore(config.jobs_file).count_active()
+        store = JobStore(config.jobs_file)
+        repair_dead_runners(store)  # so a crashed job is not counted as live, as !jobs does
+        active = store.count_active()
         parts.append(f"{active} background job(s) active")
     return "; ".join(parts)
 
