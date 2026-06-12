@@ -111,14 +111,32 @@ def _guard_parked(config) -> bool:
         return False
 
 
-def watch(argv, config, *, name=None, force=False, quiet=False,
+def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
           runner=None, driver_factory=None, sender=None):
-    """Run the command, decide, compose, deliver. Returns the command's exit code."""
+    """Run the command, decide, compose, deliver. Returns the command's exit code.
+
+    With ``fold=True`` a concise completion note is also appended to the
+    fold-back inbox, so an Iris-launched background command (run_in_background)
+    surfaces in her next turn's context and she can continue the plan with the
+    result in hand. The owner still has to send that next message: nothing here
+    starts a model turn on its own (zero idle inference).
+    """
     exit_code, duration_s, tail = run_command(argv, runner=runner)
+    title = name or " ".join(argv)
+    if fold and getattr(config, "inbox_file", ""):
+        status = "finished" if exit_code == 0 else f"failed (exit {exit_code})"
+        note = f"background command '{title}' {status}."
+        if (tail or "").strip():
+            note += " Last output: " + (tail or "").strip()[-400:]
+        try:
+            from ..inbox import Inbox
+            Inbox(config.inbox_file).append(note)
+        except Exception:
+            pass
     event = Event(
         source="command",
         kind="finished",
-        title=name or " ".join(argv),
+        title=title,
         exit_code=exit_code,
         duration_s=duration_s,
         tail=tail,

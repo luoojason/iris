@@ -406,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser.add_argument("--name", default=None, help="label for the notification")
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
     watch_parser.add_argument("--quiet", action="store_true", help="suppress the ping for this run")
+    watch_parser.add_argument("--fold", action="store_true", help="also fold the completion into Iris's next turn")
     watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
     args = parser.parse_args(argv)
 
@@ -476,7 +477,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "watch":
         from .notify.watch_cmd import watch as run_watch
-        return run_watch(watch_cmd, config, name=args.name, force=args.always, quiet=args.quiet)
+        return run_watch(watch_cmd, config, name=args.name, force=args.always,
+                         quiet=args.quiet, fold=getattr(args, "fold", False))
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)

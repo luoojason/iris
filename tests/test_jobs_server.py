@@ -341,3 +341,9 @@ def test_run_in_background_unknown_workspace_refuses(bg_env):
 def test_run_in_background_empty_command_refuses(bg_env):
     out = srv.run_in_background("   ")
     assert bg_env["calls"] == []
+
+
+def test_run_in_background_asks_watch_to_fold_into_context(bg_env):
+    srv.run_in_background("build_video.sh xqc", label="bx")
+    argv = bg_env["calls"][0][0]
+    assert "--fold" in argv  # so the completion folds into Iris's next turn

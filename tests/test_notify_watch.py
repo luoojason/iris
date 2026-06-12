@@ -105,3 +105,34 @@ def test_failure_triage_skips_the_model_when_the_credit_guard_is_parked(tmp_path
     assert rc == 1
     assert built == []  # the triage driver was never built
     assert sent and "failed" in sent[0]  # templated line still delivered
+
+
+def test_watch_folds_completion_into_the_inbox_when_asked(tmp_path):
+    from iris.config import Config
+    from iris.inbox import Inbox
+    from iris.notify.watch_cmd import watch
+    config = Config(inbox_file=str(tmp_path / "inbox.json"), notify_channel="", discord_token="")
+    watch(["echo", "hi"], config, name="build-x", fold=True,
+          runner=lambda argv: (0, 30.0, "done"))
+    notes = Inbox(config.inbox_file).drain()
+    assert notes and "build-x" in notes[0] and "finished" in notes[0].lower()
+
+
+def test_watch_folds_a_failure_too(tmp_path):
+    from iris.config import Config
+    from iris.inbox import Inbox
+    from iris.notify.watch_cmd import watch
+    config = Config(inbox_file=str(tmp_path / "inbox.json"), notify_channel="", discord_token="")
+    watch(["false"], config, name="build-y", fold=True,
+          runner=lambda argv: (1, 5.0, "boom"))
+    notes = Inbox(config.inbox_file).drain()
+    assert notes and "failed" in notes[0].lower()
+
+
+def test_watch_does_not_fold_by_default(tmp_path):
+    from iris.config import Config
+    from iris.inbox import Inbox
+    from iris.notify.watch_cmd import watch
+    config = Config(inbox_file=str(tmp_path / "inbox.json"))
+    watch(["echo", "hi"], config, runner=lambda argv: (0, 1.0, "hi"))
+    assert Inbox(config.inbox_file).drain() == []
