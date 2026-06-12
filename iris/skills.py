@@ -6,7 +6,7 @@ bot's skills in their own directory (``IRIS_SKILLS_DIR``) and have Iris symlink
 them into the skills path at startup, instead of hand-managing ``~/.claude/skills``.
 
 A skill is a folder with a ``SKILL.md`` whose frontmatter has a ``description``;
-that is the same format Claude Code (and Hermes) use, so skills port directly.
+that is the same format Claude Code uses, so skills port directly.
 """
 
 from __future__ import annotations

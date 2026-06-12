@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "iris-agent"
 version = "0.1.0"
-description = "A personal chat agent that runs on your Claude subscription via the official Claude Code CLI. A subscription-native alternative to the Hermes agent."
+description = "A personal chat agent that runs on your Claude subscription via the official Claude Code CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Jason Luo" }]
-keywords = ["claude", "claude-code", "agent", "discord", "mcp", "assistant", "hermes"]
+keywords = ["claude", "claude-code", "agent", "discord", "mcp", "assistant"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
