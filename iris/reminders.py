@@ -109,16 +109,36 @@ class ReminderStore:
             json.dump(items, handle, indent=2, ensure_ascii=False)
         os.replace(tmp, self.path)
 
-    def add(self, due_ts: float, text: str, channel_id: str, repeat_secs: int = 0) -> int:
+    def add(self, due_ts: float, text: str, channel_id: str, repeat_secs: int = 0,
+            kind: str = "", origin: str = "") -> int:
         with self._locked():
             items = self._load()
             new_id = max((int(i.get("id", 0)) for i in items), default=0) + 1
-            items.append({
+            record = {
                 "id": new_id, "due_ts": due_ts, "text": text,
                 "channel_id": channel_id, "repeat_secs": int(repeat_secs or 0),
-            })
+            }
+            # Optional identity fields, stored only when set so plain reminders
+            # keep the original record shape.
+            if kind:
+                record["kind"] = kind
+            if origin:
+                record["origin"] = origin
+            items.append(record)
             self._save(items)
         return new_id
+
+    def requeue(self, job: dict) -> int:
+        """Re-add a failed delivery as a one-shot, preserving who and what it was.
+
+        The next occurrence of a recurring job was already rescheduled by
+        :meth:`pop_due`, so the failed firing itself goes back without a repeat,
+        to be retried on the next tick.
+        """
+        return self.add(
+            job.get("due_ts", 0), job.get("text", ""), job.get("channel_id", ""),
+            kind=job.get("kind", ""), origin=job.get("origin", ""),
+        )
 
     def all(self) -> list[dict]:
         return sorted(self._load(), key=lambda i: i.get("due_ts", 0))
@@ -156,6 +176,19 @@ class ReminderStore:
                     kept.append(nxt)
             self._save(kept)
             return due
+
+
+# Kinds the agent may mark on a reminder. A follow-up is a promise the agent
+# made during a turn; it renders as such so the owner knows replying resumes it.
+KINDS = ("followup",)
+
+
+def render_reminder(job: dict) -> str:
+    """The delivery line for one due reminder (plain text, no model call)."""
+    text = job.get("text", "")
+    if job.get("kind") == "followup":
+        return f"Follow-up I promised: {text} — reply here and I'll pick it up."
+    return f"Reminder: {text}"
 
 
 def send_discord_message(channel_id: str, content: str, token: str) -> bool:

@@ -127,3 +127,32 @@ def test_doctor_flags_missing_standing_orders_file(tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert "standing orders" in out and "MISSING" in out
+
+
+def test_reminders_tick_renders_followups_and_requeues_failures(tmp_path, monkeypatch, capsys):
+    from iris import reminders as rmod
+    from iris.cli import reminders_tick
+    from iris.config import Config
+
+    monkeypatch.chdir(tmp_path)  # keep tick state files out of the repo
+    path = tmp_path / "r.json"
+    store = rmod.ReminderStore(path)
+    store.add(0.0, "the deploy", "c1", kind="followup", origin="model")
+    store.add(0.0, "stand up", "c2")
+    monkeypatch.setenv("IRIS_REMINDERS_FILE", str(path))
+
+    sent = []
+
+    def fake_send(channel_id, content, token):
+        sent.append((channel_id, content))
+        return channel_id != "c2"  # the plain one fails and must requeue
+
+    monkeypatch.setattr(rmod, "send_discord_message", fake_send)
+    rc = reminders_tick(Config(discord_token="tok", usage_file=str(tmp_path / "u.json"),
+                               wakes_file=str(tmp_path / "w.json"),
+                               wakes_state=str(tmp_path / "w.state.json")))
+    assert rc == 0
+    followup = [c for ch, c in sent if ch == "c1"][0]
+    assert followup.startswith("Follow-up")
+    requeued = store.all()
+    assert len(requeued) == 1 and requeued[0]["text"] == "stand up"

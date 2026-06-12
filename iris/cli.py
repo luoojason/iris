@@ -183,19 +183,19 @@ def reminders_tick(config: Config) -> int:
     """Deliver any reminders that are now due. Run from cron or a systemd timer."""
     import os
 
-    from .reminders import ReminderStore, send_discord_message
+    from . import reminders as rmod
 
     if not config.discord_token:
         print("reminders-tick: IRIS_DISCORD_TOKEN is not set")
         return 1
-    store = ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
+    store = rmod.ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
     due = store.pop_due()
     sent = 0
     for job in due:
-        if send_discord_message(job["channel_id"], f"Reminder: {job['text']}", config.discord_token):
+        if rmod.send_discord_message(job["channel_id"], rmod.render_reminder(job), config.discord_token):
             sent += 1
         else:
-            store.add(job["due_ts"], job["text"], job["channel_id"])  # re-queue on failure
+            store.requeue(job)  # retried on the next tick
     print(f"reminders-tick: {len(due)} due, {sent} delivered")
     # The budget check and the wake rules ride the same tick. Neither may
     # ever take reminder delivery down with it, so both are fail-soft to a
