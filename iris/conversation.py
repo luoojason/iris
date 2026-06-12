@@ -311,6 +311,12 @@ class LiveConversationRunner:
                 self._worker = asyncio.ensure_future(self._drain())
 
     async def _run_live(self, prompt: str, has_attachments: bool) -> None:
+        # Capture the cancel generation BEFORE begin(): begin() awaits the
+        # conversation lock and so yields the loop, and a !stop that lands in
+        # that window must still suppress this turn's reply. Capturing after
+        # begin() (the bug this guards against) would miss it, since cancel()
+        # would have bumped the generation before this line ran.
+        gen = self._cancel_gen
         handle = self._start_turn(prompt, has_attachments)
         try:
             await handle.begin()
@@ -320,7 +326,6 @@ class LiveConversationRunner:
             await self._send("Something went wrong starting that one. Try again in a moment.")
             return
         self._live = handle
-        gen = self._cancel_gen
         # close() releases the per-conversation lock and is idempotent. It MUST run
         # on every exit path: a send failure or a non-ClaudeError from result()
         # (e.g. a session-store IO error) would otherwise leak the lock and wedge

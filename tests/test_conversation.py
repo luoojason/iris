@@ -334,3 +334,50 @@ def test_after_cancel_a_new_message_runs_with_no_double_worker():
         assert not runner.busy  # exactly one worker, now idle
 
     asyncio.run(go())
+
+
+def test_live_cancel_during_begin_suppresses_the_reply():
+    """A !stop that lands while begin() is still acquiring the lock must suppress
+    the reply, not let it through. The cancel generation has to be captured before
+    begin(), mirroring the one-shot path."""
+    from iris.conversation import LiveConversationRunner
+
+    async def go():
+        begun = asyncio.Event()
+        release = asyncio.Event()
+        sent: list[str] = []
+
+        class FakeHandle:
+            async def begin(self):
+                begun.set()
+                await release.wait()  # park inside begin(), as lock-acquire would
+
+            def is_open(self):
+                return False
+
+            async def inject(self, text):
+                return False
+
+            async def result(self):
+                return "reply to one"
+
+            async def aftermath(self):
+                return ["a stray follow-up"]
+
+            def close(self):
+                pass
+
+        async def send(text):
+            sent.append(text)
+
+        runner = LiveConversationRunner(
+            start_turn=lambda prompt, has_attachments: FakeHandle(),
+            send=send, ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="one"))
+        await begun.wait()           # the worker is parked inside begin()
+        assert runner.cancel() is True
+        release.set()                # begin() completes; the turn runs to result
+        await asyncio.sleep(0.02)
+        assert sent == []            # the reply and stray are both suppressed
+
+    asyncio.run(go())
