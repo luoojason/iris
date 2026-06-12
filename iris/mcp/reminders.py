@@ -21,8 +21,19 @@ STORE = ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json
 DEFAULT_CHANNEL = os.environ.get("IRIS_DISCORD_HOME_CHANNEL", "")
 # A ceiling on how many reminders the agent may have pending at once, so a
 # runaway turn (or a prompt-injected loop) cannot fill the schedule. Owner-made
-# reminders do not count against it.
-MAX_PENDING = int(os.environ.get("IRIS_REMINDERS_MAX_PENDING", "25"))
+# reminders do not count against it. None means "read the env lazily": the
+# claude child strips IRIS_* from this server's spawn env, so the knob must
+# come from .env in the working directory at call time, not import time.
+MAX_PENDING: Optional[int] = None
+
+
+def _max_pending() -> int:
+    if MAX_PENDING is not None:
+        return MAX_PENDING
+    from iris.config import load_dotenv
+
+    load_dotenv()
+    return int(os.environ.get("IRIS_REMINDERS_MAX_PENDING", "25"))
 
 mcp = FastMCP("iris-reminders")
 
@@ -49,7 +60,7 @@ def schedule_reminder(text: str, when: str, channel_id: Optional[str] = None,
     if kind and kind not in KINDS:
         return f"Unknown reminder kind {kind!r}; use 'followup' or omit it."
     pending = sum(1 for item in STORE.all() if item.get("origin") == "model")
-    if pending >= MAX_PENDING:
+    if pending >= _max_pending():
         return (f"You already have {pending} pending reminders, the most allowed. "
                 "Cancel some with cancel_reminder before scheduling more.")
     try:

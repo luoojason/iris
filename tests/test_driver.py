@@ -389,3 +389,11 @@ def test_system_prompt_extra_failure_never_breaks_a_turn():
     d = ClaudeDriver(system_prompt_extra=boom, runner=make_runner([]))
     cmd = d.build_command()  # must not raise
     assert "--append-system-prompt" not in cmd
+
+
+def test_standing_orders_bad_encoding_never_breaks_a_turn(tmp_path):
+    orders = tmp_path / "orders.md"
+    orders.write_bytes(b"temp is 25\xb0 outside")  # latin-1 degree sign
+    d = ClaudeDriver(standing_orders_file=str(orders), runner=make_runner([]))
+    cmd = d.build_command()  # must not raise
+    assert "--append-system-prompt" not in cmd

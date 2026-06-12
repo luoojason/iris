@@ -463,7 +463,7 @@ def test_memory_digest_supplier_halves_budget_when_hot(tmp_path):
             return "tighten"
 
     # the note fits the full budget but not half of it
-    cool = _memory_digest_supplier(str(mem), 300)
-    hot = _memory_digest_supplier(str(mem), 300, guard=HotGuard())
+    cool = _memory_digest_supplier(str(mem), 400)
+    hot = _memory_digest_supplier(str(mem), 400, guard=HotGuard())
     assert "fff" in cool()
     assert hot() == ""

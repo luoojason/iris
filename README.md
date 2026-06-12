@@ -146,6 +146,16 @@ To turn on the bundled memory tool (`remember`, `recall`, `forget`):
 
 4. Tell the persona to use it (the example persona notes where).
 
+**Pinned notes load on every turn.** Top pinned memories render into the
+system prompt each turn (`IRIS_MEMORY_DIGEST_BYTES`, default 2400 bytes,
+`0` to turn off) so the agent knows them without a recall call. Two costs to
+understand: every digest byte is re-billed on every turn, and the digest is
+a trust escalation — notes are model-written, so a hostile page the agent
+read and was tricked into pinning would echo into the system prompt from
+then on. The digest frames notes as data-not-instructions, but if Iris
+browses untrusted content regularly, audit what is pinned now and then
+(`recall` shows PINNED entries) or lower the budget.
+
 Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
 `list_channels`, `search_members`. It is a narrow, audited surface (no
@@ -307,12 +317,21 @@ conversation or anything you didn't write down.* Rules are authored with
 `iris schedule add --title briefing --at 2026-06-13T07:30:00Z --every 1d
 --instructions "..."` (or `--command` for a zero-model script run through
 `iris watch`),
-live in their own store the reminders tool cannot write, and every firing
+live in their own store the reminders tool cannot write, and a job firing
 goes through the same gated launch path as every other job: grants
 re-clamped to `IRIS_JOB_GRANTS`, parked when the credit guard is hot,
-admission-capped, plus a per-rule monthly fire cap and a no-overlap guard.
-The chat tools (`mcp__jobs__schedule_job`, `list_schedules`,
-`cancel_schedule`) can record rules too, when you ask in Discord. The brain can read and edit files and run commands in directories
+admission-capped, plus a per-rule monthly fire cap (only actual starts
+consume it) and a no-overlap guard on both rule kinds — a job rule skips
+while its previous job is still running (stale parked/queued clones are
+cancelled and replaced), a script rule skips while its previous process is
+alive. Script rules are the lighter tier: they bypass the job machinery on
+purpose (no grants, no job record), make zero model calls on success, and
+their failure-triage call honors the park level. The chat tools
+(`mcp__jobs__schedule_job`, `list_schedules`, `cancel_schedule`) can record
+**job rules only** when you ask in Discord — capped at
+`IRIS_SCHEDULES_MAX_MODEL_RULES` (default 10) so a runaway turn cannot mint
+clock-driven work, and never a shell command. Set a usage budget before
+enabling: the credit guard is the aggregate backstop. The brain can read and edit files and run commands in directories
 you grant it, so scope `IRIS_ALLOWED_TOOLS` deliberately and avoid
 `bypassPermissions` unless you understand the blast radius.
 

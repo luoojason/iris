@@ -207,6 +207,20 @@ def resume_job(job_id: int) -> str:
 _SCHEDULES_DISABLED = ("Scheduled jobs are disabled. The owner can set "
                        "IRIS_SCHEDULED_JOBS=true (jobs too: IRIS_JOBS=true).")
 
+# Most schedule rules the model may have recorded at once. The per-rule
+# monthly cap bounds nothing in aggregate, so the recorder itself is capped:
+# a runaway or prompt-injected turn cannot mint unbounded clock-driven work.
+# None = read IRIS_SCHEDULES_MAX_MODEL_RULES lazily (default 10).
+MAX_MODEL_RULES: Optional[int] = None
+
+
+def _max_model_rules() -> int:
+    if MAX_MODEL_RULES is not None:
+        return MAX_MODEL_RULES
+    import os
+
+    return int(os.environ.get("IRIS_SCHEDULES_MAX_MODEL_RULES", "10"))
+
 
 def _schedule_store():
     from iris.schedules import ScheduleStore
@@ -237,9 +251,15 @@ def schedule_job(title: str, instructions: str, when: str, every: str = "",
         return _SCHEDULES_DISABLED
     from iris.schedules import add_rule, describe_rule
 
+    store = _schedule_store()
+    mine = sum(1 for r in store.all()
+               if isinstance(r, dict) and r.get("created_by") == "model")
+    if mine >= _max_model_rules():
+        return (f"You already have {mine} recorded schedules, the most allowed. "
+                "Cancel one with cancel_schedule before recording more.")
     try:
         rule = add_rule(
-            _schedule_store(), title=title, when=when, every=every,
+            store, title=title, when=when, every=every,
             instructions=instructions, grants=grants, workspace=workspace,
             created_by="model", default_cap=config.schedule_monthly_cap,
         )

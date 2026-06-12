@@ -94,9 +94,9 @@ def doctor(config: Config, probe: bool = True) -> int:
         print(f"  signed in (model: {res.model or 'claude default'})")
     print(f"model: {config.model or '(claude default)'}")
     print(f"persona: {config.persona_file or '(none)'}")
-    if config.standing_orders_file:
-        from pathlib import Path
+    from pathlib import Path
 
+    if config.standing_orders_file:
         orders = Path(config.standing_orders_file)
         if not orders.exists():
             print(f"standing orders: MISSING file {config.standing_orders_file}")
@@ -135,6 +135,23 @@ def doctor(config: Config, probe: bool = True) -> int:
             print(f"credit guard: {pct:.0f}% of ${config.usage_budget_usd:.2f} used this month ({lvl})")
         except Exception as exc:
             print(f"credit guard: could not read the ledger ({exc})")
+    if config.jobs_enabled:
+        # A workspace that contains the agent's own state directory hands a
+        # files-granted job the pen that writes the schedules (commands the
+        # clock will run) and every other registry. Warn loudly.
+        try:
+            from .workspaces import WorkspaceStore
+
+            state_dir = Path(config.schedules_file).resolve().parent
+            for ws_name, ws_path in WorkspaceStore(config.workspaces_file).list().items():
+                ws = Path(ws_path).resolve()
+                if ws == state_dir or ws in state_dir.parents:
+                    print(f"WARNING: workspace {ws_name!r} ({ws_path}) contains the agent's state")
+                    print("  files (schedules, registries, .env). A files-granted job there can")
+                    print("  rewrite them — including putting commands on the clock. Register a")
+                    print("  narrower directory instead.")
+        except Exception as exc:
+            print(f"workspaces: could not check the registry ({exc})")
     if "browser" in config.job_grants:
         if shutil.which("npx"):
             print("browser grant: on (Playwright MCP via npx)")

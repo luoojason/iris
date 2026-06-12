@@ -151,6 +151,7 @@ def test_tick_skips_while_the_last_job_is_still_active(tmp_path):
     jstore = JobStore(config.jobs_file)
     prior = jstore.add("[scheduled] briefing", "i", ["subagents"], "", "home-1",
                        state="running")
+    jstore.update(prior["id"], pid=__import__("os").getpid())  # genuinely alive
     store.update(rule["id"], last_job_id=prior["id"])
     spawned = []
     out = tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid))
@@ -216,3 +217,169 @@ def test_fired_counts_drop_old_months(tmp_path):
     store.update(rule["id"], fired={"2020-01": 30})
     tick_schedules(config, now=NOW, spawn=lambda jid, **kw: None)
     assert store.get(rule["id"])["fired"] == {month_key(NOW): 1}
+
+
+# -- review hardening ----------------------------------------------------------
+
+
+def test_tick_repairs_a_dead_runner_before_the_overlap_check(tmp_path):
+    # A runner killed by a reboot leaves its job 'running' with a dead pid; the
+    # rule must repair it and fire, not stay bricked forever.
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config)
+    jstore = JobStore(config.jobs_file)
+    prior = jstore.add("[scheduled] briefing", "i", ["subagents"], "", "home-1",
+                       state="running")
+    jstore.update(prior["id"], pid=999999999)  # certainly dead
+    store.update(rule["id"], last_job_id=prior["id"])
+    spawned = []
+    out = tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid))
+    assert spawned, out
+    assert jstore.get(prior["id"])["state"] == "failed"
+
+
+def test_tick_replaces_a_stale_parked_firing(tmp_path):
+    # A firing parked in a hot month must not wedge the rule once the month
+    # cools: the stale parked clone is cancelled and a fresh launch happens.
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config)
+    jstore = JobStore(config.jobs_file)
+    prior = jstore.add("[scheduled] briefing", "i", ["subagents"], "", "home-1",
+                       state="parked")
+    store.update(rule["id"], last_job_id=prior["id"])
+    spawned = []
+    out = tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid))
+    assert spawned, out
+    assert jstore.get(prior["id"])["state"] == "cancelled"
+    assert store.get(rule["id"])["last_job_id"] == spawned[0]
+
+
+def test_tick_still_skips_a_genuinely_running_prior(tmp_path):
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config)
+    jstore = JobStore(config.jobs_file)
+    prior = jstore.add("[scheduled] briefing", "i", ["subagents"], "", "home-1",
+                       state="running")
+    jstore.update(prior["id"], pid=__import__("os").getpid())  # alive
+    store.update(rule["id"], last_job_id=prior["id"])
+    spawned = []
+    out = tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid))
+    assert spawned == []
+    assert "overlap" in out or "still" in out
+
+
+def test_parked_firing_does_not_consume_the_monthly_cap(tmp_path):
+    config = make_config(tmp_path, usage_budget_usd=10.0, usage_park_at=95.0)
+
+    class Turn:
+        cost_usd = 9.9
+        context_tokens = 0
+
+    UsageLedger(config.usage_file).record("chat", Turn())
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config)
+    tick_schedules(config, now=time.time(), spawn=lambda jid, **kw: None)
+    fresh = store.get(rule["id"])
+    assert fresh["fired"] == {}  # no model call happened; no cap slot burned
+    assert fresh["last_job_id"] == 1  # but the parked clone is tracked
+
+
+def test_parked_firing_leaves_an_inbox_note(tmp_path):
+    from iris.inbox import Inbox
+
+    config = make_config(tmp_path, usage_budget_usd=10.0, usage_park_at=95.0)
+
+    class Turn:
+        cost_usd = 9.9
+        context_tokens = 0
+
+    UsageLedger(config.usage_file).record("chat", Turn())
+    store = ScheduleStore(config.schedules_file)
+    job_rule(store, config)
+    tick_schedules(config, now=time.time(), spawn=lambda jid, **kw: None)
+    notes = Inbox(config.inbox_file).drain()
+    assert any("parked" in n.lower() for n in notes)
+
+
+def test_script_rules_get_a_pid_overlap_guard(tmp_path):
+    import os as _os
+
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = add_rule(store, title="backup", when="2020-01-01T00:00:00Z",
+                    every="every 1d", command="sleep 999")
+    calls = []
+
+    class P:
+        pid = _os.getpid()  # alive: the next firing must skip
+
+    tick_schedules(config, now=NOW, spawn=lambda jid, **kw: None,
+                   popen=lambda argv, **kw: calls.append(argv) or P())
+    assert len(calls) == 1
+    assert store.get(rule["id"])["last_script_pid"] == _os.getpid()
+    out = tick_schedules(config, now=NOW + 86401, spawn=lambda jid, **kw: None,
+                         popen=lambda argv, **kw: calls.append(argv) or P())
+    assert len(calls) == 1  # second firing skipped: the first is still running
+    assert "still" in out or "overlap" in out
+
+
+def test_take_due_tolerates_malformed_entries(tmp_path):
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config)
+    raw = json.loads(open(config.schedules_file, encoding="utf-8").read())
+    raw.append("not a dict")
+    raw.append({"id": 99, "title": "broken", "due_ts": None, "enabled": True,
+                "instructions": "x"})
+    open(config.schedules_file, "w", encoding="utf-8").write(json.dumps(raw))
+    spawned = []
+    tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid))
+    assert spawned == [1]  # the good rule still fired
+    assert store.get(rule["id"])["fired"]  # and was accounted
+
+
+def test_load_quarantines_a_non_list_store(tmp_path):
+    config = make_config(tmp_path)
+    path = tmp_path / "sched.json"
+    path.write_text('{"oops": "a dict"}', encoding="utf-8")
+    store = ScheduleStore(path)
+    assert store.all() == []
+    # the original content was quarantined, not silently overwritten
+    leftovers = list(tmp_path.glob("sched.json.corrupt*"))
+    assert leftovers, "expected the malformed store to be preserved as .corrupt"
+
+
+def test_corrupt_cap_on_one_rule_does_not_kill_the_batch(tmp_path):
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    bad = job_rule(store, config, title="bad")
+    good = job_rule(store, config, title="good")
+    store.update(bad["id"], monthly_cap="oops")
+    spawned = []
+    out = tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid))
+    assert len(spawned) == 1, out  # good still fired
+    assert store.get(good["id"])["fired"]
+
+
+def test_update_if_refuses_a_recreated_rule(tmp_path):
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config)
+    store.remove(rule["id"])
+    fresh = job_rule(store, config, title="recreated")  # may reuse the id
+    assert store.update_if(fresh["id"], rule["created_ts"] - 1, fired={"x": 9}) is None
+    assert store.get(fresh["id"]).get("fired") == {}
+
+
+def test_describe_rule_reports_only_the_current_month(tmp_path):
+    from iris.schedules import describe_rule
+
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config)
+    store.update(rule["id"], fired={"2020-01": 30})
+    line = describe_rule(store.get(rule["id"]), now=NOW)
+    assert "fired 0 this month" in line

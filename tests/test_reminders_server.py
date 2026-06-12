@@ -48,3 +48,15 @@ def test_pending_cap_blocks_runaway_scheduling(server, monkeypatch):
 def test_list_tags_followups(server):
     server.schedule_reminder("the deploy", "+30m", kind="followup")
     assert "followup" in server.list_reminders()
+
+
+def test_pending_cap_reads_the_env_lazily(server, monkeypatch):
+    # The server runs inside the claude child, which strips IRIS_* from its
+    # env at spawn; the knob must be read at call time (after load_dotenv),
+    # not at import time, or .env settings can never reach it.
+    monkeypatch.setattr(srv, "MAX_PENDING", None)
+    monkeypatch.setenv("IRIS_REMINDERS_MAX_PENDING", "1")
+    srv.schedule_reminder("first", "+30m")
+    out = srv.schedule_reminder("second", "+30m")
+    assert "Cancel some" in out
+    assert len(srv.STORE.all()) == 1

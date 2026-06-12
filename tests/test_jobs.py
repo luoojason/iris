@@ -723,3 +723,18 @@ def test_browser_config_knobs(tmp_path, monkeypatch):
     cfg = Config.from_env(dotenv=tmp_path / "none.env")
     assert cfg.browser_mcp_cmd == "npx custom-mcp"
     assert cfg.browser_profile_dir == "/tmp/prof"
+
+
+def test_browser_grant_denies_the_code_execution_tools(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    denied = list(driver.disallowed_tools)
+    assert "mcp__playwright__browser_evaluate" in denied
+    assert "mcp__playwright__browser_run_code_unsafe" in denied
+    assert "mcp__playwright__browser_file_upload" in denied
+    # the derived built-in denylist is still intact underneath
+    for tool in job_disallowed(["browser"]):
+        assert tool in denied

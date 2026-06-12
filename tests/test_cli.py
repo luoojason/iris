@@ -240,3 +240,20 @@ def test_doctor_warns_when_browser_grant_lacks_npx(tmp_path, capsys, monkeypatch
                    probe=False)
     out = capsys.readouterr().out
     assert "browser" in out and "npx" in out
+
+
+def test_doctor_warns_when_a_workspace_contains_the_state_files(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.workspaces import WorkspaceStore
+
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    ws = WorkspaceStore(str(tmp_path / "ws.json"))
+    ws.add("everything", str(tmp_path))  # ancestor of the agent state dir
+    doctor(Config(claude_bin=_fake_claude(tmp_path), jobs_enabled=True,
+                  workspaces_file=str(tmp_path / "ws.json"),
+                  schedules_file=str(agent_dir / "iris-schedules.json")),
+           probe=False)
+    out = capsys.readouterr().out
+    assert "everything" in out and "state" in out

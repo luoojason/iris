@@ -61,6 +61,16 @@ GRANT_TOOLS = {
     "browser": (),
 }
 
+# Playwright MCP tools a browser job may NOT call even though the server is
+# allowed: in-page code execution turns "browse" into "run scripts inside any
+# site the profile is logged into", and file upload is a local-file exfil
+# channel. Deny rules outrank the server-level allow.
+BROWSER_DENY_TOOLS = (
+    "browser_evaluate",
+    "browser_run_code_unsafe",
+    "browser_file_upload",
+)
+
 # How much of a report travels in the fold-back note and the Discord ping.
 REPORT_FOLD_CAP = 1500
 
@@ -413,13 +423,19 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
     grants = list(job.get("grants") or ["subagents"])
     cwd = workspace_path or tempfile.mkdtemp(prefix="iris-job-")
     allowed = job_allowed_builtins(grants)
+    disallowed = job_disallowed(grants)
     mcp_config = None
     if "browser" in grants:
         mcp_config = write_browser_mcp_config(config)
         # The bare server name pre-approves every tool the server exposes;
         # --strict-mcp-config (set by the driver whenever mcp_config is given)
-        # keeps the job from seeing any other server on the host.
+        # keeps the job from seeing any other server on the host. The in-page
+        # code-execution tools are then denied by name on top (deny outranks
+        # allow), so 'browser' means browse, not script-in-an-authed-page.
         allowed = allowed + ["mcp__playwright"]
+        disallowed = disallowed + tuple(
+            f"mcp__playwright__{tool}" for tool in BROWSER_DENY_TOOLS
+        )
     return ClaudeDriver(
         claude_bin=config.claude_bin,
         model=config.job_model or config.model,
@@ -427,7 +443,7 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         mcp_config=mcp_config,
         permission_mode=config.permission_mode,
         allowed_tools=allowed or None,
-        disallowed_tools=job_disallowed(grants),
+        disallowed_tools=disallowed,
         restrict_builtin_tools=False,
         disable_auto_memory=config.disable_auto_memory,
         add_dirs=[workspace_path] if workspace_path else None,

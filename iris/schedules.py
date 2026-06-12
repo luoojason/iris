@@ -16,16 +16,21 @@ Everything around that line is load-bearing:
 * **The gated launch path.** A job rule fires through the console's
   ``gated_launch``: grants re-clamped to the current ceiling, the credit
   guard parks it when the month runs hot, ``jobs_max`` still admits.
-* **Caps.** Every rule carries a monthly fire cap, and a rule whose previous
-  job is still pending/running/parked skips its firing instead of stacking.
+* **Caps.** Every rule carries a monthly fire cap that only actual starts
+  consume, and overlap is guarded both ways: a job rule skips while its
+  previous job is still running (a stale parked/queued clone is cancelled and
+  replaced instead of wedging the rule), and a script rule skips while its
+  previous process is still alive.
 * **Script mode.** A rule with a ``command`` instead of ``instructions``
   spawns a detached ``iris watch`` run: zero model calls on the happy path,
-  the notify spine's usual ping when it fails or runs long.
+  and the failure-triage call honors the credit-guard park level.
 
 Rules live in their own store, NOT in the reminders file: the reminders MCP
-tool lets the model write reminders, and nothing the model can write may ever
-carry a launch payload. Rule creation goes through the owner's CLI
-(``iris schedule``) or the explicitly allowlisted jobs-server tool.
+tool lets the model write reminders, and a reminder must never carry a launch
+payload. Rule creation goes through the owner's CLI (``iris schedule``), or —
+for job rules only, capped, and only when the owner allowlists it — the
+jobs-server ``schedule_job`` tool. The model can never put a shell command on
+the clock.
 """
 
 from __future__ import annotations
@@ -53,9 +58,6 @@ except ImportError:  # pragma: no cover - Windows
 
 log = logging.getLogger("iris.schedules")
 
-# A previous firing in any of these states blocks the next one: parked counts,
-# or a hot month would stack one parked clone per tick interval.
-_BLOCKING_STATES = ("pending", "running", "parked")
 
 
 class ScheduleStore:
@@ -83,10 +85,15 @@ class ScheduleStore:
             return []
         try:
             data = json.loads(self.path.read_text("utf-8"))
-            return data if isinstance(data, list) else []
         except (json.JSONDecodeError, OSError):
             quarantine_corrupt(self.path, "schedule registry")
             return []
+        if not isinstance(data, list):
+            # Valid JSON of the wrong shape (a hand edit) is still owner data;
+            # quarantine it rather than letting the next save overwrite it.
+            quarantine_corrupt(self.path, "schedule registry")
+            return []
+        return data
 
     def _save(self, items: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +133,25 @@ class ScheduleStore:
         with self._locked():
             items = self._load()
             for rule in items:
-                if rule.get("id") == rule_id:
+                if isinstance(rule, dict) and rule.get("id") == rule_id:
+                    rule.update(fields)
+                    self._save(items)
+                    return dict(rule)
+            return None
+
+    def update_if(self, rule_id: int, expected_created_ts, **fields) -> Optional[dict]:
+        """``update`` guarded by identity, not just id.
+
+        Ids can be reused after a remove, so the tick stamps fire results back
+        only onto the exact rule it snapshotted — a rule recreated mid-firing
+        must not inherit the old rule's fire count or last job.
+        """
+        with self._locked():
+            items = self._load()
+            for rule in items:
+                if isinstance(rule, dict) and rule.get("id") == rule_id:
+                    if rule.get("created_ts") != expected_created_ts:
+                        return None
                     rule.update(fields)
                     self._save(items)
                     return dict(rule)
@@ -143,9 +168,15 @@ class ScheduleStore:
             items = self._load()
             due: list[dict] = []
             for rule in items:
+                # Malformed entries (a hand edit gone wrong) are skipped in
+                # place, never fired and never destroyed, so one bad rule
+                # cannot stall the rest of the store.
+                if not isinstance(rule, dict):
+                    continue
                 if not rule.get("enabled", True):
                     continue
-                if float(rule.get("due_ts", 0)) > now:
+                due_ts = rule.get("due_ts")
+                if not isinstance(due_ts, (int, float)) or due_ts > now:
                     continue
                 due.append(dict(rule))
                 period = int(rule.get("repeat_secs", 0) or 0)
@@ -203,7 +234,7 @@ def add_rule(store: ScheduleStore, *, title: str, when: str, every: str = "",
     )
 
 
-def describe_rule(rule: dict) -> str:
+def describe_rule(rule: dict, now: Optional[float] = None) -> str:
     """One line for `iris schedule list` and the MCP listing."""
     from .reminders import fmt_ts
 
@@ -213,25 +244,52 @@ def describe_rule(rule: dict) -> str:
             f" every {period // 60}m" if period else " once"))
     mode = "job" if rule.get("instructions") else "script"
     state = "" if rule.get("enabled", True) else " [disabled]"
-    fired = sum(int(v) for v in (rule.get("fired") or {}).values())
+    # Old months are pruned only when a rule fires, so the listing must filter
+    # to the current month itself or a May count reads as June's.
+    try:
+        fired = int((rule.get("fired") or {}).get(month_key(now), 0))
+    except (TypeError, ValueError):
+        fired = 0
     return (f"#{rule['id']} [{mode}]{state} {rule['title']} — next {fmt_ts(rule.get('due_ts', 0))}"
             f"{cadence}, cap {rule.get('monthly_cap')}/month, fired {fired} this month")
 
 
-def _fire_job_rule(config: Config, rule: dict, spawn) -> tuple[bool, str, Optional[int]]:
-    """Launch one job rule through the single gated path. (fired?, note, job id)."""
-    from .jobs import JobStore, spawn_runner
+def _fire_job_rule(config: Config, rule: dict, spawn) -> dict:
+    """Launch one job rule through the single gated path.
+
+    Returns ``{"started": bool, "note": str, "updates": dict}``: ``started``
+    is True only when the runner actually spawned (parked and queued firings
+    burn no model call, so they must not burn a cap slot either); ``updates``
+    is what the tick writes back onto the rule.
+    """
+    from .inbox import Inbox
+    from .jobs import JobStore, repair_dead_runners, spawn_runner
     from .jobs_console import gated_launch
 
+    rid = rule["id"]
     if not config.jobs_enabled:
-        return False, f"#{rule['id']} skipped: jobs are disabled (set IRIS_JOBS=true)", None
+        return {"started": False, "updates": {},
+                "note": f"#{rid} skipped: jobs are disabled (set IRIS_JOBS=true)"}
     jstore = JobStore(config.jobs_file, keep=config.jobs_keep)
+    # On a schedule-only deployment the tick may be the ONLY thing that ever
+    # touches the job store, so it must do its own dead-runner repair or a
+    # runner lost to a reboot leaves the rule bricked behind the overlap check.
+    repair_dead_runners(jstore)
     last = rule.get("last_job_id")
     if isinstance(last, int):
         prior = jstore.get(last)
-        if prior and prior.get("state") in _BLOCKING_STATES:
-            return False, (f"#{rule['id']} skipped: the previous run (job #{last}) "
-                           f"is still {prior['state']} (no overlap)"), None
+        if prior and prior.get("state") == "running":
+            return {"started": False, "updates": {},
+                    "note": f"#{rid} skipped: the previous run (job #{last}) "
+                            f"is still running (no overlap)"}
+        if prior and prior.get("state") in ("parked", "pending"):
+            # Nothing auto-resumes a parked or queued job, so a hot month or a
+            # full jobs_max minute must not wedge the rule forever. Cancel the
+            # stale clone and launch fresh: if the guard is still hot the new
+            # launch parks again, so there is at most one clone at a time.
+            jstore.transition(last, ("parked", "pending"), "cancelled",
+                              finished_ts=time.time(),
+                              error="superseded by the schedule's next firing")
     result = gated_launch(
         config, jstore,
         title=f"[scheduled] {rule['title']}",
@@ -240,14 +298,40 @@ def _fire_job_rule(config: Config, rule: dict, spawn) -> tuple[bool, str, Option
         workspace=rule.get("workspace", ""),
         spawn=spawn or spawn_runner,
     )
-    job = result["job"]
-    return True, f"#{rule['id']} {result['outcome']} job #{job['id']}", job["id"]
+    job, outcome = result["job"], result["outcome"]
+    if outcome in ("parked", "queued"):
+        # The tick's stdout usually goes to cron's bit bucket; the fold-back
+        # inbox is how the owner actually hears that a schedule is waiting.
+        try:
+            Inbox(config.inbox_file).append(
+                f"scheduled rule #{rid} ({rule['title']}): firing was {outcome} "
+                f"as job #{job['id']}; it will retry on the next firing, or "
+                f"resume it now with resume_job({job['id']})."
+            )
+        except Exception:
+            log.warning("could not write the inbox note for rule %s", rid, exc_info=True)
+    return {"started": outcome == "started",
+            "updates": {"last_job_id": job["id"]},
+            "note": f"#{rid} {outcome} job #{job['id']}"}
 
 
-def _fire_script_rule(rule: dict, popen) -> tuple[bool, str, Optional[int]]:
-    """Spawn a detached `iris watch` run for a script rule. Zero model calls."""
+def _fire_script_rule(rule: dict, popen) -> dict:
+    """Spawn a detached `iris watch` run for a script rule. Zero model calls.
+
+    The previous firing's pid gates the next one (best-effort: pids can in
+    principle be recycled, but a false 'still running' costs one skipped
+    firing, not a stack of concurrent commands).
+    """
+    from .jobs import _pid_alive
+
+    rid = rule["id"]
+    last_pid = rule.get("last_script_pid")
+    if isinstance(last_pid, int) and last_pid > 0 and _pid_alive(last_pid):
+        return {"started": False, "updates": {},
+                "note": f"#{rid} skipped: the previous script run (pid {last_pid}) "
+                        f"is still running (no overlap)"}
     popen = popen or subprocess.Popen
-    popen(
+    proc = popen(
         [sys.executable, "-m", "iris", "watch",
          "--name", f"[scheduled] {rule['title']}",
          "--", "/bin/sh", "-c", rule.get("command", "")],
@@ -256,7 +340,9 @@ def _fire_script_rule(rule: dict, popen) -> tuple[bool, str, Optional[int]]:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    return True, f"#{rule['id']} launched script", None
+    pid = getattr(proc, "pid", None)
+    updates = {"last_script_pid": pid} if isinstance(pid, int) else {}
+    return {"started": True, "updates": updates, "note": f"#{rid} launched script"}
 
 
 def tick_schedules(config: Config, now: Optional[float] = None,
@@ -275,27 +361,31 @@ def tick_schedules(config: Config, now: Optional[float] = None,
     launched = 0
     notes: list[str] = []
     for rule in due:
-        fired_map = {k: int(v) for k, v in (rule.get("fired") or {}).items() if k == mkey}
-        count = fired_map.get(mkey, 0)
-        cap = int(rule.get("monthly_cap", 0) or 0)
-        if cap and count >= cap:
-            notes.append(f"#{rule['id']} skipped: at its monthly cap ({cap})")
-            continue
+        # The whole per-rule body is guarded: one rule with a corrupt field
+        # must not abort the batch after take_due already consumed it.
         try:
+            count = int((rule.get("fired") or {}).get(mkey, 0))
+            cap = int(rule.get("monthly_cap", 0) or 0)
+            if cap and count >= cap:
+                notes.append(f"#{rule['id']} skipped: at its monthly cap ({cap})")
+                continue
             if rule.get("instructions"):
-                fired, note, job_id = _fire_job_rule(config, rule, spawn)
+                outcome = _fire_job_rule(config, rule, spawn)
             else:
-                fired, note, job_id = _fire_script_rule(rule, popen)
+                outcome = _fire_script_rule(rule, popen)
+            notes.append(outcome["note"])
+            updates = dict(outcome["updates"])
+            if outcome["started"]:
+                launched += 1
+                # Replacing the whole map prunes old months' counts.
+                updates["fired"] = {mkey: count + 1}
+            if updates:
+                # Guarded by created_ts: the rule may have been removed and
+                # its id reused while this firing was in flight.
+                store.update_if(rule["id"], rule.get("created_ts"), **updates)
         except Exception as exc:  # one broken rule must not stall the rest
             log.exception("schedule rule %s failed to fire", rule.get("id"))
-            fired, note, job_id = False, f"#{rule.get('id')} failed to fire: {exc}", None
-        notes.append(note)
-        if fired:
-            launched += 1
-            updates: dict = {"fired": {mkey: count + 1}}
-            if job_id is not None:
-                updates["last_job_id"] = job_id
-            store.update(rule["id"], **updates)
+            notes.append(f"#{rule.get('id')} failed to fire: {exc}")
     summary = f"schedules: {len(due)} due, {launched} launched"
     if notes:
         summary += " (" + "; ".join(notes) + ")"

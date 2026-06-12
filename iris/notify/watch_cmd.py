@@ -95,6 +95,22 @@ class _RecordingDriver:
         return result
 
 
+def _guard_parked(config) -> bool:
+    """True when the credit guard says the month is nearly spent.
+
+    The failure-triage call is a nicety, and watch runs can fire from the
+    clock (scheduled script rules), so at park level the templated line goes
+    out without spending a model call. Fail-open: a broken ledger must not
+    silence triage for attended runs.
+    """
+    try:
+        from ..usage import CreditGuard
+
+        return CreditGuard.from_config(config).should_park()
+    except Exception:
+        return False
+
+
 def watch(argv, config, *, name=None, force=False, quiet=False,
           runner=None, driver_factory=None, sender=None):
     """Run the command, decide, compose, deliver. Returns the command's exit code."""
@@ -111,7 +127,7 @@ def watch(argv, config, *, name=None, force=False, quiet=False,
     verdict = decide(event, config.watch_min_seconds, force=force, quiet=quiet)
     if verdict == "notify":
         driver = None
-        if needs_model(event):
+        if needs_model(event) and not _guard_parked(config):
             driver = driver_factory() if driver_factory is not None else build_notify_driver(config)
             if driver is not None:
                 driver = _RecordingDriver(driver, config.usage_file)

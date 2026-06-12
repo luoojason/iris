@@ -275,3 +275,14 @@ def test_list_and_cancel_schedules(sched_env):
     reply = srv.cancel_schedule(1)
     assert "Cancelled" in reply
     assert "No schedules" in srv.list_schedules()
+
+
+def test_schedule_job_caps_model_created_rules(sched_env, monkeypatch):
+    monkeypatch.setattr(srv, "MAX_MODEL_RULES", 2)
+    srv.schedule_job("a", "i", when="+1h")
+    srv.schedule_job("b", "i", when="+1h")
+    out = srv.schedule_job("c", "i", when="+1h")
+    assert "cancel" in out.lower()
+    from iris.schedules import ScheduleStore
+
+    assert len(ScheduleStore(sched_env.schedules_file).all()) == 2

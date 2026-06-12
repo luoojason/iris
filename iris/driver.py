@@ -252,7 +252,7 @@ class ClaudeDriver:
         if self.standing_orders_file:
             try:
                 text = Path(self.standing_orders_file).read_text("utf-8").strip()
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 log.warning("standing orders file unreadable: %s", self.standing_orders_file)
                 text = ""
             if text:
