@@ -328,9 +328,9 @@ def build_client(config: Config, agent: Agent):
     async def on_ready():
         log.info("Connected to Discord as %s", client.user)
         # Start the resume loop once (on_ready fires again on every reconnect).
+        # Keep a strong reference to the task so it is not garbage-collected.
         if config.auto_resume and not resume_started:
-            resume_started.append(True)
-            client.loop.create_task(_resume_loop())
+            resume_started.append(asyncio.create_task(_resume_loop()))
 
     @client.event
     async def on_message(message):
