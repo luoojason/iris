@@ -60,6 +60,21 @@ def test_from_env_defaults(tmp_path, monkeypatch):
     assert cfg.restrict_builtin_tools is True
     assert cfg.disable_auto_memory is True
     assert cfg.timeout_max_retries == 0  # timeouts report at once, do not block
+    assert cfg.auto_resume is False  # autonomous resume is off by default
+    assert cfg.auto_resume_max_per_day == 12
+
+
+def test_from_env_reads_auto_resume_knobs(tmp_path, monkeypatch):
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IRIS_AUTO_RESUME", "true")
+    monkeypatch.setenv("IRIS_AUTO_RESUME_MAX_PER_DAY", "5")
+    monkeypatch.setenv("IRIS_RESUME_POLL_SECS", "7")
+    cfg = Config.from_env(dotenv=tmp_path / "none.env")
+    assert cfg.auto_resume is True
+    assert cfg.auto_resume_max_per_day == 5
+    assert cfg.resume_poll_secs == 7.0
 
 
 def test_from_env_reads_tool_boundary_flags(tmp_path, monkeypatch):

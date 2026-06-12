@@ -136,3 +136,32 @@ def test_watch_does_not_fold_by_default(tmp_path):
     config = Config(inbox_file=str(tmp_path / "inbox.json"))
     watch(["echo", "hi"], config, runner=lambda argv: (0, 1.0, "hi"))
     assert Inbox(config.inbox_file).drain() == []
+
+
+def test_watch_enqueues_resume_when_enabled_and_asked(tmp_path):
+    from iris.autoresume import ResumeQueue
+    from iris.config import Config
+    from iris.notify.watch_cmd import watch
+    config = Config(inbox_file=str(tmp_path / "inbox.json"),
+                    resume_queue_file=str(tmp_path / "resume.json"),
+                    auto_resume=True, home_channel="555",
+                    notify_channel="", discord_token="")
+    watch(["build.sh"], config, name="build-z", fold=True, resume=True,
+          runner=lambda argv: (0, 40.0, "all done"))
+    items = ResumeQueue(config.resume_queue_file).drain()
+    assert len(items) == 1
+    assert items[0]["conversation_id"] == "discord:555"
+    assert "build-z" in items[0]["prompt"]
+
+
+def test_watch_does_not_enqueue_resume_when_master_flag_off(tmp_path):
+    from iris.autoresume import ResumeQueue
+    from iris.config import Config
+    from iris.notify.watch_cmd import watch
+    config = Config(inbox_file=str(tmp_path / "inbox.json"),
+                    resume_queue_file=str(tmp_path / "resume.json"),
+                    auto_resume=False, home_channel="555",
+                    notify_channel="", discord_token="")
+    watch(["build.sh"], config, name="build-z", fold=True, resume=True,
+          runner=lambda argv: (0, 40.0, "done"))
+    assert ResumeQueue(config.resume_queue_file).drain() == []  # master flag gates it

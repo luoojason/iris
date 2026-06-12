@@ -124,6 +124,17 @@ class Config:
     # The owner's recorded home channel (job pings, artifact uploads).
     home_channel: str = ""
 
+    # Autonomous resume: a finished background command the owner launched with
+    # autoresume=True may, when this is on, fire ONE follow-up turn on the home
+    # conversation so a chain can carry itself forward. Off by default; a daily
+    # cap bounds runaway chains; the bot poll loop reads the cross-process queue.
+    # See iris/autoresume.py.
+    auto_resume: bool = False
+    auto_resume_max_per_day: int = 12
+    resume_queue_file: str = "iris-resume.json"
+    resume_state_file: str = "iris-resume.state.json"
+    resume_poll_secs: float = 20.0
+
     # Scheduled jobs: the one place the clock may start work, and only work
     # the owner pre-recorded verbatim (see iris/schedules.py). Off by default,
     # gated separately from IRIS_JOBS. schedule_monthly_cap is the default
@@ -241,6 +252,11 @@ class Config:
                 else ["browser_evaluate", "browser_run_code_unsafe"]),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
+            auto_resume=_flag(os.environ.get("IRIS_AUTO_RESUME"), False),
+            auto_resume_max_per_day=int(os.environ.get("IRIS_AUTO_RESUME_MAX_PER_DAY", "12")),
+            resume_queue_file=os.environ.get("IRIS_RESUME_QUEUE_FILE", "iris-resume.json"),
+            resume_state_file=os.environ.get("IRIS_RESUME_STATE", "iris-resume.state.json"),
+            resume_poll_secs=float(os.environ.get("IRIS_RESUME_POLL_SECS", "20")),
             scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),
             schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
             schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),

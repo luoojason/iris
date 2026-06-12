@@ -65,6 +65,21 @@ def test_watch_runs_command_and_returns_its_code(tmp_path, monkeypatch):
     assert seen["name"] == "build"
 
 
+def test_watch_resume_flag_reaches_the_call(tmp_path, monkeypatch):
+    from iris.cli import main
+    import iris.notify.watch_cmd as wc
+    seen = {}
+
+    def fake_watch(argv, config, **kwargs):
+        seen["resume"] = kwargs.get("resume")
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(wc, "watch", fake_watch)
+    main(["watch", "--name", "build", "--fold", "--resume", "--", "true"])
+    assert seen["resume"] is True
+
+
 def test_doctor_reports_missing_binary():
     from iris.cli import doctor
     from iris.config import Config

@@ -407,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser.add_argument("--always", action="store_true", help="ping even on a quick success")
     watch_parser.add_argument("--quiet", action="store_true", help="suppress the ping for this run")
     watch_parser.add_argument("--fold", action="store_true", help="also fold the completion into Iris's next turn")
+    watch_parser.add_argument("--resume", action="store_true", help="enqueue a follow-up turn so Iris continues the chain (needs IRIS_AUTO_RESUME)")
     watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
     args = parser.parse_args(argv)
 
@@ -478,7 +479,8 @@ def main(argv: list[str] | None = None) -> int:
     if command == "watch":
         from .notify.watch_cmd import watch as run_watch
         return run_watch(watch_cmd, config, name=args.name, force=args.always,
-                         quiet=args.quiet, fold=getattr(args, "fold", False))
+                         quiet=args.quiet, fold=getattr(args, "fold", False),
+                         resume=getattr(args, "resume", False))
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)
