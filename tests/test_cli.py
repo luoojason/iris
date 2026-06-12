@@ -226,3 +226,17 @@ def test_schedule_cmd_rejects_bad_rules(tmp_path, capsys):
         schedule_action="add", title="t", at="+1h", every="",
         instructions="", command="", grant="", workspace="", cap=None))
     assert rc == 2
+
+
+def test_doctor_warns_when_browser_grant_lacks_npx(tmp_path, capsys, monkeypatch):
+    import iris.cli as cli_mod
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    real_which = cli_mod.shutil.which
+    monkeypatch.setattr(cli_mod.shutil, "which",
+                        lambda name: None if name == "npx" else real_which(name))
+    cli_mod.doctor(Config(claude_bin=fake, jobs_enabled=True, job_grants=["browser"]),
+                   probe=False)
+    out = capsys.readouterr().out
+    assert "browser" in out and "npx" in out

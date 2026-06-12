@@ -174,11 +174,20 @@ IRIS_ALLOWED_TOOLS=...,mcp__jobs__start_job,mcp__jobs__job_status,mcp__jobs__lis
 with a `jobs` server entry in your MCP config
 (`python -m iris.mcp.jobs`). The pieces:
 
-- **Grants.** A job always gets subagents. It may request `shell` and
-  `files`, clamped to your `IRIS_JOB_GRANTS` ceiling; refusals are reported,
-  never silent. The job denylist is *derived* from the driver's
+- **Grants.** A job always gets subagents. It may request `shell`, `files`,
+  and `browser`, clamped to your `IRIS_JOB_GRANTS` ceiling; refusals are
+  reported, never silent. The job denylist is *derived* from the driver's
   `DANGEROUS_BUILTINS` (an explicit denylist replaces the default, so it must
   track the source of truth).
+- **The browser grant.** `browser` wires the official Playwright MCP server
+  into the job (needs Node/npx; `iris doctor` checks). The browser runs
+  headless with its own persistent profile (`IRIS_BROWSER_PROFILE_DIR`) — an
+  agent-owned cookie jar, never your real browser profile — and the job's
+  strict MCP config exposes nothing else. Two cautions: browser turns are
+  token-heavy (snapshots bill like big pastes), and any site the profile is
+  logged into is reachable by whoever can start jobs, so keep the bot
+  locked to your own user id. Logged-in browsing is for your own accounts
+  only.
 - **Workspaces.** Jobs that touch a repo name a workspace you registered
   with `iris workspaces add <name> <path>` (`remove`, `list`). The model only
   ever speaks names; paths stay on your side of the boundary

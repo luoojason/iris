@@ -108,6 +108,11 @@ class Config:
     # Optional model/persona for job turns; empty falls back to the chat model.
     job_model: str = ""
     job_persona: str = ""
+    # The browser job grant: how to launch the Playwright MCP server, and the
+    # isolated profile directory it gets (never the owner's real browser
+    # profile). Only used when a job is granted 'browser'.
+    browser_mcp_cmd: str = "npx @playwright/mcp@latest --headless"
+    browser_profile_dir: str = "iris-browser-profile"
     # Where finished background work queues notes for the next chat turn.
     inbox_file: str = "iris-inbox.json"
     # The owner's recorded home channel (job pings, artifact uploads).
@@ -220,6 +225,10 @@ class Config:
             job_timeout=float(os.environ.get("IRIS_JOB_TIMEOUT", "1800")),
             job_model=os.environ.get("IRIS_JOB_MODEL", ""),
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
+            browser_mcp_cmd=os.environ.get(
+                "IRIS_BROWSER_MCP_CMD", "npx @playwright/mcp@latest --headless"),
+            browser_profile_dir=os.environ.get(
+                "IRIS_BROWSER_PROFILE_DIR", "iris-browser-profile"),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
             scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),

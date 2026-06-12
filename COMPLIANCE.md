@@ -71,7 +71,9 @@ not "free."
   ledger records every firing, and `iris usage` projects your month-end pace.
 - To stretch the credit further: use `IRIS_MODEL=claude-haiku-4-5-...` for a
   cheaper brain, keep personas and context lean, and avoid wiring tools that
-  balloon the prompt.
+  balloon the prompt. The `browser` job grant is the heaviest tool Iris can
+  wire (page snapshots bill like big pastes), and its profile holds only
+  logins to your own accounts — browsing as someone else is out of scope.
 
 Claim your monthly agent credit once in your Claude account, or programmatic
 requests will not draw from it.

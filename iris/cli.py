@@ -135,6 +135,13 @@ def doctor(config: Config, probe: bool = True) -> int:
             print(f"credit guard: {pct:.0f}% of ${config.usage_budget_usd:.2f} used this month ({lvl})")
         except Exception as exc:
             print(f"credit guard: could not read the ledger ({exc})")
+    if "browser" in config.job_grants:
+        if shutil.which("npx"):
+            print("browser grant: on (Playwright MCP via npx)")
+        else:
+            print("WARNING: 'browser' is in IRIS_JOB_GRANTS but npx is not on PATH,")
+            print("  so the Playwright MCP server cannot launch. Install Node.js, or")
+            print("  point IRIS_BROWSER_MCP_CMD at a working launch command.")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")

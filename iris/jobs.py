@@ -56,6 +56,9 @@ GRANT_TOOLS = {
     "subagents": ("Task", "Agent"),
     "shell": ("Bash", "BashOutput", "KillShell"),
     "files": ("Write", "Edit", "NotebookEdit"),
+    # Unlocks no built-ins: the capability arrives as the Playwright MCP
+    # server, wired into the job's mcp config by build_job_driver.
+    "browser": (),
 }
 
 # How much of a report travels in the fold-back note and the Discord ping.
@@ -364,6 +367,35 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def write_browser_mcp_config(config: Config) -> str:
+    """Write the job-scoped mcp config that carries the Playwright server.
+
+    The browser gets its own persistent profile directory (cookies and logins
+    the owner deliberately gave the agent), never the owner's real browser
+    profile. The command is owner-configured (IRIS_BROWSER_MCP_CMD); the
+    profile flag is appended here so a rewired command cannot silently drop
+    the isolation.
+    """
+    import shlex
+
+    argv = shlex.split(config.browser_mcp_cmd)
+    if not argv:
+        raise ValueError("IRIS_BROWSER_MCP_CMD is empty")
+    profile = str(Path(config.browser_profile_dir).resolve())
+    spec = {
+        "mcpServers": {
+            "playwright": {
+                "command": argv[0],
+                "args": argv[1:] + ["--user-data-dir", profile],
+            }
+        }
+    }
+    fd, path = tempfile.mkstemp(prefix="iris-job-mcp-", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(spec, handle, indent=2)
+    return path
+
+
 def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
                      child_pid_callback=None) -> ClaudeDriver:
     """The job's ClaudeDriver: same hardened path as chat, wider grants.
@@ -380,12 +412,21 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
     """
     grants = list(job.get("grants") or ["subagents"])
     cwd = workspace_path or tempfile.mkdtemp(prefix="iris-job-")
+    allowed = job_allowed_builtins(grants)
+    mcp_config = None
+    if "browser" in grants:
+        mcp_config = write_browser_mcp_config(config)
+        # The bare server name pre-approves every tool the server exposes;
+        # --strict-mcp-config (set by the driver whenever mcp_config is given)
+        # keeps the job from seeing any other server on the host.
+        allowed = allowed + ["mcp__playwright"]
     return ClaudeDriver(
         claude_bin=config.claude_bin,
         model=config.job_model or config.model,
         append_system_prompt_file=config.job_persona or None,
+        mcp_config=mcp_config,
         permission_mode=config.permission_mode,
-        allowed_tools=job_allowed_builtins(grants) or None,
+        allowed_tools=allowed or None,
         disallowed_tools=job_disallowed(grants),
         restrict_builtin_tools=False,
         disable_auto_memory=config.disable_auto_memory,
