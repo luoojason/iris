@@ -343,7 +343,8 @@ def run_in_background(command: str, label: str = "", workspace: str = "") -> str
     # iris watch runs the command and pings the notify channel on completion
     # (templated on success, one model call to interpret a failure). It loads
     # .env from this server's cwd, so spawn with the inherited cwd.
-    argv = [sys.executable, "-m", "iris", "watch", "--name", name, "--", "/bin/sh", "-c", inner]
+    argv = [sys.executable, "-m", "iris", "watch", "--name", name, "--fold",
+            "--", "/bin/sh", "-c", inner]
     _launch_watch(argv, None)
     return (f"Started '{name}' in the background. It runs to completion however long "
             f"it takes (no model turn is held open, so no timeout), and I will ping "
