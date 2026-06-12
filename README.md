@@ -121,6 +121,29 @@ Everything is environment variables (see `.env.example`). The ones that matter:
 | `IRIS_MCP_CONFIG` | MCP tool config (gives the agent tools). |
 | `IRIS_PERMISSION_MODE` + `IRIS_ALLOWED_TOOLS` | Control which tools run unattended. |
 
+### Control commands
+
+A message that is exactly a bang command is handled before the brain runs, so
+it costs zero inference and works even mid-turn:
+
+| Command | What it does |
+| --- | --- |
+| `!usage` | This month's spend and projected month-end pace. |
+| `!jobs` | Recent background jobs and their states. |
+| `!schedules` | Recorded scheduled jobs (when enabled). |
+| `!status` | Whether a reply is in flight here, queue depth, active jobs. |
+| `!stop` | Stop the reply being written in this conversation. |
+| `!stop <id>` | Cancel background job `#id` (alias `!cancel <id>`) — kills its process group. |
+| `!new` | Start a fresh conversation here (aliases `!reset`, `!forget`, `!newchat`). |
+| `!help` | List the commands. |
+
+They run through the same access rules as any message (the allowlist, and the
+mention gate in channels), so use them in a DM or thread, or `@mention` the bot
+in a channel. `!stop <id>` is the real kill switch for autonomous work: a chat
+`!stop` drops the pending reply, but cancelling a *job* terminates its actual
+process group. Unknown `!words` and prose like `!help me with X` fall through to
+the agent untouched.
+
 ## Tools via MCP
 
 Out of the box Iris is a plain chat bot, which runs anywhere `claude` is

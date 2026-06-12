@@ -210,3 +210,68 @@ def test_live_runner_closes_handle_when_send_fails():
         assert closed == [True]
 
     asyncio.run(go())
+
+
+# -- cancel / stop control -----------------------------------------------------
+
+
+def test_cancel_clears_the_queue_and_reports_running():
+    async def go():
+        gate = asyncio.Event()
+
+        async def run_turn(prompt, has_attachments):
+            await gate.wait()
+            return "done"
+
+        sent = []
+
+        async def send(text):
+            sent.append(text)
+
+        runner = ConversationRunner(run_turn=run_turn, send=send,
+                                    ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="one"))
+        await asyncio.sleep(0)  # let the worker pick it up
+        runner.submit(Turn(text="two"))  # queued behind the in-flight turn
+        assert runner.busy
+        assert runner.pending == 1
+        running = runner.cancel()
+        assert running is True
+        assert runner.pending == 0
+        gate.set()  # the orphaned turn finishes in the background, reply discarded
+        await asyncio.sleep(0.01)
+        assert sent == []  # nothing was sent after cancel
+
+    asyncio.run(go())
+
+
+def test_cancel_when_idle_reports_not_running():
+    async def go():
+        runner, sent, _ = _runner()
+        assert runner.cancel() is False
+        assert runner.pending == 0
+
+    asyncio.run(go())
+
+
+def test_pending_property_counts_queued_turns():
+    async def go():
+        gate = asyncio.Event()
+
+        async def run_turn(prompt, has_attachments):
+            await gate.wait()
+            return "x"
+
+        async def send(text):
+            pass
+
+        runner = ConversationRunner(run_turn=run_turn, send=send,
+                                    ack_line=lambda: None, ack_delay=10)
+        runner.submit(Turn(text="a"))
+        await asyncio.sleep(0)
+        runner.submit(Turn(text="b"))
+        runner.submit(Turn(text="c"))
+        assert runner.pending == 2
+        gate.set()
+
+    asyncio.run(go())

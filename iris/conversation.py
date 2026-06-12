@@ -92,6 +92,26 @@ class ConversationRunner:
     def busy(self) -> bool:
         return self._worker is not None and not self._worker.done()
 
+    @property
+    def pending(self) -> int:
+        return len(self._pending)
+
+    def cancel(self) -> bool:
+        """Stop the in-flight reply and drop queued turns. True if one was running.
+
+        Best-effort by design: the running turn's ``claude`` subprocess finishes
+        in its own thread and its reply is discarded, so this stops the output
+        and clears the backlog rather than killing the model call mid-flight.
+        The harder kill switch is cancelling a background *job* (``!stop <id>``),
+        which does terminate the job's process group.
+        """
+        running = self.busy
+        self._pending.clear()
+        if self._worker is not None:
+            self._worker.cancel()
+            self._worker = None
+        return running
+
     def submit(self, turn: Turn) -> None:
         """Queue a message. Starts a worker if idle; else confirms receipt.
 
@@ -208,6 +228,27 @@ class LiveConversationRunner:
     @property
     def busy(self) -> bool:
         return self._worker is not None and not self._worker.done()
+
+    @property
+    def pending(self) -> int:
+        return len(self._pending)
+
+    def cancel(self) -> bool:
+        """Stop the in-flight live turn and drop queued turns. True if one ran.
+
+        Closing the live handle releases the conversation lock immediately, so
+        the live path frees faster than the one-shot path; the stream subprocess
+        may still wind down on its own but its output is no longer sent.
+        """
+        running = self.busy or (self._live is not None and self._live.is_open())
+        self._pending.clear()
+        live = self._live
+        if live is not None:
+            live.close()
+        if self._worker is not None:
+            self._worker.cancel()
+            self._worker = None
+        return running
 
     def submit(self, turn: Turn) -> None:
         """Inject into the open turn if there is one; else queue for the next."""
