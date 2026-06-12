@@ -1,6 +1,6 @@
 """A tiny MCP memory server: give the agent durable notes across sessions.
 
-This is an example of how Iris keeps Hermes-style capabilities while the brain
+This is an example of how Iris adds durable capabilities while the brain
 is the official ``claude`` binary. Instead of reimplementing a tool system, we
 expose tools the way Claude Code already understands them: as an MCP server.
 ``claude --mcp-config`` launches this process and the model can call its tools.

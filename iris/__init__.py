@@ -2,8 +2,7 @@
 
 Iris uses the official ``claude`` binary (Claude Code) in headless mode as its
 brain, so it costs nothing beyond your existing Claude Pro or Max plan and stays
-within Anthropic's terms. It is a Claude-subscription-native alternative to the
-Hermes agent, with its messaging, persona, memory, and tools rebuilt on Claude
+within Anthropic's terms. Its messaging, persona, memory, and tools are built on Claude
 Code's own extension points (MCP, sessions, system prompts).
 """
 

@@ -6,8 +6,7 @@
 A personal chat agent that runs on your Claude subscription. Iris uses the
 official `claude` command (Claude Code) as its brain in headless mode, so it
 runs on your existing Pro or Max plan instead of a separate pay-per-token API
-bill. It is a subscription-native alternative to the [Hermes
-agent](https://github.com/NousResearch/hermes-agent).
+bill.
 
 As of June 15, 2026 this is a **supported path**: Anthropic's agent credit
 explicitly covers "the `claude -p` command, and third-party apps built on the
@@ -24,7 +23,7 @@ early 2026. Iris takes the durable route: it shells out to the `claude` binary
 you already installed and signed in, the way its `-p` headless mode is meant to
 be used. No token extraction, no impersonation.
 
-You give up Hermes's bespoke agent loop. You keep a real assistant: a persona,
+You keep a real assistant: a persona,
 memory across conversations, custom tools, and a Discord front end, all on Claude
 Code's own extension points.
 
@@ -105,8 +104,8 @@ Claude Code skills are just `SKILL.md` folders, loaded on demand by description.
 Anything in `~/.claude/skills/` is available to the agent. To keep your bot's
 skills in their own directory instead, point `IRIS_SKILLS_DIR` at a folder of
 skill folders and Iris symlinks them into the skills path at startup. Run
-`python -m iris skills` to see what the agent can use. Hermes skills use the same
-format, so they carry over by copying the folders across.
+`python -m iris skills` to see what the agent can use. Any `SKILL.md` folders you
+already have carry over by copying them across.
 
 ## Configuration
 
@@ -450,20 +449,20 @@ token trigger is set to fire well before it). Compaction trades a little deep
 history for a conversation that runs indefinitely, the same trade Claude Code's
 own auto-compact makes.
 
-## What carries over from Hermes
+## What fits this model
 
-Because Claude Code's skills and tools use open formats, most of a Hermes-style
+Because Claude Code's skills and tools use open formats, most of a personal
 agent maps cleanly onto the official client:
 
-- **Carries over well:** persona, per-conversation memory, shell and file tools,
+- **Built in:** persona, per-conversation memory, shell and file tools,
   web search and fetch, planning, subagent delegation, browser automation (via
   the Playwright MCP), and Claude Code skills (the same `SKILL.md` format).
 - **Re-add as MCP servers:** custom tools, free local text-to-speech and
   speech-to-text, platform admin actions, history search.
-- **Does not carry over:** anything that needs a paid third-party API key (image
+- **Out of scope:** anything that needs a paid third-party API key (image
   and video generation, paid search and voice backends), multi-model
-  mixture-of-agents reasoning, and Hermes's single-turn tool-chain collapse.
-  These are out of scope for a free, single-brain, single-subscription agent.
+  mixture-of-agents reasoning. These are out of
+  scope for a free, single-brain, single-subscription agent.
 
 ## Status
 
@@ -474,8 +473,7 @@ are wired and unit-tested in isolation, but have **not** yet been exercised
 against a live bot connection. Start with `python -m iris chat` to try the brain,
 then wire up a transport.
 
-Roadmap: a skills loader, the free-local voice MCP servers, and a documented
-feature-survival map against Hermes.
+Roadmap: a skills loader and the free-local voice MCP servers.
 
 ## Related work
 
@@ -485,13 +483,10 @@ OpenClaw's `mcp serve` channel bridge, and the ClaudeClaw supervisor pattern.
 Iris's contribution is a small, standalone, honestly-documented take aimed at one
 person running it on their own plan.
 
-## Credit
+## Name
 
-Iris is inspired by [Hermes](https://github.com/NousResearch/hermes-agent) by
-Nous Research (MIT licensed). It shares none of Hermes's code; it is a clean
-reimplementation aimed at the subscription-via-official-client approach. The name
-and branding are independent and imply no association with or endorsement by Nous
-Research or Anthropic.
+The name and branding are Iris's own and imply no association with or
+endorsement by Anthropic.
 
 ## License
 
