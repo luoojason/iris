@@ -397,3 +397,56 @@ def test_standing_orders_bad_encoding_never_breaks_a_turn(tmp_path):
     d = ClaudeDriver(standing_orders_file=str(orders), runner=make_runner([]))
     cmd = d.build_command()  # must not raise
     assert "--append-system-prompt" not in cmd
+
+
+# -- never emit both append-system-prompt flags (the CLI rejects the pair) ------
+
+
+def _append_flags(cmd):
+    return [c for c in cmd if c in ("--append-system-prompt", "--append-system-prompt-file")]
+
+
+def test_persona_and_standing_orders_merge_into_one_inline_flag(tmp_path):
+    persona = tmp_path / "p.md"; persona.write_text("PERSONA-BASE", encoding="utf-8")
+    orders = tmp_path / "o.md"; orders.write_text("ORDER-ONE", encoding="utf-8")
+    d = ClaudeDriver(append_system_prompt_file=str(persona),
+                     standing_orders_file=str(orders), runner=make_runner([]))
+    cmd = d.build_command()
+    # exactly one flag, and it is the inline one carrying BOTH sources
+    assert _append_flags(cmd) == ["--append-system-prompt"]
+    val = cmd[cmd.index("--append-system-prompt") + 1]
+    assert val.index("PERSONA-BASE") < val.index("ORDER-ONE")
+
+
+def test_persona_and_digest_merge_into_one_inline_flag(tmp_path):
+    persona = tmp_path / "p.md"; persona.write_text("PERSONA", encoding="utf-8")
+    d = ClaudeDriver(append_system_prompt_file=str(persona),
+                     system_prompt_extra=lambda: "DIGEST", runner=make_runner([]))
+    cmd = d.build_command()
+    assert _append_flags(cmd) == ["--append-system-prompt"]
+    val = cmd[cmd.index("--append-system-prompt") + 1]
+    assert "PERSONA" in val and "DIGEST" in val
+
+
+def test_persona_alone_still_uses_the_file_flag(tmp_path):
+    persona = tmp_path / "p.md"; persona.write_text("PERSONA", encoding="utf-8")
+    d = ClaudeDriver(append_system_prompt_file=str(persona), runner=make_runner([]))
+    cmd = d.build_command()
+    assert _append_flags(cmd) == ["--append-system-prompt-file"]
+
+
+def test_orders_without_persona_use_only_the_inline_flag(tmp_path):
+    orders = tmp_path / "o.md"; orders.write_text("ORDER", encoding="utf-8")
+    d = ClaudeDriver(standing_orders_file=str(orders), runner=make_runner([]))
+    assert _append_flags(d.build_command()) == ["--append-system-prompt"]
+
+
+def test_never_both_append_flags_across_combinations(tmp_path):
+    persona = tmp_path / "p.md"; persona.write_text("P", encoding="utf-8")
+    orders = tmp_path / "o.md"; orders.write_text("O", encoding="utf-8")
+    for so, extra in ((None, None), (str(orders), None), (None, lambda: "D"), (str(orders), lambda: "D")):
+        d = ClaudeDriver(append_system_prompt_file=str(persona),
+                         standing_orders_file=so, system_prompt_extra=extra, runner=make_runner([]))
+        flags = _append_flags(d.build_command())
+        assert flags in (["--append-system-prompt"], ["--append-system-prompt-file"]), flags
+        assert len(flags) == 1

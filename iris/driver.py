@@ -219,11 +219,21 @@ class ClaudeDriver:
         chosen_model = model or self.model
         if chosen_model:
             cmd += ["--model", chosen_model]
-        if self.append_system_prompt_file:
+        # The CLI rejects --append-system-prompt and --append-system-prompt-file
+        # together ("Cannot use both ... Please use only one."), so never emit
+        # both. When there is inline content (standing orders / the pinned
+        # digest), fold the persona file into it and pass one inline flag;
+        # otherwise keep the persona on the file flag (out of argv).
+        extra = self._append_system_prompt_value()
+        if extra and self.append_system_prompt_file:
+            persona = self._read_text(self.append_system_prompt_file)
+            merged = "\n\n".join(p for p in (persona, extra) if p)
+            if merged:
+                cmd += ["--append-system-prompt", merged]
+        elif extra:
+            cmd += ["--append-system-prompt", extra]
+        elif self.append_system_prompt_file:
             cmd += ["--append-system-prompt-file", self.append_system_prompt_file]
-        appended = self._append_system_prompt_value()
-        if appended:
-            cmd += ["--append-system-prompt", appended]
         if self.mcp_config:
             # --strict-mcp-config so the bot uses only our tools, not whatever
             # MCP servers the operator happens to have in ~/.claude.json.
@@ -239,6 +249,15 @@ class ClaudeDriver:
             cmd += ["--add-dir", directory]
         return cmd
 
+    @staticmethod
+    def _read_text(path: str) -> str:
+        """Read a system-prompt file, degrading an unreadable file to ''."""
+        try:
+            return Path(path).read_text("utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            log.warning("system prompt file unreadable: %s", path)
+            return ""
+
     def _append_system_prompt_value(self) -> Optional[str]:
         """The merged ``--append-system-prompt`` value: static text + standing orders.
 
@@ -250,11 +269,7 @@ class ClaudeDriver:
         if self.append_system_prompt:
             parts.append(self.append_system_prompt)
         if self.standing_orders_file:
-            try:
-                text = Path(self.standing_orders_file).read_text("utf-8").strip()
-            except (OSError, UnicodeDecodeError):
-                log.warning("standing orders file unreadable: %s", self.standing_orders_file)
-                text = ""
+            text = self._read_text(self.standing_orders_file)
             if text:
                 parts.append(text)
         if self.system_prompt_extra is not None:

@@ -250,7 +250,7 @@ def describe_rule(rule: dict, now: Optional[float] = None) -> str:
         fired = int((rule.get("fired") or {}).get(month_key(now), 0))
     except (TypeError, ValueError):
         fired = 0
-    return (f"#{rule['id']} [{mode}]{state} {rule['title']} — next {fmt_ts(rule.get('due_ts', 0))}"
+    return (f"#{rule.get('id')} [{mode}]{state} {rule.get('title', '(untitled)')} — next {fmt_ts(rule.get('due_ts', 0))}"
             f"{cadence}, cap {rule.get('monthly_cap')}/month, fired {fired} this month")
 
 
@@ -268,7 +268,7 @@ def _fire_job_rule(config: Config, rule: dict, spawn) -> dict:
 
     rid = rule["id"]
     if not config.jobs_enabled:
-        return {"started": False, "updates": {},
+        return {"started": False, "recorded": False, "updates": {},
                 "note": f"#{rid} skipped: jobs are disabled (set IRIS_JOBS=true)"}
     jstore = JobStore(config.jobs_file, keep=config.jobs_keep)
     # On a schedule-only deployment the tick may be the ONLY thing that ever
@@ -279,7 +279,7 @@ def _fire_job_rule(config: Config, rule: dict, spawn) -> dict:
     if isinstance(last, int):
         prior = jstore.get(last)
         if prior and prior.get("state") == "running":
-            return {"started": False, "updates": {},
+            return {"started": False, "recorded": False, "updates": {},
                     "note": f"#{rid} skipped: the previous run (job #{last}) "
                             f"is still running (no overlap)"}
         if prior and prior.get("state") in ("parked", "pending"):
@@ -310,7 +310,9 @@ def _fire_job_rule(config: Config, rule: dict, spawn) -> dict:
             )
         except Exception:
             log.warning("could not write the inbox note for rule %s", rid, exc_info=True)
-    return {"started": outcome == "started",
+    # started/parked/queued all create a job row, so the rule has fired and a
+    # one-shot may be consumed; a skip with no job recorded must not consume it.
+    return {"started": outcome == "started", "recorded": True,
             "updates": {"last_job_id": job["id"]},
             "note": f"#{rid} {outcome} job #{job['id']}"}
 
@@ -327,7 +329,7 @@ def _fire_script_rule(rule: dict, popen) -> dict:
     rid = rule["id"]
     last_pid = rule.get("last_script_pid")
     if isinstance(last_pid, int) and last_pid > 0 and _pid_alive(last_pid):
-        return {"started": False, "updates": {},
+        return {"started": False, "recorded": False, "updates": {},
                 "note": f"#{rid} skipped: the previous script run (pid {last_pid}) "
                         f"is still running (no overlap)"}
     popen = popen or subprocess.Popen
@@ -342,7 +344,8 @@ def _fire_script_rule(rule: dict, popen) -> dict:
     )
     pid = getattr(proc, "pid", None)
     updates = {"last_script_pid": pid} if isinstance(pid, int) else {}
-    return {"started": True, "updates": updates, "note": f"#{rid} launched script"}
+    return {"started": True, "recorded": True, "updates": updates,
+            "note": f"#{rid} launched script"}
 
 
 def tick_schedules(config: Config, now: Optional[float] = None,
@@ -379,6 +382,12 @@ def tick_schedules(config: Config, now: Optional[float] = None,
                 launched += 1
                 # Replacing the whole map prunes old months' counts.
                 updates["fired"] = {mkey: count + 1}
+            # take_due disabled a one-shot rule when it came due; if nothing was
+            # actually recorded (jobs off, a prior run still active), it never
+            # ran, so re-enable it to retry instead of silently losing it.
+            if not outcome.get("recorded", outcome["started"]) and \
+                    int(rule.get("repeat_secs", 0) or 0) == 0:
+                updates["enabled"] = True
             if updates:
                 # Guarded by created_ts: the rule may have been removed and
                 # its id reused while this firing was in flight.

@@ -209,18 +209,21 @@ def reminders_tick(config: Config) -> int:
 
     from . import reminders as rmod
 
-    if not config.discord_token:
-        print("reminders-tick: IRIS_DISCORD_TOKEN is not set")
-        return 1
-    store = rmod.ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
-    due = store.pop_due()
-    sent = 0
-    for job in due:
-        if rmod.send_discord_message(job["channel_id"], rmod.render_reminder(job), config.discord_token):
-            sent += 1
-        else:
-            store.requeue(job)  # retried on the next tick
-    print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    # Reminder delivery needs the bot token (a REST post), but the budget,
+    # wakes, and schedules ticks below do not all need it (a schedule launch is
+    # token-free), so a missing token skips only delivery, not the whole tick.
+    if config.discord_token:
+        store = rmod.ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
+        due = store.pop_due()
+        sent = 0
+        for job in due:
+            if rmod.send_discord_message(job["channel_id"], rmod.render_reminder(job), config.discord_token):
+                sent += 1
+            else:
+                store.requeue(job)  # retried on the next tick
+        print(f"reminders-tick: {len(due)} due, {sent} delivered")
+    else:
+        print("reminders-tick: IRIS_DISCORD_TOKEN not set; skipping reminder delivery")
     # The budget check and the wake rules ride the same tick. Neither may
     # ever take reminder delivery down with it, so both are fail-soft to a
     # printed line, and neither makes a model call.

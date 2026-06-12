@@ -383,3 +383,33 @@ def test_describe_rule_reports_only_the_current_month(tmp_path):
     store.update(rule["id"], fired={"2020-01": 30})
     line = describe_rule(store.get(rule["id"]), now=NOW)
     assert "fired 0 this month" in line
+
+
+# -- review: don't consume a one-shot rule that never actually ran -------------
+
+
+def test_oneshot_job_rule_survives_a_skip_when_jobs_disabled(tmp_path):
+    config = make_config(tmp_path, jobs_enabled=False)  # scheduled on, jobs off
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config, every="")  # one-shot
+    tick_schedules(config, now=NOW, spawn=lambda jid, **kw: None)
+    fresh = store.get(rule["id"])
+    assert fresh["enabled"] is True, "a one-shot that could not run must not be consumed"
+    assert fresh.get("fired", {}) == {}
+
+
+def test_oneshot_job_rule_is_consumed_once_it_actually_starts(tmp_path):
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    rule = job_rule(store, config, every="")
+    spawned = []
+    tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid))
+    assert spawned == [1]
+    assert store.get(rule["id"])["enabled"] is False  # fired, so consumed
+
+
+def test_describe_rule_tolerates_a_row_missing_id_or_title(tmp_path):
+    from iris.schedules import describe_rule
+    # a hand-edited row missing keys must not raise
+    line = describe_rule({"due_ts": 0, "monthly_cap": 5})
+    assert "#" in line

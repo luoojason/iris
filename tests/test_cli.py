@@ -279,3 +279,28 @@ def test_schedule_add_through_the_real_parser_creates_a_script_rule(tmp_path, mo
     assert len(rules) == 1
     assert rules[0]["command"] == "echo hi"
     assert rules[0]["instructions"] == ""
+
+
+def test_reminders_tick_runs_subticks_without_a_discord_token(tmp_path, monkeypatch, capsys):
+    # The schedules/budget/wakes ticks must not be gated behind the reminder
+    # delivery token: a tokenless run should still fire scheduled work.
+    from iris.cli import reminders_tick
+    from iris.config import Config
+    from iris.schedules import ScheduleStore, add_rule
+
+    monkeypatch.chdir(tmp_path)
+    sfile = tmp_path / "s.json"
+    add_rule(ScheduleStore(sfile), title="b", when="2020-01-01T00:00:00Z",
+             every="every 1d", command="true")
+    calls = []
+    monkeypatch.setattr("iris.schedules.subprocess.Popen",
+                        lambda *a, **k: calls.append(a) or type("P", (), {"pid": 4242})())
+    rc = reminders_tick(Config(discord_token="", scheduled_jobs_enabled=True,
+                               jobs_enabled=True, schedules_file=str(sfile),
+                               usage_file=str(tmp_path / "u.json"),
+                               wakes_file=str(tmp_path / "w.json"),
+                               wakes_state=str(tmp_path / "w.s.json")))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "schedules: 1 due, 1 launched" in out
+    assert calls  # the script rule actually spawned despite no token
