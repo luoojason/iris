@@ -105,7 +105,7 @@ def test_file_exists_arms_then_fires_on_appearance(tmp_path):
     line, pings, inbox = tick(tmp_path, pings=pings)
     assert "1 fired" in line
     assert pings == [("home-1", "wake drop: it landed")]
-    assert inbox.drain() == ["wake drop: it landed"]
+    assert inbox.drain("discord:home-1") == ["wake drop: it landed"]
 
     # still present: an edge already consumed does not re-fire
     line, pings, inbox = tick(tmp_path, now=NOW + 7200, pings=[])
@@ -242,7 +242,7 @@ def test_failed_ping_retries_next_tick_but_folds_back_once(tmp_path):
     pings = []
     line, pings, inbox = tick(tmp_path, now=NOW + 120, pings=pings)
     assert pings == [("home-1", "wake drop: m")]  # retried
-    assert inbox.drain() == ["wake drop: m"]  # queued exactly once
+    assert inbox.drain("discord:home-1") == ["wake drop: m"]  # queued exactly once
 
     line, pings, _ = tick(tmp_path, now=NOW + 180, pings=[])
     assert pings == []  # delivered; nothing left to retry
@@ -469,7 +469,7 @@ def test_url_arms_then_fires_on_change(tmp_path):
     line, pings, inbox = utick(tmp_path, fetch, now=NOW + 120, pings=[])  # changed
     assert "1 fired" in line
     assert pings == [("home-1", "wake site: the page changed")]
-    assert inbox.drain() == ["wake site: the page changed"]
+    assert inbox.drain("discord:home-1") == ["wake site: the page changed"]
 
 
 def test_url_failed_fetch_does_not_fire_or_advance_state(tmp_path):

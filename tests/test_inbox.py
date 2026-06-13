@@ -54,3 +54,31 @@ def test_non_string_entries_are_ignored(tmp_path):
     path = tmp_path / "inbox.json"
     path.write_text(json.dumps(["good", 42, None, "also good"]), encoding="utf-8")
     assert Inbox(path).drain() == ["good", "also good"]
+
+
+def test_notes_are_scoped_to_their_conversation(tmp_path):
+    # The bug fix: a note tagged for one conversation must not surface in another.
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("knicks job finished", conversation_id="discord:AAA")
+    box.append("trae young job finished", conversation_id="discord:BBB")
+    assert box.drain("discord:BBB") == ["trae young job finished"]   # only B's note
+    assert box.drain("discord:AAA") == ["knicks job finished"]        # A's still there
+    assert box.drain("discord:AAA") == []                             # now drained
+
+
+def test_drain_of_one_conversation_leaves_others_intact(tmp_path):
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("for home", conversation_id="discord:HOME")
+    box.append("untagged legacy")  # conversation_id None
+    assert box.drain("discord:OTHER") == []          # nothing for an unrelated thread
+    assert box.drain() == ["untagged legacy"]         # drain(None) takes the legacy one
+    assert box.drain("discord:HOME") == ["for home"]  # home note untouched by the above
+
+
+def test_restore_keeps_the_conversation_tag(tmp_path):
+    box = Inbox(tmp_path / "inbox.json")
+    box.append("a", conversation_id="discord:X")
+    drained = box.drain("discord:X")
+    box.restore(drained, "discord:X")
+    assert box.drain("discord:Y") == []               # didn't leak to Y
+    assert box.drain("discord:X") == ["a"]

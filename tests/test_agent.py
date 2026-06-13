@@ -272,7 +272,7 @@ def test_respond_folds_inbox_entries_into_the_prompt(tmp_path):
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #1 (audit) finished: all clean")
+    box.append("job #1 (audit) finished: all clean", conversation_id="c1")
     driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)])
     agent = Agent(driver, store, inbox=box)
     agent.respond("c1", "hello")
@@ -280,7 +280,7 @@ def test_respond_folds_inbox_entries_into_the_prompt(tmp_path):
     assert prompt.startswith("[while you were away]")
     assert "job #1 (audit) finished: all clean" in prompt
     assert prompt.endswith("hello")
-    assert box.drain() == []  # consumed by the successful turn
+    assert box.drain("c1") == []  # consumed by the successful turn
 
 
 def test_failed_turn_restores_inbox_entries(tmp_path):
@@ -288,13 +288,13 @@ def test_failed_turn_restores_inbox_entries(tmp_path):
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #2 finished: report text")
+    box.append("job #2 finished: report text", conversation_id="c1")
     driver = FakeDriver([ClaudeResult(text="", session_id=None, is_error=True, error="boom")])
     agent = Agent(driver, store, inbox=box)
     result = agent.respond("c1", "hello")
     assert result.is_error
     # a flaky turn must not eat the report; it comes back next turn
-    assert box.drain() == ["job #2 finished: report text"]
+    assert box.drain("c1") == ["job #2 finished: report text"]
 
 
 def test_empty_inbox_leaves_the_prompt_alone(tmp_path):
@@ -334,7 +334,7 @@ async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #3 finished: done")
+    box.append("job #3 finished: done", conversation_id="c1")
     sd = FakeStreamDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)])
     agent = Agent(FakeDriver([]), store, stream_driver=sd, inbox=box)
     turn = agent.live_turn("c1", "hello")
@@ -345,7 +345,7 @@ async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
     assert sd.prompts[0].startswith("[while you were away]")
     assert "job #3 finished: done" in sd.prompts[0]
     assert sd.prompts[0].endswith("hello")
-    assert box.drain() == []
+    assert box.drain("c1") == []
 
 
 async def test_live_turn_restores_inbox_on_error(tmp_path):
@@ -374,7 +374,7 @@ async def test_live_turn_restores_inbox_on_error(tmp_path):
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #4 finished: report")
+    box.append("job #4 finished: report", conversation_id="c1")
     sd = FakeStreamDriver([
         ClaudeResult(text="", session_id=None, is_error=True, error="boom"),
     ])
@@ -384,7 +384,7 @@ async def test_live_turn_restores_inbox_on_error(tmp_path):
     result = await turn.result()
     await turn.aftermath()
     assert result.is_error
-    assert box.drain() == ["job #4 finished: report"]
+    assert box.drain("c1") == ["job #4 finished: report"]
 
 
 def test_raising_driver_restores_inbox_entries(tmp_path):
@@ -403,11 +403,11 @@ def test_raising_driver_restores_inbox_entries(tmp_path):
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #5 finished: do not lose me")
+    box.append("job #5 finished: do not lose me", conversation_id="c1")
     agent = Agent(RaisingDriver(), store, inbox=box)
     with pytest.raises(ClaudeError):
         agent.respond("c1", "hello")
-    assert box.drain() == ["job #5 finished: do not lose me"]
+    assert box.drain("c1") == ["job #5 finished: do not lose me"]
 
 
 def test_from_config_wires_standing_orders(tmp_path):
