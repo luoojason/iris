@@ -306,7 +306,8 @@ def _fire_job_rule(config: Config, rule: dict, spawn) -> dict:
             Inbox(config.inbox_file).append(
                 f"scheduled rule #{rid} ({rule['title']}): firing was {outcome} "
                 f"as job #{job['id']}; it will retry on the next firing, or "
-                f"resume it now with resume_job({job['id']})."
+                f"resume it now with resume_job({job['id']}).",
+                conversation_id=(f"discord:{config.home_channel}" if config.home_channel else None),
             )
         except Exception:
             log.warning("could not write the inbox note for rule %s", rid, exc_info=True)

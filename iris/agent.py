@@ -185,7 +185,7 @@ class Agent:
             epoch = self._epoch_for(conversation_id)
             folded: list[str] = []
             if self.inbox is not None:
-                folded = self.inbox.drain()
+                folded = self.inbox.drain(conversation_id)
                 if folded:
                     text = _fold_prompt(folded, text)
             session_id = self.store.get(conversation_id)
@@ -203,12 +203,12 @@ class Agent:
                 # ClaudeError raises out to the adapter; the drained notes must
                 # survive that exactly as they survive an error result.
                 if folded:
-                    self.inbox.restore(folded)
+                    self.inbox.restore(folded, conversation_id)
                 raise
             if result.is_error and folded:
                 # The turn that took the notes failed; put them back so the
                 # next turn re-delivers them instead of losing them.
-                self.inbox.restore(folded)
+                self.inbox.restore(folded, conversation_id)
             if result.session_id and self._epoch_for(conversation_id) == epoch:
                 self.store.set(conversation_id, result.session_id)
             if self.guard is not None:
@@ -439,7 +439,7 @@ class LiveTurn:
         self._have_lock = True
         try:
             if self._agent.inbox is not None:
-                self._folded = await asyncio.to_thread(self._agent.inbox.drain)
+                self._folded = await asyncio.to_thread(self._agent.inbox.drain, self._cid)
                 if self._folded:
                     self._prompt = _fold_prompt(self._folded, self._prompt)
             session_id = self._agent.store.get(self._cid)
@@ -530,7 +530,7 @@ class LiveTurn:
     def _restore_folded(self) -> None:
         """Give drained inbox entries back after a failed turn. Idempotent."""
         if self._folded and self._agent.inbox is not None:
-            self._agent.inbox.restore(self._folded)
+            self._agent.inbox.restore(self._folded, self._cid)
         self._folded = []
 
     def close(self) -> None:

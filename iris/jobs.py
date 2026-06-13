@@ -531,7 +531,9 @@ def run_job(
         note = _head(text)
         for problem in problems:
             note += "\n" + str(problem)
-        inbox.append(note)
+        # Tag the note with the channel this job reports to, so it folds into
+        # that conversation only and never bleeds into an unrelated thread.
+        inbox.append(note, conversation_id=(f"discord:{channel}" if channel else None))
         return delivered
 
     workspace_path: Optional[str] = None
@@ -600,7 +602,8 @@ def run_job(
             if channel and token:
                 res = send_file(channel, path, f"job #{job_id} artifact", token)
                 if isinstance(res, dict) and res.get("error"):
-                    inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}")
+                    inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}",
+                                 conversation_id=(f"discord:{channel}" if channel else None))
     except Exception:
         log.exception("job %s artifact upload crashed after completion", job_id)
     return 0

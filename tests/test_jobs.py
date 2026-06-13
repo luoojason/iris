@@ -184,7 +184,7 @@ def test_run_job_happy_path(tmp_path):
     channel, text = env["pings"][0]
     assert channel == "chan-9"
     assert "job #1" in text and "finished" in text and "all done" in text
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert len(folded) == 1 and "job #1" in folded[0] and "all done" in folded[0]
 
 
@@ -195,7 +195,7 @@ def test_run_job_failure_path(tmp_path):
     assert job["state"] == "failed"
     assert job["error"] == "boom"
     assert "failed" in env["pings"][0][1]
-    assert any("failed" in note for note in env["inbox"].drain())
+    assert any("failed" in note for note in env["inbox"].drain("discord:chan-9"))
 
 
 def test_run_job_refuses_a_non_pending_job(tmp_path):
@@ -240,7 +240,7 @@ def test_run_job_delivers_artifacts(tmp_path):
     assert job["artifacts"] == ["out.md"]
     assert env["files"] == [("chan-9", str((ws / "out.md").resolve()))]
     # the unresolvable artifact is named in the fold-back, never silent
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert any("missing.bin" in note for note in folded)
 
 
@@ -407,7 +407,7 @@ def test_run_job_survives_a_raising_driver(tmp_path):
     assert job["state"] == "failed"
     assert "crashed" in job["error"]
     assert len(env["pings"]) == 1 and "failed" in env["pings"][0][1]
-    assert env["inbox"].drain()  # the owner is never left guessing
+    assert env["inbox"].drain("discord:chan-9")  # the owner is never left guessing
 
 
 def test_run_job_keeps_the_paid_report_when_artifact_handling_crashes(tmp_path, monkeypatch):
@@ -445,7 +445,7 @@ def test_run_job_skips_delivery_when_cancelled_mid_run(tmp_path):
     assert run_with(env) == 0
     assert store.get(1)["state"] == "cancelled"
     assert env["pings"] == []  # no confusing 'finished' after a cancel
-    assert env["inbox"].drain() == []
+    assert env["inbox"].drain("discord:chan-9") == []
 
 
 def test_artifact_problems_survive_a_long_report(tmp_path):
@@ -459,7 +459,7 @@ def test_artifact_problems_survive_a_long_report(tmp_path):
     discord = " ".join(t for _, t in env["pings"])
     assert "missing.bin" in discord
     # and it survives in the capped fold-back too, after the truncated report
-    folded = env["inbox"].drain()[0]
+    folded = env["inbox"].drain("discord:chan-9")[0]
     assert "missing.bin" in folded and "truncated" in folded
 
 
@@ -569,7 +569,7 @@ def test_artifact_upload_failure_is_reported_not_silent(tmp_path):
                                          session_id=None, is_error=False))
     env["send_file"] = lambda channel, path, text, token: {"error": "HTTP 413"}
     assert run_with(env) == 0  # the job still completes
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert any("failed to upload" in note and "HTTP 413" in note for note in folded)
 
 
@@ -779,5 +779,5 @@ def test_run_job_delivers_a_long_report_in_full_across_messages(tmp_path):
     assert "line0" in joined and "line699" in joined          # head AND tail both delivered
     assert len(env["pings"]) >= 2                              # split into multiple messages
     assert all(len(t) <= 2000 for _, t in env["pings"])       # each under the Discord limit
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert len(folded) == 1 and len(folded[0]) <= 1600         # fold-back stays capped

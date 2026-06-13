@@ -351,7 +351,10 @@ def _run_rule(rule: dict, entry: dict, config: Config, send, inbox: Inbox,
         message += f"\n> {detail}"
     if rule.get("once"):
         entry["fired_once"] = True
-    inbox.append(message)  # queued exactly once, ping or no ping
+    # Fold into the channel this wake pings (its own or the home channel), so it
+    # surfaces in that conversation and not in an unrelated thread.
+    wake_channel = rule.get("channel_id") or config.home_channel or config.notify_channel
+    inbox.append(message, conversation_id=(f"discord:{wake_channel}" if wake_channel else None))
     if _send_ping(rule, config, send, message):
         entry["last_fired_ts"] = now
     else:

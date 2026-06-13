@@ -300,7 +300,7 @@ def test_parked_firing_leaves_an_inbox_note(tmp_path):
     store = ScheduleStore(config.schedules_file)
     job_rule(store, config)
     tick_schedules(config, now=time.time(), spawn=lambda jid, **kw: None)
-    notes = Inbox(config.inbox_file).drain()
+    notes = Inbox(config.inbox_file).drain("discord:home-1")
     assert any("parked" in n.lower() for n in notes)
 
 
