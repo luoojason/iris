@@ -107,6 +107,9 @@ class Config:
     job_timeout: float = 1800.0
     # Optional model/persona for job turns; empty falls back to the chat model.
     job_model: str = ""
+    # The model a job uses when the model flags it as genuinely hard (heavy=True):
+    # everyday tasks run on the cheaper base model, hard ones escalate to this.
+    job_model_heavy: str = "claude-opus-4-8"
     job_persona: str = ""
     # The browser job grant: how to launch the Playwright MCP server, and the
     # isolated profile directory it gets (never the owner's real browser
@@ -241,6 +244,7 @@ class Config:
             jobs_keep=int(os.environ.get("IRIS_JOBS_KEEP", "50")),
             job_timeout=float(os.environ.get("IRIS_JOB_TIMEOUT", "1800")),
             job_model=os.environ.get("IRIS_JOB_MODEL", ""),
+            job_model_heavy=os.environ.get("IRIS_JOB_MODEL_HEAVY", "claude-opus-4-8"),
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
             browser_mcp_cmd=os.environ.get(
                 "IRIS_BROWSER_MCP_CMD", "npx @playwright/mcp@latest --headless"),

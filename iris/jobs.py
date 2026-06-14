@@ -174,7 +174,7 @@ class JobStore:
 
     def add(self, title: str, instructions: str, grants: list[str],
             workspace: str, channel_id: str, state: str = "pending",
-            admit_below: Optional[int] = None) -> dict:
+            admit_below: Optional[int] = None, heavy: bool = False) -> dict:
         """Record a job. With ``admit_below``, the active-jobs admission check
         happens under the same lock as the insert (no TOCTOU between counting
         and adding); the returned dict carries an ephemeral ``admitted`` flag
@@ -199,6 +199,7 @@ class JobStore:
                 "artifacts": [],
                 "report_delivered": False,
                 "channel_id": channel_id,
+                "heavy": heavy,
             }
             items.append(job)
             returned = dict(job)
@@ -428,9 +429,11 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         disallowed = disallowed + tuple(
             f"mcp__playwright__{tool}" for tool in config.browser_deny_tools
         )
+    # Heavy jobs escalate to the stronger model; everyday jobs run on the base.
+    model = config.job_model_heavy if job.get("heavy") else (config.job_model or config.model)
     return ClaudeDriver(
         claude_bin=config.claude_bin,
-        model=config.job_model or config.model,
+        model=model,
         append_system_prompt_file=config.job_persona or None,
         mcp_config=mcp_config,
         permission_mode=config.permission_mode,

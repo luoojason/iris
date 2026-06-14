@@ -61,7 +61,8 @@ def _kill_runner(pid) -> bool:
 
 
 @mcp.tool()
-def start_job(title: str, instructions: str, grants: str = "", workspace: str = "") -> str:
+def start_job(title: str, instructions: str, grants: str = "", workspace: str = "",
+              heavy: bool = False) -> str:
     """Start a background job: one deep claude run, detached from this chat.
 
     Use it for work that takes minutes (audits, refactors, research). The job
@@ -76,6 +77,9 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
             caps what is actually given.
         workspace: A registered workspace name the job may work in. Ask the
             owner to register one (iris workspaces add) if none fits.
+        heavy: Set True ONLY for genuinely hard jobs (deep reasoning, tricky
+            multi-step work) to run them on the stronger model. Everyday jobs
+            leave this False and run on the cheaper default model.
     """
     config = _config()
     if not config.jobs_enabled:
@@ -104,7 +108,7 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     lines = []
     if CreditGuard.from_config(config).should_park():
         job = store.add(title.strip(), instructions, granted, workspace,
-                        origin, state="parked")
+                        origin, state="parked", heavy=heavy)
         lines.append(
             f"Job #{job['id']} ({job['title']}) was PARKED, not started: the credit "
             f"guard says the month's budget is nearly spent. The owner can launch "
@@ -115,7 +119,7 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
         # The admission check runs inside the store's lock with the insert,
         # so two simultaneous start_job calls cannot both slip under the cap.
         job = store.add(title.strip(), instructions, granted, workspace,
-                        origin, admit_below=config.jobs_max)
+                        origin, admit_below=config.jobs_max, heavy=heavy)
         if not job["admitted"]:
             lines.append(
                 f"Job #{job['id']} ({job['title']}) recorded but queued: "

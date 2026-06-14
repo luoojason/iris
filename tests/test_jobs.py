@@ -267,6 +267,16 @@ def test_default_driver_factory_adds_workspace_dir():
     assert driver.model == "m-light"  # IRIS_JOB_MODEL overrides the chat model
 
 
+def test_heavy_job_escalates_to_the_strong_model():
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_model="m-light", job_model_heavy="m-strong")
+    light = build_job_driver(config, {"grants": ["subagents"], "heavy": False}, None)
+    heavy = build_job_driver(config, {"grants": ["subagents"], "heavy": True}, None)
+    assert light.model == "m-light"     # everyday job stays on the cheap model
+    assert heavy.model == "m-strong"    # hard job escalates
+
+
 # -- config knobs --------------------------------------------------------------
 
 
