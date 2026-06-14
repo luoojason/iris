@@ -32,13 +32,16 @@ _ALIASES = {
 # Commands that take no argument; a trailing word means it is prose, not a
 # command, so it falls through to the brain. Only `stop` takes an optional arg
 # (a job id), so it is excluded from this set.
-_NO_ARG = frozenset({"help", "new", "status", "usage", "jobs", "schedules"})
+_NO_ARG = frozenset({"help", "new", "status", "usage", "jobs", "schedules",
+                     "goals", "heartbeat"})
 _KNOWN = _NO_ARG | {"stop"}
 
 HELP = (
     "Commands (instant, no AI turn):\n"
     "!usage - this month's spend and pace\n"
     "!jobs - recent background jobs\n"
+    "!goals - standing goals and their progress\n"
+    "!heartbeat - last-known health check status\n"
     "!stop - stop the reply I'm writing here\n"
     "!stop <id> - cancel background job #id (alias: !cancel <id>)\n"
     "!schedules - scheduled jobs\n"
@@ -117,6 +120,51 @@ def render_schedules(config: Config) -> str:
     return "\n".join(describe_rule(r) for r in rules)
 
 
+def render_goals(config: Config) -> str:
+    from .goals import GoalStore
+
+    goals = GoalStore(config.goals_file).all()
+    if not goals:
+        return "No goals set. Tell me an objective to pursue and I'll track it."
+    lines = []
+    for g in goals:
+        if g.get("status") == "active":
+            lines.append(f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}")
+        else:
+            lines.append(f"#{g['id']} [{g.get('status')}]: {g['text']}")
+    if not config.goals_enabled:
+        lines.append("(IRIS_GOALS is off: nothing advances.)")
+    return "\n".join(lines)
+
+
+def render_heartbeat(config: Config) -> str:
+    """Last-known health status from the heartbeat state (no fresh probe, so it
+    stays instant; a slow url_ok check never blocks the chat)."""
+    import json
+    from pathlib import Path
+
+    checks_path = Path(config.heartbeat_file)
+    if not checks_path.exists():
+        return "No heartbeat checks configured (IRIS_HEARTBEAT_FILE)."
+    try:
+        checks = json.loads(checks_path.read_text("utf-8"))
+        total = len(checks) if isinstance(checks, list) else 0
+    except (OSError, json.JSONDecodeError):
+        total = 0
+    failing: list = []
+    state_path = Path(config.heartbeat_state)
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text("utf-8"))
+            failing = state.get("failing", []) if isinstance(state, dict) else []
+        except (OSError, json.JSONDecodeError):
+            failing = []
+    if not failing:
+        return f"heartbeat: all clear ({total} checks, as of the last tick)."
+    return (f"heartbeat: {len(failing)} of {total} failing as of the last tick: "
+            + ", ".join(failing) + "\nRun `iris heartbeat` for a fresh probe.")
+
+
 def render_status(config: Config, *, busy: bool, pending: int, session_turns: int) -> str:
     parts = ["writing a reply now" if busy else "idle here"]
     if pending:
@@ -165,6 +213,10 @@ def dispatch(
         return render_usage(config)
     if name == "jobs":
         return render_jobs(config)
+    if name == "goals":
+        return render_goals(config)
+    if name == "heartbeat":
+        return render_heartbeat(config)
     if name == "schedules":
         return render_schedules(config)
     if name == "status":

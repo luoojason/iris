@@ -133,6 +133,8 @@ it costs zero inference and works even mid-turn:
 | --- | --- |
 | `!usage` | This month's spend and projected month-end pace. |
 | `!jobs` | Recent background jobs and their states. |
+| `!goals` | Standing goals and their step progress. |
+| `!heartbeat` | Last-known health-check status (no fresh probe). |
 | `!schedules` | Recorded scheduled jobs (when enabled). |
 | `!status` | Whether a reply is in flight here, queue depth, active jobs. |
 | `!stop` | Stop the reply being written in this conversation. |

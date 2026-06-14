@@ -99,6 +99,52 @@ def test_schedules_off_when_disabled(tmp_path):
     assert "off" in out.lower() and "IRIS_SCHEDULED_JOBS" in out
 
 
+def test_parse_goals_and_heartbeat_are_no_arg_commands():
+    assert commands.parse("!goals").name == "goals"
+    assert commands.parse("!heartbeat").name == "heartbeat"
+    assert commands.parse("!goals are important to me") is None  # prose, not swallowed
+
+
+def test_goals_lists_active_goals(tmp_path):
+    from iris.goals import GoalStore
+
+    config = Config(goals_file=str(tmp_path / "g.json"))
+    GoalStore(config.goals_file).add("ship the roadmap", now=1.0)
+    out = commands.render_goals(config)
+    assert "ship the roadmap" in out and "#1" in out
+
+
+def test_goals_when_none(tmp_path):
+    out = commands.render_goals(Config(goals_file=str(tmp_path / "g.json")))
+    assert "no goals" in out.lower()
+
+
+def test_heartbeat_reports_last_known_status_without_probing(tmp_path):
+    import json
+
+    config = Config(heartbeat_file=str(tmp_path / "hb.json"),
+                    heartbeat_state=str(tmp_path / "hb.state.json"))
+    (tmp_path / "hb.json").write_text(json.dumps([
+        {"name": "site", "kind": "url_ok", "url": "https://e.com"},
+        {"name": "disk", "kind": "disk_free", "path": "/", "min_percent": 10}]), "utf-8")
+    # a prior tick recorded 'site' as failing; !heartbeat reads that, no fresh probe
+    (tmp_path / "hb.state.json").write_text(json.dumps({"failing": ["site"]}), "utf-8")
+    out = commands.render_heartbeat(config)
+    assert "site" in out and "failing" in out.lower()
+
+
+def test_heartbeat_all_clear_and_no_file(tmp_path):
+    import json
+
+    cfg = Config(heartbeat_file=str(tmp_path / "hb.json"),
+                 heartbeat_state=str(tmp_path / "hb.state.json"))
+    (tmp_path / "hb.json").write_text(json.dumps([
+        {"name": "site", "kind": "url_ok", "url": "https://e.com"}]), "utf-8")
+    assert "clear" in commands.render_heartbeat(cfg).lower()  # no failing set
+    assert "no heartbeat" in commands.render_heartbeat(Config(
+        heartbeat_file=str(tmp_path / "absent.json"))).lower()
+
+
 def test_status_reports_busy_queue_and_jobs(tmp_path):
     import os
 
