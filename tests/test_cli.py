@@ -290,6 +290,38 @@ def test_heartbeat_cmd_without_a_file(tmp_path, capsys):
     assert "IRIS_HEARTBEAT_FILE" in capsys.readouterr().out
 
 
+def test_doctor_warns_job_verify_without_jobs(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, job_verify_enabled=True, jobs_enabled=False), probe=False)
+    out = capsys.readouterr().out
+    assert "verif" in out.lower() and "IRIS_JOBS" in out
+
+
+def test_doctor_warns_self_started_work_without_a_budget(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, goals_enabled=True, usage_budget_usd=0.0,
+                  goals_file=str(tmp_path / "g.json")), probe=False)
+    out = capsys.readouterr().out
+    assert "IRIS_USAGE_BUDGET_USD" in out and "park" in out.lower()
+
+
+def test_doctor_quiet_about_budget_when_one_is_set(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, goals_enabled=True, usage_budget_usd=200.0,
+                  goals_file=str(tmp_path / "g.json")), probe=False)
+    out = capsys.readouterr().out
+    assert "park backstop" not in out.lower()
+
+
 def test_skills_cmd_pending_approve_reject(tmp_path, monkeypatch, capsys):
     import argparse
 

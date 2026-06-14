@@ -181,6 +181,13 @@ def doctor(config: Config, probe: bool = True) -> int:
         if not config.home_channel:
             print("  NOTE: IRIS_DISCORD_HOME_CHANNEL is empty; a goal set outside a "
                   "thread has nowhere to report.")
+    if config.job_verify_enabled and not config.jobs_enabled:
+        print("WARNING: IRIS_JOB_VERIFY is on but IRIS_JOBS is off, so no job ever runs")
+        print("  and the verification gate never fires. Enable IRIS_JOBS or turn it off.")
+    if (config.goals_enabled or config.proactive_enabled) and config.usage_budget_usd <= 0:
+        print("NOTE: self-started work is on (IRIS_GOALS/IRIS_PROACTIVE) but")
+        print("  IRIS_USAGE_BUDGET_USD is 0, so the credit-guard park backstop is")
+        print("  disarmed. The weekly-usage gate still bounds it; set a budget to arm park.")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
