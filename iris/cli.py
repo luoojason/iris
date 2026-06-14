@@ -167,6 +167,14 @@ def doctor(config: Config, probe: bool = True) -> int:
             print("WARNING: IRIS_AUTO_RESUME is on but IRIS_DISCORD_HOME_CHANNEL is")
             print("  empty, so a finished background task has nowhere to resume and")
             print("  auto-resume will silently do nothing. Set the home channel.")
+    if config.goals_enabled:
+        from .goals import GoalStore
+        active = len(GoalStore(config.goals_file).active())
+        print(f"goals: on ({active} active, judge {config.goal_judge_model}, "
+              f"gated on weekly usage < {config.proactive_usage_max:.0f}%)")
+        if not config.home_channel:
+            print("  NOTE: IRIS_DISCORD_HOME_CHANNEL is empty; a goal set outside a "
+                  "thread has nowhere to report.")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
@@ -335,6 +343,36 @@ def schedule_cmd(config: Config, args) -> int:
     return 0
 
 
+def goals_cmd(config: Config, args) -> int:
+    """Owner-side view and steering of the standing goals the tick advances."""
+    import time
+
+    from .goals import GoalStore
+
+    store = GoalStore(config.goals_file)
+    action = getattr(args, "goals_action", None) or "list"
+    if action == "cancel":
+        goal = store.get(args.goal_id)
+        if goal is None:
+            print(f"No goal #{args.goal_id}.")
+            return 1
+        store.transition(args.goal_id, "cancelled", time.time())
+        print(f"Cancelled goal #{args.goal_id}: {goal['text']}")
+        return 0
+    goals = store.all()
+    if not goals:
+        print("No goals set. Iris records them when you give her one to pursue.")
+        return 0
+    for g in goals:
+        if g.get("status") == "active":
+            print(f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}")
+        else:
+            print(f"#{g['id']} [{g.get('status')}]: {g['text']}")
+    if not config.goals_enabled:
+        print("(IRIS_GOALS is off: nothing advances.)")
+    return 0
+
+
 def skills(config: Config) -> int:
     """List the skills the agent can use (and link IRIS_SKILLS_DIR if set)."""
     from .skills import discover, link_skills
@@ -367,6 +405,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
     pro_parser = sub.add_parser("proactive-tick", help="run a proactive review (assist|maintain) from cron; gated on weekly usage")
     pro_parser.add_argument("kind", choices=["assist", "maintain"], help="which review to run")
+    sub.add_parser("goal-tick", help="advance one active goal a step (run from cron; gated on weekly usage)")
+    goals_parser = sub.add_parser("goals", help="see and steer your standing goals")
+    goals_sub = goals_parser.add_subparsers(dest="goals_action")
+    goals_sub.add_parser("list", help="list goals (default)")
+    g_cancel = goals_sub.add_parser("cancel", help="cancel a goal by id")
+    g_cancel.add_argument("goal_id", type=int)
     sub.add_parser("usage", help="show this month's credit draw and budget level")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
     job_run_parser.add_argument("job_id", type=int)
@@ -463,6 +507,13 @@ def main(argv: list[str] | None = None) -> int:
         from .proactive import run_proactive_tick
         print(f"proactive-tick {args.kind}: {run_proactive_tick(config, args.kind, now=_time.time())}")
         return 0
+    if command == "goal-tick":
+        import time as _time
+        from .goals import run_goal_tick
+        print(f"goal-tick: {run_goal_tick(config, now=_time.time())}")
+        return 0
+    if command == "goals":
+        return goals_cmd(config, args)
     if command == "usage":
         return usage_cmd(config)
     if command == "schedule":

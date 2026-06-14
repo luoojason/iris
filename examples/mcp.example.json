@@ -22,6 +22,14 @@
     "wiki": {
       "command": "python",
       "args": ["-m", "iris.mcp.wiki"]
+    },
+    "goals": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.goals"]
+    },
+    "session_search": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.session_search"]
     }
   }
 }

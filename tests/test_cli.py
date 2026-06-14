@@ -267,6 +267,56 @@ def test_schedule_cmd_rejects_bad_rules(tmp_path, capsys):
     assert rc == 2
 
 
+def test_doctor_reports_goals_when_enabled(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.goals import GoalStore
+
+    GoalStore(tmp_path / "g.json").add("a standing goal", now=1.0)
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, goals_enabled=True,
+                  goals_file=str(tmp_path / "g.json")), probe=False)
+    out = capsys.readouterr().out
+    assert "goal" in out.lower()
+
+
+def test_goal_tick_disabled_makes_no_model_call(tmp_path, monkeypatch, capsys):
+    # With IRIS_GOALS off the tick short-circuits before any usage fetch or model
+    # call, so it's safe to run through the real parser with no stubs.
+    from iris.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    rc = main(["goal-tick"])
+    assert rc == 0
+    assert "disabled" in capsys.readouterr().out
+
+
+def test_goals_cmd_list_and_cancel(tmp_path, capsys):
+    import argparse
+
+    from iris.cli import goals_cmd
+    from iris.config import Config
+    from iris.goals import GoalStore
+
+    config = Config(goals_file=str(tmp_path / "g.json"))
+    store = GoalStore(tmp_path / "g.json")
+    store.add("a standing goal", now=1.0)
+
+    rc = goals_cmd(config, argparse.Namespace(goals_action="list"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "a standing goal" in out and "#1" in out
+
+    rc = goals_cmd(config, argparse.Namespace(goals_action="cancel", goal_id=1))
+    assert rc == 0
+    assert GoalStore(tmp_path / "g.json").get(1)["status"] == "cancelled"
+
+    rc = goals_cmd(config, argparse.Namespace(goals_action="cancel", goal_id=99))
+    assert rc == 1  # no such goal
+
+
 def test_doctor_warns_when_browser_grant_lacks_npx(tmp_path, capsys, monkeypatch):
     import iris.cli as cli_mod
     from iris.config import Config
