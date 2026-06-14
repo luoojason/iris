@@ -148,6 +148,17 @@ class Config:
     proactive_usage_cache: str = "iris-usage-weekly.json"
     proactive_creds_path: str = ""
 
+    # The goal loop (iris/goals.py): a standing objective the clock advances one
+    # step at a time until it is done or needs the owner. Off by default; gated on
+    # the SAME real-weekly-usage leash as the proactive reviews (proactive_usage_*),
+    # so a goal step never crowds out Jason's own work. goals_max_steps is the
+    # default per-goal step budget; a goal may set its own. The judge model is a
+    # cheap, independent second model that rules on each step's reported progress.
+    goals_enabled: bool = False
+    goals_file: str = "iris-goals.json"
+    goals_max_steps: int = 20
+    goal_judge_model: str = "claude-haiku-4-5"
+
     # Scheduled jobs: the one place the clock may start work, and only work
     # the owner pre-recorded verbatim (see iris/schedules.py). Off by default,
     # gated separately from IRIS_JOBS. schedule_monthly_cap is the default
@@ -275,6 +286,10 @@ class Config:
             proactive_usage_max=float(os.environ.get("IRIS_PROACTIVE_USAGE_MAX", "80")),
             proactive_usage_cache=os.environ.get("IRIS_PROACTIVE_USAGE_CACHE", "iris-usage-weekly.json"),
             proactive_creds_path=os.environ.get("IRIS_PROACTIVE_CREDS", ""),
+            goals_enabled=_flag(os.environ.get("IRIS_GOALS"), False),
+            goals_file=os.environ.get("IRIS_GOALS_FILE", "iris-goals.json"),
+            goals_max_steps=int(os.environ.get("IRIS_GOALS_MAX_STEPS", "20")),
+            goal_judge_model=os.environ.get("IRIS_GOAL_JUDGE_MODEL", "claude-haiku-4-5"),
             scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),
             schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
             schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),
