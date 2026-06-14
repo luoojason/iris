@@ -49,7 +49,7 @@ def test_failure_uses_driver_and_delivers(tmp_path):
         is_error = False
 
     class FakeDriver:
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             return FakeResult()
 
     rc = watch_cmd.watch(["deploy.sh"], cfg, name="deploy",

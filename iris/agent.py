@@ -190,7 +190,7 @@ class Agent:
                     text = _fold_prompt(folded, text)
             session_id = self.store.get(conversation_id)
             try:
-                result = self.driver.run(text, session_id, model)
+                result = self.driver.run(text, session_id, model, conversation_id=conversation_id)
                 # A resumed session that no longer exists, or one that outgrew the
                 # context window, carries no replacement id. Either way the stored id
                 # is unusable, so drop it and retry once on a fresh session.
@@ -198,7 +198,7 @@ class Agent:
                     if _is_overflow(result):
                         log.warning("conversation %s overflowed its context; starting fresh", conversation_id)
                     self.store.clear(conversation_id)
-                    result = self.driver.run(text, None, model)
+                    result = self.driver.run(text, None, model, conversation_id=conversation_id)
             except BaseException:
                 # ClaudeError raises out to the adapter; the drained notes must
                 # survive that exactly as they survive an error result.

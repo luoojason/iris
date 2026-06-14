@@ -53,6 +53,20 @@ def test_start_job_records_and_spawns(env):
     assert job["grants"] == ["subagents"]
 
 
+def test_start_job_records_origin_channel_when_set(env, monkeypatch):
+    # The driver sets IRIS_ORIGIN_CHANNEL to the thread the turn ran in, so the
+    # job reports back to THAT thread instead of always the home channel.
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-42")
+    srv.start_job("audit", "look at things")
+    assert env["store"].get(1)["channel_id"] == "thread-42"
+
+
+def test_start_job_falls_back_to_home_channel_without_origin(env, monkeypatch):
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
+    srv.start_job("audit", "look at things")
+    assert env["store"].get(1)["channel_id"] == "home-1"
+
+
 def test_start_job_clamps_grants_to_the_ceiling(env):
     reply = srv.start_job("t", "i", grants="shell, files")
     assert "Refused grants" in reply and "shell" in reply

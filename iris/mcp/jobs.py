@@ -87,6 +87,10 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     except ValueError as exc:
         return str(exc)
     granted, clamped = clamp_grants(requested, config.job_grants)
+    import os
+    # Report back to the thread this job was started from (set by the driver),
+    # falling back to the home channel for non-Discord or unknown origins.
+    origin = os.environ.get("IRIS_ORIGIN_CHANNEL") or config.home_channel
     store = _store()
     if workspace:
         if _workspaces().resolve(workspace) is None:
@@ -100,7 +104,7 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     lines = []
     if CreditGuard.from_config(config).should_park():
         job = store.add(title.strip(), instructions, granted, workspace,
-                        config.home_channel, state="parked")
+                        origin, state="parked")
         lines.append(
             f"Job #{job['id']} ({job['title']}) was PARKED, not started: the credit "
             f"guard says the month's budget is nearly spent. The owner can launch "
@@ -111,7 +115,7 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
         # The admission check runs inside the store's lock with the insert,
         # so two simultaneous start_job calls cannot both slip under the cap.
         job = store.add(title.strip(), instructions, granted, workspace,
-                        config.home_channel, admit_below=config.jobs_max)
+                        origin, admit_below=config.jobs_max)
         if not job["admitted"]:
             lines.append(
                 f"Job #{job['id']} ({job['title']}) recorded but queued: "

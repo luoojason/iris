@@ -17,7 +17,7 @@ class FakeDriver:
         self._result = result
         self.calls = []
 
-    def run(self, prompt, session_id=None, model=None):
+    def run(self, prompt, session_id=None, model=None, conversation_id=None):
         self.calls.append(prompt)
         return self._result
 

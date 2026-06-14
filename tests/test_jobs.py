@@ -126,7 +126,7 @@ class FakeJobDriver:
         self.result = result
         self.prompts = []
 
-    def run(self, prompt, session_id=None, model=None):
+    def run(self, prompt, session_id=None, model=None, conversation_id=None):
         self.prompts.append(prompt)
         return self.result
 
@@ -380,7 +380,7 @@ def test_run_job_records_the_claude_child_pid(tmp_path):
 
     def factory_with_callback(config, job, workspace_path, child_pid_callback=None):
         class D:
-            def run(self, prompt, session_id=None, model=None):
+            def run(self, prompt, session_id=None, model=None, conversation_id=None):
                 child_pid_callback(7777)  # what ClaudeDriver does on spawn
                 return ClaudeResult(text="ok", session_id=None, is_error=False)
         return D()
@@ -397,7 +397,7 @@ def test_run_job_survives_a_raising_driver(tmp_path):
 
     def exploding_factory(config, job, workspace_path, child_pid_callback=None):
         class D:
-            def run(self, prompt, session_id=None, model=None):
+            def run(self, prompt, session_id=None, model=None, conversation_id=None):
                 raise ClaudeError("claude binary not found on PATH")
         return D()
 
@@ -436,7 +436,7 @@ def test_run_job_skips_delivery_when_cancelled_mid_run(tmp_path):
 
     def cancelling_factory(config, job, workspace_path, child_pid_callback=None):
         class D:
-            def run(self, prompt, session_id=None, model=None):
+            def run(self, prompt, session_id=None, model=None, conversation_id=None):
                 store.transition(1, ("running",), "cancelled")  # owner cancelled mid-turn
                 return ClaudeResult(text="too late", session_id=None, is_error=False)
         return D()

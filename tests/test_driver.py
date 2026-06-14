@@ -6,7 +6,14 @@ import json
 import subprocess
 from dataclasses import dataclass
 
-from iris.driver import ClaudeDriver, ClaudeResult
+from iris.driver import ClaudeDriver, ClaudeResult, _origin_channel
+
+
+def test_origin_channel_parses_discord_conversations():
+    assert _origin_channel("discord:123456") == "123456"
+    assert _origin_channel("cli:local") is None       # non-discord -> home-channel fallback
+    assert _origin_channel("discord:") is None
+    assert _origin_channel(None) is None
 
 
 @dataclass

@@ -15,7 +15,7 @@ class FakeDriver:
         self.calls = []
         self.model = model  # the driver's default model, read by the router
 
-    def run(self, prompt, session_id=None, model=None):
+    def run(self, prompt, session_id=None, model=None, conversation_id=None):
         self.calls.append((prompt, session_id))
         self.model_calls = getattr(self, "model_calls", [])
         self.model_calls.append(model)
@@ -96,7 +96,7 @@ def test_respond_serializes_same_conversation(tmp_path):
     class SlowDriver:
         model = None
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             with guard:
                 state["current"] += 1
                 state["max"] = max(state["max"], state["current"])
@@ -398,7 +398,7 @@ def test_raising_driver_restores_inbox_entries(tmp_path):
     class RaisingDriver:
         model = None
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             raise ClaudeError("claude binary not found")
 
     store = SessionStore(tmp_path / "s.json")
@@ -481,7 +481,7 @@ def test_respond_skips_the_session_write_after_a_reset(tmp_path):
         def __init__(self, agent_box):
             self.agent_box = agent_box
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             self.agent_box[0].reset("c1")  # the user reset mid-turn
             return ClaudeResult(text="hi", session_id="brand-new", is_error=False)
 

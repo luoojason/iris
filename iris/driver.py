@@ -113,6 +113,17 @@ def _child_env(disable_auto_memory: bool = False) -> dict:
     return env
 
 
+def _origin_channel(conversation_id: Optional[str]) -> Optional[str]:
+    """The Discord channel/thread id behind a conversation id, or None.
+
+    Only Discord conversations (``discord:<id>``) yield a routable channel; a CLI
+    or other transport returns None so jobs fall back to the home channel.
+    """
+    if conversation_id and conversation_id.startswith("discord:"):
+        return conversation_id.split(":", 1)[1] or None
+    return None
+
+
 def _default_runner(cmd: Sequence[str], timeout: float, prompt: str):
     """Sentinel default runner. Real runs go through ClaudeDriver._subprocess_run;
     this identity is what the driver checks to know it owns the subprocess."""
@@ -282,11 +293,15 @@ class ClaudeDriver:
                 parts.append(extra)
         return "\n\n".join(parts) if parts else None
 
-    def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None) -> ClaudeResult:
+    def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None,
+            conversation_id: Optional[str] = None) -> ClaudeResult:
         """Run one turn, retrying transient failures (rate limits, overload).
 
         ``model`` overrides the driver's default model for this turn only, which
         is how per-turn routing picks a lighter model for trivial messages.
+        ``conversation_id`` is the originating chat (e.g. a Discord thread); it is
+        passed to the child as IRIS_ORIGIN_CHANNEL so a job started in this turn
+        reports back to THIS thread instead of always the home channel.
         """
         if self._owns_subprocess and shutil.which(self.claude_bin) is None:
             raise ClaudeError(
@@ -302,7 +317,7 @@ class ClaudeDriver:
         while True:
             try:
                 if self._owns_subprocess:
-                    proc = self._subprocess_run(cmd, self.timeout, prompt)
+                    proc = self._subprocess_run(cmd, self.timeout, prompt, conversation_id)
                 else:
                     proc = self.runner(cmd, self.timeout, prompt)
             except subprocess.TimeoutExpired:
@@ -343,7 +358,8 @@ class ClaudeDriver:
 
     # -- internals ---------------------------------------------------------
 
-    def _subprocess_run(self, cmd: Sequence[str], timeout: float, prompt: str):
+    def _subprocess_run(self, cmd: Sequence[str], timeout: float, prompt: str,
+                        conversation_id: Optional[str] = None):
         """Run claude in its own process group so a timeout kills the whole tree.
 
         ``subprocess.run`` would terminate only the direct child on timeout,
@@ -353,6 +369,12 @@ class ClaudeDriver:
         kwargs = {}
         if os.name == "posix":
             kwargs["start_new_session"] = True
+        env = _child_env(self.disable_auto_memory)
+        origin = _origin_channel(conversation_id)
+        if origin:
+            # Added AFTER the IRIS_* strip, so the job MCP server (which the child
+            # spawns) can route a job's report back to the originating thread.
+            env["IRIS_ORIGIN_CHANNEL"] = origin
         proc = subprocess.Popen(
             list(cmd),
             stdin=subprocess.PIPE,
@@ -361,7 +383,7 @@ class ClaudeDriver:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_child_env(self.disable_auto_memory),
+            env=env,
             cwd=self.cwd,
             **kwargs,
         )
