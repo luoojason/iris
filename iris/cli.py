@@ -365,6 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
     sub.add_parser("skills", help="list the skills the agent can use")
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    pro_parser = sub.add_parser("proactive-tick", help="run a proactive review (assist|maintain) from cron; gated on weekly usage")
+    pro_parser.add_argument("kind", choices=["assist", "maintain"], help="which review to run")
     sub.add_parser("usage", help="show this month's credit draw and budget level")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
     job_run_parser.add_argument("job_id", type=int)
@@ -456,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
+    if command == "proactive-tick":
+        import time as _time
+        from .proactive import run_proactive_tick
+        print(f"proactive-tick {args.kind}: {run_proactive_tick(config, args.kind, now=_time.time())}")
+        return 0
     if command == "usage":
         return usage_cmd(config)
     if command == "schedule":

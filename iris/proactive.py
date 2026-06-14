@@ -13,6 +13,7 @@ docs/superpowers/specs/2026-06-14-proactive-design.md.
 from __future__ import annotations
 
 import json
+import os
 import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
@@ -20,6 +21,43 @@ from typing import Callable, Optional
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 DEFAULT_THRESHOLD = 80.0
 CACHE_MAX_AGE = 900.0  # 15 min; the endpoint rate-limits tight polling
+
+# Reply this (and nothing else) when a review finds nothing worth surfacing, so
+# the tick stays silent and spends no Discord noise on busywork.
+SILENT = "NOTHING"
+
+PROMPTS = {
+    "assist": (
+        "This is a proactive review. Jason did not ask for anything; the clock "
+        "triggered you. Look at what is going on (recent threads, your memory, "
+        "the wiki, scheduled jobs, open promises) and find the SINGLE highest-value "
+        "thing you could do right now that Jason has not asked for but would clearly "
+        "benefit him.\n"
+        "- If it is small and reversible (organizing, drafting, research, prepping), "
+        "do it now with your tools and briefly report what you did.\n"
+        "- If it is big or outward-facing (posts publicly, spends money, messages "
+        "other people, deletes things), do NOT do it: describe it in one or two "
+        "lines and ask.\n"
+        "- If it needs more time, schedule a job for it.\n"
+        f"- If nothing genuinely clears the bar, reply with exactly {SILENT} and take "
+        "no action. Do not invent busywork. Keep any report to a few lines."
+    ),
+    "maintain": (
+        "This is a maintenance and self-improvement review (clock-triggered, not "
+        "requested). Scan your state: the wiki (index, log, pages), your memory "
+        "notes, your skills and standing orders, and recent outcomes (what worked, "
+        "what did not).\n"
+        "- Do reversible housekeeping yourself: fix the wiki index and log, "
+        "consolidate obvious duplicates, write durable lessons to memory, correct "
+        "stale notes.\n"
+        "- For anything destructive (deleting wiki pages or memories) or any change "
+        "to your own skills or standing orders, do NOT do it silently: list the "
+        "proposed changes and ask for approval.\n"
+        "- Report briefly: what you cleaned up, and what you propose. Be "
+        "conservative; never delete or rewrite your own behavior without asking.\n"
+        f"- If there is genuinely nothing to do, reply with exactly {SILENT}."
+    ),
+}
 
 
 def read_oauth_token(creds_path: str | Path) -> Optional[str]:
@@ -98,3 +136,53 @@ def proactive_allowed(utilization: Optional[float], parked: bool,
     if parked or utilization is None:
         return False
     return utilization < threshold
+
+
+def _default_sender(channel: str, text: str, token: str) -> bool:
+    from .reminders import send_discord_message
+    return send_discord_message(channel, text, token)
+
+
+def run_proactive_tick(config, kind: str, *, now: float,
+                       agent=None, fetch: Optional[Callable] = None,
+                       sender: Optional[Callable] = None) -> str:
+    """One proactive review. Returns a one-word status (for the cron log).
+
+    Gated three ways before any model call: off unless IRIS_PROACTIVE; the credit
+    guard must not be parked; and the real weekly utilization must be under the
+    threshold (read via a cache so the 429-prone endpoint is not polled). Only
+    then does it run one model turn in a dedicated, continuous session for this
+    kind and deliver a non-silent reply to the home channel. The seams (agent,
+    fetch, sender) are injected by tests.
+    """
+    if not getattr(config, "proactive_enabled", False):
+        return "disabled"
+    if kind not in PROMPTS:
+        return f"unknown-kind:{kind}"
+
+    try:
+        from .usage import CreditGuard
+        parked = CreditGuard.from_config(config).should_park()
+    except Exception:
+        parked = False  # a broken ledger must not silently license proactive runs... but
+        # the usage gate below still applies; park is only the extra backstop.
+
+    creds = config.proactive_creds_path or os.path.expanduser("~/.claude/.credentials.json")
+    fetcher = fetch or (lambda: fetch_weekly_utilization(read_oauth_token(creds)))
+    utilization = UsageCache(config.proactive_usage_cache).get(now, fetcher, CACHE_MAX_AGE)
+    if not proactive_allowed(utilization, parked, config.proactive_usage_max):
+        return f"skipped(util={utilization},parked={parked})"
+
+    if agent is None:
+        from .agent import Agent
+        agent = Agent.from_config(config)
+    result = agent.respond(f"proactive:{kind}", PROMPTS[kind])
+    text = (getattr(result, "text", "") or "").strip()
+    if not text or text.upper().rstrip(".!") == SILENT:
+        return "silent"
+
+    send = sender or _default_sender
+    if config.home_channel and config.discord_token:
+        send(config.home_channel, f"[proactive: {kind}] {text}", config.discord_token)
+        return "delivered"
+    return "no-channel"

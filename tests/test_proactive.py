@@ -71,3 +71,68 @@ def test_usage_cache_keeps_last_value_when_refetch_fails(tmp_path):
     cache.get(now=0.0, fetcher=lambda: 6.0)
     val = cache.get(now=10_000.0, fetcher=lambda: None)  # stale + fetch fails
     assert val == 6.0  # graceful degrade to last known
+
+
+# -- run_proactive_tick ------------------------------------------------------
+
+from iris.config import Config
+from iris.proactive import run_proactive_tick
+
+
+class _FakeAgent:
+    def __init__(self, reply):
+        self._reply = reply
+        self.calls = []
+
+    def respond(self, conversation_id, text, *a, **kw):
+        self.calls.append((conversation_id, text))
+
+        class R:
+            text = self._reply
+        return R()
+
+
+def _cfg(tmp_path, **kw):
+    base = dict(proactive_enabled=True, home_channel="home-1", discord_token="tok",
+                proactive_usage_cache=str(tmp_path / "weekly.json"),
+                usage_file=str(tmp_path / "usage.json"))
+    base.update(kw)
+    return Config(**base)
+
+
+def test_tick_disabled_does_nothing(tmp_path):
+    agent = _FakeAgent("anything")
+    cfg = _cfg(tmp_path, proactive_enabled=False)
+    assert run_proactive_tick(cfg, "assist", now=1.0, agent=agent, fetch=lambda: 5.0) == "disabled"
+    assert agent.calls == []  # never ran a turn
+
+
+def test_tick_skips_when_over_the_weekly_threshold(tmp_path):
+    agent = _FakeAgent("found work")
+    sent = []
+    status = run_proactive_tick(_cfg(tmp_path), "assist", now=1.0, agent=agent,
+                                fetch=lambda: 90.0,
+                                sender=lambda c, t, k: sent.append(t))
+    assert status.startswith("skipped")
+    assert agent.calls == [] and sent == []  # no model call, no spend
+
+
+def test_tick_silent_reply_posts_nothing(tmp_path):
+    agent = _FakeAgent("NOTHING")
+    sent = []
+    status = run_proactive_tick(_cfg(tmp_path), "assist", now=1.0, agent=agent,
+                                fetch=lambda: 6.0,
+                                sender=lambda c, t, k: sent.append(t))
+    assert status == "silent"
+    assert agent.calls and sent == []  # it ran, found nothing, stayed quiet
+
+
+def test_tick_delivers_a_real_reply_to_the_home_channel(tmp_path):
+    agent = _FakeAgent("Cleaned up the wiki index and added a lesson.")
+    sent = []
+    status = run_proactive_tick(_cfg(tmp_path), "maintain", now=1.0, agent=agent,
+                                fetch=lambda: 6.0,
+                                sender=lambda c, t, k: sent.append((c, t)))
+    assert status == "delivered"
+    assert agent.calls[0][0] == "proactive:maintain"   # dedicated session
+    assert sent and sent[0][0] == "home-1" and "wiki" in sent[0][1]

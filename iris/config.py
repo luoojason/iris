@@ -138,6 +138,16 @@ class Config:
     resume_state_file: str = "iris-resume.state.json"
     resume_poll_secs: float = 20.0
 
+    # Proactive reviews (iris/proactive.py): assist (find work) and maintain
+    # (self-housekeeping) run on a cron. Off by default. Gated on the REAL weekly
+    # plan usage (the OAuth usage endpoint): a review runs only while seven-day
+    # utilization is under proactive_usage_max, with the credit-guard park as a
+    # hard backstop. creds path empty -> ~/.claude/.credentials.json at runtime.
+    proactive_enabled: bool = False
+    proactive_usage_max: float = 80.0
+    proactive_usage_cache: str = "iris-usage-weekly.json"
+    proactive_creds_path: str = ""
+
     # Scheduled jobs: the one place the clock may start work, and only work
     # the owner pre-recorded verbatim (see iris/schedules.py). Off by default,
     # gated separately from IRIS_JOBS. schedule_monthly_cap is the default
@@ -261,6 +271,10 @@ class Config:
             resume_queue_file=os.environ.get("IRIS_RESUME_QUEUE_FILE", "iris-resume.json"),
             resume_state_file=os.environ.get("IRIS_RESUME_STATE", "iris-resume.state.json"),
             resume_poll_secs=float(os.environ.get("IRIS_RESUME_POLL_SECS", "20")),
+            proactive_enabled=_flag(os.environ.get("IRIS_PROACTIVE"), False),
+            proactive_usage_max=float(os.environ.get("IRIS_PROACTIVE_USAGE_MAX", "80")),
+            proactive_usage_cache=os.environ.get("IRIS_PROACTIVE_USAGE_CACHE", "iris-usage-weekly.json"),
+            proactive_creds_path=os.environ.get("IRIS_PROACTIVE_CREDS", ""),
             scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),
             schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
             schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),
