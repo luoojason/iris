@@ -148,6 +148,27 @@ def test_resume_refuses_terminal_states(env):
     assert "only parked or queued" in srv.resume_job(1)
 
 
+def test_resume_a_waiting_job_with_an_answer(env):
+    srv.start_job("a", "one")
+    env["store"].transition(1, ("pending",), "needs_input", question="prod or staging?")
+    reply = srv.resume_job(1, answer="use staging")
+    assert "#1" in reply
+    job = env["store"].get(1)
+    assert job["state"] == "pending"  # re-queued to resume
+    assert job["pending_answer"] == "use staging"  # the answer is recorded for the runner
+    assert env["spawned"][-1] == 1
+
+
+def test_resume_a_waiting_job_needs_an_answer(env):
+    srv.start_job("a", "one")
+    env["store"].transition(1, ("pending",), "needs_input", question="prod or staging?")
+    before = len(env["spawned"])
+    reply = srv.resume_job(1)  # no answer
+    assert "answer" in reply.lower()
+    assert env["store"].get(1)["state"] == "needs_input"  # still waiting
+    assert len(env["spawned"]) == before  # not re-launched
+
+
 def test_job_status_and_list(env):
     srv.start_job("audit", "one")
     env["store"].transition(

@@ -255,6 +255,13 @@ with a `jobs` server entry in your MCP config
   model call), and the report folds into your next chat turn via the inbox
   (`IRIS_INBOX_FILE`), so the agent knows the outcome without polling.
   Parked and queued jobs launch only when you say so (`resume_job`).
+- **Pause and ask.** A job that hits a fork it genuinely can't resolve (a choice
+  between real options, a missing credential) can end its turn with a single
+  `QUESTION: ...` line instead of guessing. The runner pauses it (state
+  `needs_input`), pings you, and waits — no slot held, no clock polling. You
+  answer with `resume_job(<id>, answer=...)` and it resumes the *same* claude
+  session with full context. Capped per job (`IRIS_JOB_MAX_QUESTIONS`) so it can
+  never loop; `!status` shows when a job is waiting on you.
 - **Verification gate** (`IRIS_JOB_VERIFY=true`, off by default). Before a
   finished job reports "done", an independent cheap model
   (`IRIS_JOB_VERIFY_MODEL`, defaults to the goal judge model) rules whether the

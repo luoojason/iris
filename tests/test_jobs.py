@@ -125,9 +125,11 @@ class FakeJobDriver:
     def __init__(self, result):
         self.result = result
         self.prompts = []
+        self.calls = []  # (prompt, session_id) so resume can be asserted
 
     def run(self, prompt, session_id=None, model=None, conversation_id=None):
         self.prompts.append(prompt)
+        self.calls.append((prompt, session_id))
         return self.result
 
 
@@ -212,6 +214,65 @@ def test_run_job_verification_fail_flags_but_still_delivers(tmp_path):
     assert job["verify_reason"] == "no file was produced"  # reason persisted for later
     # the fold-back note carries the warning too
     assert any("verification flag" in n for n in env["inbox"].drain("discord:chan-9"))
+
+
+def test_extract_question_finds_the_marker():
+    from iris.jobs import extract_question
+
+    assert extract_question("did some setup\nQUESTION: prod or staging?") == "prod or staging?"
+    assert extract_question("QUESTION: which DB?\nthe two options are A and B") == \
+        "which DB?\nthe two options are A and B"
+    assert extract_question("all finished, no question here") is None
+    assert extract_question("") is None
+
+
+def test_run_job_pauses_to_ask_when_the_report_has_a_question(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="I set things up.\nQUESTION: deploy to prod or staging?",
+        session_id="sess-1", is_error=False))
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["state"] == "needs_input"
+    assert "prod or staging" in job["question"]
+    assert job["session_id"] == "sess-1"  # stored so the answer can resume it
+    assert job["question_rounds"] == 1
+    assert job.get("finished_ts") is None  # it is paused, not finished
+    ping = env["pings"][0][1]
+    assert "needs your input" in ping.lower() and "prod or staging" in ping
+    assert "finished" not in ping.lower()
+
+
+def test_run_job_resumes_the_session_with_the_owner_answer(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="done, used staging", session_id="sess-2", is_error=False))
+    # the job is waiting; resume_job recorded the answer and set it pending again
+    env["store"].update(1, pending_answer="use staging", session_id="sess-1", question_rounds=1)
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["state"] == "done"
+    assert env["driver"].calls[0] == ("use staging", "sess-1")  # resumed, not re-instructed
+    assert not job.get("pending_answer")  # consumed
+
+
+def test_run_job_stops_asking_after_the_question_round_cap(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="QUESTION: yet another fork?", session_id="s", is_error=False))
+    env["config"].job_max_questions = 1
+    env["store"].update(1, question_rounds=1)  # already at the cap
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["state"] == "done"  # no more pausing
+    assert "yet another fork?" in job["report"]  # the question rides along in the report
+
+
+def test_cancel_handles_a_waiting_job(tmp_path):
+    from iris.jobs import cancel
+
+    store = make_store(tmp_path)
+    store.add("j", "i", ["subagents"], "", "h")
+    store.transition(1, ("pending",), "needs_input", question="q?")
+    out = cancel(store, 1)
+    assert "ancel" in out and store.get(1)["state"] == "cancelled"
 
 
 class _ParkedGuard:

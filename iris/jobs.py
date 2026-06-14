@@ -68,6 +68,38 @@ DISCORD_MESSAGE_LIMIT = 2000
 
 _ACTIVE_STATES = ("pending", "running")
 _TERMINAL_STATES = ("done", "failed", "cancelled")
+# needs_input is a paused, non-terminal state: the job asked the owner a question
+# and is waiting for an answer. It holds no runner and no jobs_max slot.
+
+_QUESTION_MARKER = "QUESTION:"
+
+# Injected into every job's system prompt so any job can pause to ask rather than
+# guess. Small, fixed cost; the runner watches for the marker.
+JOB_QUESTION_PROTOCOL = (
+    "If you genuinely cannot finish without a decision only the owner can make (a "
+    "choice between real options, a credential, missing information), stop and end "
+    "your reply with a single final line:\n"
+    "QUESTION: <your specific question>\n"
+    "The owner will answer and you will resume this exact session with full context. "
+    "Use this sparingly: only when you truly cannot proceed. Otherwise make a sound "
+    "decision, note the assumption, and finish."
+)
+
+
+def extract_question(report: str) -> Optional[str]:
+    """The owner-directed question a job ended with, or None.
+
+    Returns everything from the first line that starts with ``QUESTION:`` to the
+    end of the report (so a multi-line question survives), stripped. A job that
+    did not ask returns None and is delivered as a normal completion.
+    """
+    lines = (report or "").splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().upper().startswith(_QUESTION_MARKER):
+            first = line.strip()[len(_QUESTION_MARKER):].strip()
+            rest = "\n".join(lines[i + 1:]).strip()
+            return (first + ("\n" + rest if rest else "")).strip() or None
+    return None
 
 
 def parse_grants(spec: str) -> list[str]:
@@ -286,8 +318,10 @@ def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
     if job is None:
         return f"No job #{job_id}."
     # Transition-first: the store's guard decides who wins a race with the
-    # runner, so a cancel is never claimed unless it actually stuck.
-    if store.transition(job_id, ("pending", "parked"), "cancelled", finished_ts=time.time()):
+    # runner, so a cancel is never claimed unless it actually stuck. A
+    # needs_input job has no live runner, so it cancels straight away too.
+    if store.transition(job_id, ("pending", "parked", "needs_input"), "cancelled",
+                        finished_ts=time.time()):
         return f"Cancelled job #{job_id} before it started."
     job = store.get(job_id)
     if job and job["state"] == "running":
@@ -434,6 +468,7 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
     return ClaudeDriver(
         claude_bin=config.claude_bin,
         model=model,
+        append_system_prompt=JOB_QUESTION_PROTOCOL,
         append_system_prompt_file=config.job_persona or None,
         mcp_config=mcp_config,
         permission_mode=config.permission_mode,
@@ -521,6 +556,17 @@ def run_job(
         log.warning("job %s is not pending; refusing to run it", job_id)
         return 1
 
+    # Resume path: a job the owner answered carries a pending_answer and the
+    # session_id it paused on, so it continues the same claude conversation with
+    # the answer instead of re-running its original instructions. Consume the
+    # answer so a later rerun can't replay it.
+    resume_answer = job.get("pending_answer")
+    if resume_answer:
+        prompt, resume_session = resume_answer, job.get("session_id")
+        store.update(job_id, pending_answer=None)
+    else:
+        prompt, resume_session = job["instructions"], None
+
     channel = job.get("channel_id") or config.home_channel
     token = config.discord_token
 
@@ -563,7 +609,7 @@ def run_job(
 
     try:
         driver = driver_factory(config, job, workspace_path, record_child)
-        result = driver.run(job["instructions"])
+        result = driver.run(prompt, session_id=resume_session)
     except Exception as exc:
         # ClaudeError (binary missing) or anything else: the job must never
         # be left 'running' with no ping — the owner is never left guessing.
@@ -582,6 +628,26 @@ def run_job(
         return 1
 
     report = result.text or ""
+
+    # Pause-and-ask: if the job ended with a QUESTION: and it has not used up its
+    # question budget, pause it (needs_input) and ping the owner instead of
+    # finishing. The session_id is stored so resume_job(answer=...) can continue
+    # the same conversation. At the cap, the question rides along in a normal
+    # completion (delivered, not paused) so the job can never loop on the clock.
+    question = extract_question(report)
+    rounds = int(job.get("question_rounds", 0))
+    if question and rounds < int(getattr(config, "job_max_questions", 5)):
+        paused = store.transition(job_id, ("running",), "needs_input",
+                                  report=report, question=question,
+                                  session_id=result.session_id,
+                                  question_rounds=rounds + 1)
+        if paused is None:
+            log.info("job %s left running during its question; skipping the ask", job_id)
+            return 0
+        deliver(f"job #{job_id} ({job['title']}) needs your input: {question}\n"
+                f"Answer with resume_job({job_id}, answer=...).")
+        return 0
+
     try:
         files, problems = collect_artifacts(report, workspace_path)
         artifact_names = [str(Path(f).relative_to(Path(workspace_path).resolve())) if workspace_path else f
@@ -614,7 +680,7 @@ def run_job(
     final = store.transition(job_id, ("running",), "done",
                              report=report, artifacts=artifact_names,
                              verified=verified, verify_reason=verify_reason,
-                             finished_ts=time.time())
+                             session_id=result.session_id, finished_ts=time.time())
     if final is None:
         # The job left 'running' under us (an owner cancel won the race).
         # Don't follow a cancel with a confusing 'finished' ping.

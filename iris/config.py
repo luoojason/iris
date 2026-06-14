@@ -121,6 +121,11 @@ class Config:
     # Off by default. Empty job_verify_model falls back to goal_judge_model.
     job_verify_enabled: bool = False
     job_verify_model: str = ""
+    # Pause-and-ask: a job that hits a fork it can't resolve may end a turn with a
+    # 'QUESTION:' line; the runner pauses it (state needs_input) and pings instead
+    # of guessing. The owner answers via resume_job(answer=...) and it resumes the
+    # same session. This caps how many times one job may pause, so it can't loop.
+    job_max_questions: int = 5
     # The browser job grant: how to launch the Playwright MCP server, and the
     # isolated profile directory it gets (never the owner's real browser
     # profile). Only used when a job is granted 'browser'.
@@ -288,6 +293,7 @@ class Config:
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
             job_verify_enabled=_flag(os.environ.get("IRIS_JOB_VERIFY"), False),
             job_verify_model=os.environ.get("IRIS_JOB_VERIFY_MODEL", ""),
+            job_max_questions=int(os.environ.get("IRIS_JOB_MAX_QUESTIONS", "5")),
             browser_mcp_cmd=os.environ.get(
                 "IRIS_BROWSER_MCP_CMD", "npx @playwright/mcp@latest --headless"),
             browser_profile_dir=os.environ.get(

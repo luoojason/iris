@@ -202,8 +202,13 @@ def cancel_job(job_id: int) -> str:
 
 
 @mcp.tool()
-def resume_job(job_id: int) -> str:
-    """Launch a parked or queued job now (an explicit owner decision)."""
+def resume_job(job_id: int, answer: str = "") -> str:
+    """Launch a parked/queued job, or answer a job that paused to ask you.
+
+    For a job waiting on your input (state needs_input), pass ``answer`` with your
+    decision; the job resumes the same session with full context. For a parked or
+    queued job, call it with no answer to launch it now.
+    """
     config = _config()
     if not config.jobs_enabled:
         return "Background jobs are disabled. The owner can set IRIS_JOBS=true."
@@ -211,6 +216,14 @@ def resume_job(job_id: int) -> str:
     job = store.get(job_id)
     if job is None:
         return f"No job #{job_id}."
+    if job["state"] == "needs_input":
+        if not (answer or "").strip():
+            return (f"Job #{job_id} is waiting for your answer to: {job.get('question', '')}\n"
+                    f"Call resume_job({job_id}, answer=...) with your decision.")
+        # Record the answer and re-queue it; the runner resumes the paused session.
+        store.transition(job_id, ("needs_input",), "pending", pending_answer=answer)
+        SPAWN(job_id, store=store)
+        return f"Answered job #{job_id} ({job['title']}); resuming it now."
     if job["state"] not in ("pending", "parked"):
         return f"Job #{job_id} is {job['state']}; only parked or queued jobs can be resumed."
     store.transition(job_id, ("parked",), "pending")

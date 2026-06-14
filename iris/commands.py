@@ -178,6 +178,9 @@ def render_status(config: Config, *, busy: bool, pending: int, session_turns: in
         repair_dead_runners(store)  # so a crashed job is not counted as live, as !jobs does
         active = store.count_active()
         parts.append(f"{active} background job(s) active")
+        waiting = sum(1 for j in store.all() if j.get("state") == "needs_input")
+        if waiting:
+            parts.append(f"{waiting} job(s) waiting on your answer (resume_job)")
     return "; ".join(parts)
 
 

@@ -163,6 +163,15 @@ def test_status_idle(tmp_path):
     assert "idle" in out.lower()
 
 
+def test_status_flags_jobs_waiting_on_an_answer(tmp_path):
+    config = Config(jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"))
+    store = JobStore(config.jobs_file)
+    store.add("j", "i", ["subagents"], "", "h")
+    store.transition(1, ("pending",), "needs_input", question="prod or staging?")
+    out = commands.render_status(config, busy=False, pending=0, session_turns=0)
+    assert "waiting on your answer" in out.lower()
+
+
 def test_cancel_job_invokes_the_real_canceller(tmp_path):
     config = Config(jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"))
     store = JobStore(config.jobs_file)
