@@ -47,9 +47,11 @@ Discord message ──> Iris ──> claude -p "<message>" --resume <session>
 
 It is **event-driven on purpose.** Iris only calls the model when a message
 arrives, so it burns no idle inference. That is what keeps it inside your monthly
-agent credit rather than draining it in the background. Two opt-in, off-by-default
-exceptions relax this on a tight leash — scheduled jobs and autonomous resume,
-both described below — and neither can ever start a conversation from nothing.
+agent credit rather than draining it in the background. Four opt-in, off-by-default
+exceptions relax this on a tight leash — scheduled jobs, autonomous resume,
+proactive reviews, and the goal loop, all described below. None can start a
+conversation from nothing; the two clock-started ones (reviews and goals) gate on
+your real weekly plan usage so they never crowd out your own work.
 
 ## Quickstart
 
@@ -393,6 +395,54 @@ poll loop (`IRIS_RESUME_POLL_SECS`, default 20s) and runs the turn through the
 same per-conversation runner as a typed message, so the resume can never race the
 live `claude` session. When a resume is dropped, the ordinary completion note
 still folds into your next message — nothing is lost.
+
+### Proactive reviews
+
+`IRIS_PROACTIVE=true` (off by default) is the third relaxation, and the first
+where the **clock** — not something you launched — starts the work. On a cron,
+Iris reviews her own state and acts: **assist** (twice a day, outward) finds the
+single highest-value thing she could do for you and either does it (if small and
+reversible) or asks (if big or outward-facing); **maintain** (every ~3 days,
+inward) tidies the wiki, consolidates memory, and proposes — never silently makes
+— changes to her own skills. Because the clock starts it, the leash is your *real
+account usage*, not a count: a review runs only while the account's seven-day
+plan utilization (the same number `/usage` shows, read from the OAuth usage
+endpoint and cached so the rate-limited endpoint is not polled tightly) is under
+`IRIS_PROACTIVE_USAGE_MAX` (default 80%), with the credit-guard park as a hard
+backstop and an unknown number failing safe to "do not run". Your Mac and Iris
+share one Max account, so gating at 80% keeps the top fifth for your own work.
+Enable with two cron entries:
+
+```bash
+# in .env: IRIS_PROACTIVE=true   (and set IRIS_USAGE_BUDGET_USD so park is meaningful)
+*/0 9,21 * * *  cd /path/to/iris && python -m iris proactive-tick assist
+0 10 */3 * *    cd /path/to/iris && python -m iris proactive-tick maintain
+```
+
+### Goals
+
+`IRIS_GOALS=true` (off by default) is the fourth relaxation: a **standing goal**
+you set in chat that the clock advances on its own until it is done or needs you.
+You say "your goal is to ..." and Iris records it (`set_goal`, scoped to the
+thread you set it in); a cron tick then runs **one work step per fire** on the
+goal's own continuous session, and an **independent cheap-model judge** rules each
+step done / blocked / continue — the worker model cannot declare its own goal
+finished. When it is done or stuck, Iris pings the thread you set it in. The line
+it keeps is the same as the others: *a goal exists only because you set it.* It
+rides the proactive weekly-usage leash and the credit-guard park (a step runs only
+with real headroom) and is bounded further — a per-goal step budget
+(`IRIS_GOALS_MAX_STEPS`, default 20) stops a goal that never converges and asks
+you, a cap on active goals (`IRIS_GOALS_MAX_ACTIVE`) stops runaway goal setting,
+one goal advances per tick (least-recently-worked first, so many goals share the
+clock fairly), and a judge that errors makes the tick **ask you** rather than loop
+or claim success. See and steer goals with `iris goals` (list) and
+`iris goals cancel <id>`, or in chat with `list_goals` / `cancel_goal`. Enable
+with one cron entry:
+
+```bash
+# in .env: IRIS_GOALS=true
+0 */4 * * *  cd /path/to/iris && python -m iris goal-tick
+```
 
 ### Voice messages
 

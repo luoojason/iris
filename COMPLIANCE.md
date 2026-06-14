@@ -90,6 +90,30 @@ not "free."
   bot process through the same per-conversation runner as a typed message, so it
   cannot race the live session. When a resume is dropped, nothing is lost: the
   ordinary completion note still folds into your next message.
+- The third deliberate exception is **proactive reviews** (`IRIS_PROACTIVE`,
+  off by default): on a cron, Iris reviews her own state and either does a small
+  useful thing (assist, twice a day) or tidies herself (maintain, every ~3 days).
+  Unlike the two above, the clock — not a thing you launched — starts these, so
+  the leash is the real account usage, not a count: a review runs only while the
+  account's seven-day plan utilization (read from the OAuth usage endpoint, the
+  same number `/usage` shows) is under `IRIS_PROACTIVE_USAGE_MAX` (default 80%),
+  with the credit-guard park as a hard backstop and an unknown number failing
+  safe to "do not run". Because your Mac and Iris share the one Max account,
+  gating at 80% preserves the top fifth for your interactive work. A review does
+  small reversible things itself and asks before anything outward-facing or
+  destructive, and self-modification (rewriting her own skills) is always asked.
+- The fourth deliberate exception is the **goal loop** (`IRIS_GOALS`, off by
+  default): a standing objective you set in chat that the clock advances one work
+  step at a time until it is done or needs you. It rides the same weekly-usage
+  leash and credit-guard park as the proactive reviews (a step runs only with
+  real headroom), and is bounded further: a per-goal step budget
+  (`IRIS_GOALS_MAX_STEPS`) caps a goal that never converges, a cap on
+  simultaneously-active goals (`IRIS_GOALS_MAX_ACTIVE`) stops runaway goal
+  setting, and one goal advances per tick. Each step's progress is ruled on by an
+  independent cheap-model judge — the worker cannot declare its own goal done —
+  and a judge that errors makes the tick ask you rather than loop or claim
+  success. It is never inference from nothing: a goal exists only because you set
+  it, and cancelling it (chat or `iris goals cancel`) stops it for good.
 - To stretch the credit further: use `IRIS_MODEL=claude-haiku-4-5-...` for a
   cheaper brain, keep personas and context lean, and avoid wiring tools that
   balloon the prompt. The `browser` job grant is the heaviest tool Iris can
