@@ -342,6 +342,28 @@ bounded HTTP GET per rule (`IRIS_WAKE_HTTP_TIMEOUT`), still with no model call.
 `cooldown_secs` absorbs flapping; `"once": true` disarms a rule after its
 first fire. `iris doctor` validates the rules file and names every problem.
 
+### Quiet heartbeat
+
+A wake fires on an *event*; the heartbeat asks a steady *level* question: are the
+things that should be true right now actually true? Declare a checklist in
+`IRIS_HEARTBEAT_FILE` (a JSON list you author; the model can't touch it) and the
+same `reminders-tick` evaluates it with cheap, model-free checks. It is **silent
+by default**: a healthy system says nothing, a new failure sends ONE consolidated
+ping for the whole checklist, a steady failure is not repeated, and a recovery is
+announced once. Run `iris heartbeat` any time to see the current status.
+
+```json
+[
+  {"name": "disk", "kind": "disk_free", "path": "/", "min_percent": 10},
+  {"name": "nightly-backup", "kind": "file_fresh", "path": "/var/backups/db.sql", "max_age_secs": 90000},
+  {"name": "site", "kind": "url_ok", "url": "https://example.com", "expect_status": 200}
+]
+```
+
+Kinds: `disk_free` (free space above a floor), `file_fresh` (a file changed within
+`max_age_secs` — proof a backup or cron actually ran), and `url_ok` (a URL returns
+the expected status). `iris doctor` validates the file and names every problem.
+
 ### Reminders
 
 The `reminders` tool (`iris/mcp/reminders.py`: `schedule_reminder`,

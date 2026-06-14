@@ -187,6 +187,14 @@ class Config:
     # Per-fetch timeout for url / url_pattern wake kinds (the change watcher).
     wake_http_timeout: float = 15.0
 
+    # Quiet heartbeat: an owner-authored checklist of "should be true" conditions
+    # (disk free, a file is fresh, a URL is up) the reminders tick evaluates with
+    # no model call. Silent when healthy; one consolidated ping only when the set
+    # of failing checks changes. Inert until the checks file exists.
+    heartbeat_file: str = "iris-heartbeat.json"
+    heartbeat_state: str = "iris-heartbeat.state.json"
+    heartbeat_http_timeout: float = 15.0
+
     # Credit guard: the usage ledger always records; the budget (USD-estimate
     # per month, 0 = off) turns on threshold pings, job parking at park_at%,
     # and tighter light-model routing at tighten_at%.
@@ -310,6 +318,9 @@ class Config:
             wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
             wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
             wake_http_timeout=float(os.environ.get("IRIS_WAKE_HTTP_TIMEOUT", "15")),
+            heartbeat_file=os.environ.get("IRIS_HEARTBEAT_FILE", "iris-heartbeat.json"),
+            heartbeat_state=os.environ.get("IRIS_HEARTBEAT_STATE", "iris-heartbeat.state.json"),
+            heartbeat_http_timeout=float(os.environ.get("IRIS_HEARTBEAT_HTTP_TIMEOUT", "15")),
             usage_file=os.environ.get("IRIS_USAGE_FILE", "iris-usage.json"),
             usage_budget_usd=float(os.environ.get("IRIS_USAGE_BUDGET_USD", "0")),
             usage_tighten_at=float(os.environ.get("IRIS_USAGE_TIGHTEN_AT", "80")),

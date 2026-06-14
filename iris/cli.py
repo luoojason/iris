@@ -126,6 +126,12 @@ def doctor(config: Config, probe: bool = True) -> int:
             print(line)
     except Exception as exc:
         print(f"wakes: could not validate the rules file ({exc})")
+    try:
+        from .heartbeat import doctor_lines as heartbeat_doctor_lines
+        for line in heartbeat_doctor_lines(config):
+            print(line)
+    except Exception as exc:
+        print(f"heartbeat: could not validate the checks file ({exc})")
     if config.usage_budget_usd > 0:
         try:
             from .usage import UsageLedger, level_for, percent_used
@@ -258,6 +264,11 @@ def reminders_tick(config: Config) -> int:
         print(tick_schedules(config))
     except Exception as exc:
         print(f"schedules tick failed: {exc}")
+    try:
+        from .heartbeat import tick_heartbeat
+        print(tick_heartbeat(config))
+    except Exception as exc:
+        print(f"heartbeat tick failed: {exc}")
     return 0
 
 
@@ -340,6 +351,35 @@ def schedule_cmd(config: Config, args) -> int:
         print(describe_rule(rule))
     if not config.scheduled_jobs_enabled:
         print("(IRIS_SCHEDULED_JOBS is off: nothing fires.)")
+    return 0
+
+
+def heartbeat_cmd(config: Config) -> int:
+    """Show the current status of the health checklist (read-only; no ping, no model)."""
+    import time
+    from pathlib import Path
+
+    from .heartbeat import _evaluate, load_checks, validate_checks
+
+    path = Path(config.heartbeat_file)
+    if not path.exists():
+        print("No heartbeat checks. Author IRIS_HEARTBEAT_FILE with a JSON list of "
+              "checks (disk_free, file_fresh, url_ok) to get a silent-by-default "
+              "health watch.")
+        return 0
+    checks, problem = load_checks(path)
+    if problem:
+        print(f"heartbeat: {problem}")
+        return 1
+    now = time.time()
+    for check in checks:
+        name = check.get("name") if isinstance(check, dict) else "check"
+        problems = validate_checks([check])
+        if problems:
+            print(f"{name}: invalid ({problems[0]})")
+            continue
+        ok, detail = _evaluate(check, now=now, http_timeout=config.heartbeat_http_timeout)
+        print(f"{name}: ok" if ok else f"{name}: FAIL: {detail}")
     return 0
 
 
@@ -479,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
     g_cancel = goals_sub.add_parser("cancel", help="cancel a goal by id")
     g_cancel.add_argument("goal_id", type=int)
     sub.add_parser("usage", help="show this month's credit draw and budget level")
+    sub.add_parser("heartbeat", help="show the current status of your health checklist")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
     job_run_parser.add_argument("job_id", type=int)
     jobs_parser = sub.add_parser("jobs", help="the terminal job console: see and steer background jobs")
@@ -585,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
         return goals_cmd(config, args)
     if command == "usage":
         return usage_cmd(config)
+    if command == "heartbeat":
+        return heartbeat_cmd(config)
     if command == "schedule":
         return schedule_cmd(config, args)
     if command == "workspaces":

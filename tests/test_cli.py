@@ -267,6 +267,29 @@ def test_schedule_cmd_rejects_bad_rules(tmp_path, capsys):
     assert rc == 2
 
 
+def test_heartbeat_cmd_shows_current_status(tmp_path, monkeypatch, capsys):
+    import json
+
+    from iris.cli import heartbeat_cmd
+    from iris.config import Config
+
+    (tmp_path / "hb.json").write_text(json.dumps([
+        {"name": "site", "kind": "url_ok", "url": "https://e.com"}]), "utf-8")
+    monkeypatch.setattr("iris.heartbeat.http_status", lambda url, timeout: 200)
+    rc = heartbeat_cmd(Config(heartbeat_file=str(tmp_path / "hb.json")))
+    out = capsys.readouterr().out
+    assert rc == 0 and "site" in out and "ok" in out.lower()
+
+
+def test_heartbeat_cmd_without_a_file(tmp_path, capsys):
+    from iris.cli import heartbeat_cmd
+    from iris.config import Config
+
+    rc = heartbeat_cmd(Config(heartbeat_file=str(tmp_path / "nope.json")))
+    assert rc == 0
+    assert "IRIS_HEARTBEAT_FILE" in capsys.readouterr().out
+
+
 def test_skills_cmd_pending_approve_reject(tmp_path, monkeypatch, capsys):
     import argparse
 
