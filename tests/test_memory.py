@@ -103,6 +103,38 @@ def test_score_returns_none_for_dropped_note():
     assert score(_note(1, "blue"), [], NOW) is not None  # no query, kept
 
 
+# -- BM25 refinement (rarity / density / length, within a hit tier) -----------
+
+def test_bm25_prefers_the_rarer_matching_term():
+    # Both candidates match exactly ONE query term, so they share a hit tier; the
+    # note matching the rarer term (high IDF) should win the tier.
+    rare = _note(1, "kubernetes deployment")   # 'kubernetes' is rare in the corpus
+    common = _note(2, "weekly report")         # 'report' is common in the corpus
+    fillers = [_note(10 + i, "report status update") for i in range(6)]
+    ranked = rank([rare, common, *fillers], "kubernetes report", NOW)
+    ids = [n["id"] for n in ranked]
+    assert ids.index(1) < ids.index(2)  # rare-term match outranks common-term match
+
+
+def test_bm25_prefers_the_more_focused_note():
+    # Same single term, same tf; the shorter note (term not buried) wins via
+    # BM25 length normalization.
+    focused = _note(1, "finance")
+    buried = _note(2, "finance " + "filler " * 40)
+    ranked = rank([focused, buried], "finance", NOW)
+    assert ranked[0]["id"] == 1
+
+
+def test_bm25_refinement_never_flips_a_hit_count_tier():
+    # A note matching MORE distinct query terms must always beat one matching
+    # fewer, no matter how rare/dense/short the lesser match is.
+    one_rare = _note(1, "zebra")                 # one very rare term
+    two_common = _note(2, "finance markets")     # two terms
+    fillers = [_note(10 + i, "zebra zebra zebra") for i in range(3)]
+    ranked = rank([one_rare, two_common, *fillers], "finance markets zebra", NOW)
+    assert ranked[0]["id"] == 2  # two distinct hits beat one, refinement notwithstanding
+
+
 # -- pinned digest (the always-loaded tier) -----------------------------------
 
 
