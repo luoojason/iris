@@ -230,7 +230,10 @@ def parse_verdict(text: str) -> dict:
         line = raw.strip()
         upper = line.upper()
         for status in ("done", "blocked", "continue"):
-            if upper.startswith(status.upper()):
+            token = status.upper()
+            rest = upper[len(token):] if upper.startswith(token) else None
+            if rest is not None and not (rest and rest[0].isalpha()):
+                # whole-word match, so 'DONENESS'/'CONTINUED' don't read as a verdict
                 summary = line.split(":", 1)[1].strip() if ":" in line else ""
                 return {"status": status, "summary": summary}
     return {"status": "blocked", "summary": "couldn't read a verdict from the judge"}

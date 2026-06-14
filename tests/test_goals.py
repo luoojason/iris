@@ -26,6 +26,13 @@ def test_parse_verdict_tolerates_a_leading_line():
     assert parse_verdict("Here's my call:\nCONTINUE: keep at it")["status"] == "continue"
 
 
+def test_parse_verdict_requires_a_word_boundary_not_a_prefix():
+    # "DONENESS"/"CONTINUED" must not match the verdict tokens as bare prefixes.
+    assert parse_verdict("DONENESS is unclear, keep at it")["status"] == "blocked"
+    assert parse_verdict("CONTINUE: keep going")["status"] == "continue"
+    assert parse_verdict("DONE: it is finished")["status"] == "done"
+
+
 def test_parse_verdict_unreadable_reply_fails_open_to_blocked():
     # No recognizable verdict -> the judge did not rule -> ask the owner.
     assert parse_verdict("I'm honestly not sure about this")["status"] == "blocked"

@@ -443,6 +443,10 @@ def skills_cmd(config: Config, args) -> int:
         if p is None:
             print(f"No skill proposal #{args.proposal_id}.")
             return 1
+        if p.get("status") != "pending":
+            print(f"Skill proposal #{p['id']} was already {p.get('status')}; "
+                  "nothing to approve.")
+            return 2
         if not config.skills_dir:
             print("Set IRIS_SKILLS_DIR first: that's the directory an approved skill "
                   "is written into and linked from.")

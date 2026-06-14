@@ -505,10 +505,10 @@ def run_job(
     if guard is None:
         from .usage import CreditGuard
         guard = CreditGuard.from_config(config)
-    # Independent verification of the result, when enabled and the credit guard
-    # isn't parked (the job turn already ran; a parked guard skips the extra,
-    # cheap reviewer call rather than spending on it).
-    if verify is None and getattr(config, "job_verify_enabled", False) and not guard.should_park():
+    # Independent verification of the result, when enabled. The park decision is
+    # deferred to the call site (after the job turn records its own spend), so a
+    # job that itself crosses the park threshold doesn't then pay for a reviewer.
+    if verify is None and getattr(config, "job_verify_enabled", False):
         from .verify import verify_result
         verify = lambda instructions, report: verify_result(config, instructions, report)
     if send_message is None:
@@ -600,7 +600,9 @@ def run_job(
     # unreadable reviewer fails open to "couldn't verify" rather than blocking.
     verified: Optional[bool] = None
     verify_reason = ""
-    if verify is not None:
+    if verify is not None and not guard.should_park():
+        # Re-checked here, not at setup: the job's own turn may have just pushed
+        # usage into park, and a parked guard means no extra reviewer spend.
         try:
             verdict = verify(job["instructions"], report)
         except Exception:
@@ -611,7 +613,8 @@ def run_job(
 
     final = store.transition(job_id, ("running",), "done",
                              report=report, artifacts=artifact_names,
-                             verified=verified, finished_ts=time.time())
+                             verified=verified, verify_reason=verify_reason,
+                             finished_ts=time.time())
     if final is None:
         # The job left 'running' under us (an owner cancel won the race).
         # Don't follow a cancel with a confusing 'finished' ping.

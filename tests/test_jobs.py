@@ -209,8 +209,29 @@ def test_run_job_verification_fail_flags_but_still_delivers(tmp_path):
     text = env["pings"][0][1]
     assert "verification flag" in text and "no file was produced" in text
     assert "I think it's basically done" in text  # the full report is still delivered
+    assert job["verify_reason"] == "no file was produced"  # reason persisted for later
     # the fold-back note carries the warning too
     assert any("verification flag" in n for n in env["inbox"].drain("discord:chan-9"))
+
+
+class _ParkedGuard:
+    def should_park(self):
+        return True
+
+    def record(self, *a, **k):
+        pass
+
+
+def test_run_job_skips_verification_when_the_credit_guard_is_parked(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+    calls = []
+    run_job(env["job_id"], env["config"], store=env["store"], workspace_store=env["ws_store"],
+            inbox=env["inbox"], driver_factory=env["driver_factory"],
+            send_message=env["send_message"], send_file=env["send_file"],
+            verify=lambda i, r: calls.append((i, r)) or {"ok": False, "reason": "x"},
+            guard=_ParkedGuard())
+    assert calls == []  # parked: no extra reviewer spend
+    assert env["store"].get(1)["verified"] is None
 
 
 def test_run_job_verification_fails_open_when_the_reviewer_crashes(tmp_path):

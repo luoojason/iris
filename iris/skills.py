@@ -28,7 +28,8 @@ except ImportError:  # pragma: no cover - Windows
 _DESCRIPTION = re.compile(r"(?mi)^description:\s*(.+)$")
 # A skill folder name must be a safe slug: no path separators, no traversal, no
 # surprises when it becomes a directory under the owner's skills dir.
-_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+# \Z (not $) so a trailing newline can't slip a multi-line value through.
+_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}\Z")
 
 
 def _skills_root(claude_home: str | None = None) -> Path:

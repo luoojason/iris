@@ -44,10 +44,19 @@ def parse_verify(text: str) -> dict:
         line = raw.strip()
         upper = line.upper()
         for token, ok in (("PASS", True), ("FAIL", False)):
-            if upper.startswith(token):
+            if _starts_with_word(upper, token):
                 reason = line.split(":", 1)[1].strip() if ":" in line else ""
                 return {"ok": ok, "reason": reason}
     return {"ok": None, "reason": "couldn't read a verdict from the reviewer"}
+
+
+def _starts_with_word(text: str, token: str) -> bool:
+    """True if ``text`` begins with ``token`` as a whole word, so 'PASSING' and
+    'FAILED' do not read as the verdict 'PASS'/'FAIL'."""
+    if not text.startswith(token):
+        return False
+    rest = text[len(token):]
+    return not (rest and rest[0].isalpha())
 
 
 def _default_judge(config) -> Callable[[str, str], dict]:

@@ -23,6 +23,14 @@ def test_parse_verify_unreadable_reply_is_unsure_not_a_pass():
     assert parse_verify("")["ok"] is None
 
 
+def test_parse_verify_requires_a_word_boundary_not_a_prefix():
+    # "PASSING"/"FAILED" must not read as a verdict: only PASS/FAIL as a word.
+    assert parse_verify("PASSING all checks is unlikely")["ok"] is None
+    assert parse_verify("FAILED to find a verdict here")["ok"] is None
+    assert parse_verify("PASS: looks right")["ok"] is True
+    assert parse_verify("FAIL: missing output")["ok"] is False
+
+
 def test_verify_result_uses_the_injected_judge():
     cfg = Config()
     out = verify_result(cfg, "do X", "did X", judge=lambda i, r: {"ok": True, "reason": "ok"})

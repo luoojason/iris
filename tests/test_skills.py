@@ -56,6 +56,12 @@ def test_validate_skill_rejects_unsafe_names_and_missing_description():
     assert validate_skill("ok", "no frontmatter here")     # no description
 
 
+def test_validate_skill_rejects_a_trailing_newline_in_the_name():
+    # a "\Z"-anchored slug, not "$" (which would allow a trailing newline through).
+    assert validate_skill("summarize\n", _GOOD)
+    assert validate_skill("summarize\nrm -rf", _GOOD)
+
+
 def test_proposal_store_round_trip(tmp_path):
     store = SkillProposalStore(tmp_path / "p.json")
     p = store.add("summarize", _GOOD, "I keep being asked to summarize", kind="new", now=1.0)

@@ -125,6 +125,18 @@ def test_tick_does_not_repeat_a_steady_failure(tmp_path):
     assert len(sent) == 1  # no spam while the failing set is unchanged
 
 
+def test_tick_keeps_the_failure_in_the_inbox_even_without_a_channel(tmp_path):
+    # No home/notify channel: nothing can be pinged, but the failure must not be
+    # silently lost - it still folds into the agent's next turn via the inbox.
+    _write(tmp_path, [{"name": "site", "kind": "url_ok", "url": "https://e.com"}])
+    cfg = _cfg(tmp_path, home_channel="", notify_channel="")
+    sent = []
+    tick_heartbeat(cfg, now=1.0, send=lambda c, t, k: sent.append(t) or True,
+                   fetch=lambda url, timeout: 500)
+    assert sent == []  # nowhere to ping
+    assert any("site" in n for n in Inbox(cfg.inbox_file).drain())
+
+
 def test_tick_announces_recovery_then_goes_quiet(tmp_path):
     _write(tmp_path, [{"name": "site", "kind": "url_ok", "url": "https://e.com"}])
     sent = []

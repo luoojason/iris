@@ -319,6 +319,26 @@ def test_skills_cmd_pending_approve_reject(tmp_path, monkeypatch, capsys):
     assert skills_cmd(config, ns(skills_action="reject", proposal_id=99)) == 1  # no such id
 
 
+def test_skills_cmd_approve_refuses_an_already_decided_proposal(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from iris.cli import skills_cmd
+    from iris.config import Config
+    from iris.skills import SkillProposalStore
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    pfile = tmp_path / "p.json"
+    content = "---\nname: s\ndescription: d\n---\nbody"
+    store = SkillProposalStore(pfile)
+    store.add("s", content, "r", kind="new", now=1.0)
+    store.transition(1, "rejected", now=2.0)
+    config = Config(skills_dir=str(tmp_path / "myskills"), skill_proposals_file=str(pfile))
+    rc = skills_cmd(config, argparse.Namespace(skills_action="approve", proposal_id=1))
+    assert rc == 2  # a rejected proposal cannot be resurrected by approve
+    assert "rejected" in capsys.readouterr().out.lower()
+    assert SkillProposalStore(pfile).get(1)["status"] == "rejected"  # unchanged
+
+
 def test_skills_cmd_approve_needs_a_skills_dir(tmp_path, capsys):
     import argparse
 

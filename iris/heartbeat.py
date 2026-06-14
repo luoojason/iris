@@ -234,22 +234,31 @@ def tick_heartbeat(config: Config, now: Optional[float] = None, send=None,
         from .reminders import send_discord_message as send
     inbox = inbox or Inbox(config.inbox_file)
 
-    failures, skipped, total = evaluate_all(config, now, fetch)
     store = _StateStore(config.heartbeat_state)
     pinged = False
+    failures: dict = {}
+    skipped: list[str] = []
+    total = 0
+    # Evaluate INSIDE the lock (like wakes), so two overlapping ticks can't both
+    # diff against the same prior state and double-ping; save in finally so a
+    # crash can't replay an unsaved ping on the next tick.
     with store.locked() as state:
-        prev = set(state.get("failing", []))
-        current = set(failures)
-        if current != prev:
-            message = _digest(failures, recovered=sorted(prev - current))
-            channel = config.home_channel or config.notify_channel
-            if channel:
-                inbox.append(message, conversation_id=f"discord:{channel}")
-                if config.discord_token and not send(channel, message, config.discord_token):
+        try:
+            failures, skipped, total = evaluate_all(config, now, fetch)
+            prev = set(state.get("failing", []))
+            current = set(failures)
+            state["failing"] = sorted(current)
+            if current != prev:
+                message = _digest(failures, recovered=sorted(prev - current))
+                channel = config.home_channel or config.notify_channel
+                # Always fold into the inbox so a failure is never lost, even when
+                # there is no channel to ping; push to the channel when there is one.
+                inbox.append(message, conversation_id=(f"discord:{channel}" if channel else None))
+                if channel and config.discord_token and not send(channel, message, config.discord_token):
                     log.warning("heartbeat could not ping %s", channel)
-            pinged = True
-        state["failing"] = sorted(current)
-        store.save(state)
+                pinged = True
+        finally:
+            store.save(state)
 
     line = f"heartbeat: {total} checks, {len(failures)} failing"
     if pinged:
