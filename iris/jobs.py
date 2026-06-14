@@ -491,6 +491,7 @@ def run_job(
     send_message=None,
     send_file=None,
     guard=None,
+    verify=None,
 ) -> int:
     """Run one recorded job to completion. This IS the detached runner.
 
@@ -504,6 +505,12 @@ def run_job(
     if guard is None:
         from .usage import CreditGuard
         guard = CreditGuard.from_config(config)
+    # Independent verification of the result, when enabled and the credit guard
+    # isn't parked (the job turn already ran; a parked guard skips the extra,
+    # cheap reviewer call rather than spending on it).
+    if verify is None and getattr(config, "job_verify_enabled", False) and not guard.should_park():
+        from .verify import verify_result
+        verify = lambda instructions, report: verify_result(config, instructions, report)
     if send_message is None:
         from .reminders import send_discord_message as send_message
     send_file = send_file or send_discord_file
@@ -588,16 +595,34 @@ def run_job(
         deliver(f"job #{job_id} ({job['title']}) finished, but artifact handling crashed: {exc}")
         return 1
 
+    # Independent check that the report actually satisfies the ask. It only
+    # annotates (the result is always delivered) and never raises: a crashing or
+    # unreadable reviewer fails open to "couldn't verify" rather than blocking.
+    verified: Optional[bool] = None
+    verify_reason = ""
+    if verify is not None:
+        try:
+            verdict = verify(job["instructions"], report)
+        except Exception:
+            log.exception("job %s verification crashed; delivering unverified", job_id)
+            verdict = {"ok": None, "reason": "verification crashed"}
+        verified = verdict.get("ok")
+        verify_reason = verdict.get("reason", "") or ""
+
     final = store.transition(job_id, ("running",), "done",
                              report=report, artifacts=artifact_names,
-                             finished_ts=time.time())
+                             verified=verified, finished_ts=time.time())
     if final is None:
         # The job left 'running' under us (an owner cancel won the race).
         # Don't follow a cancel with a confusing 'finished' ping.
         log.info("job %s was cancelled mid-run; skipping delivery", job_id)
         return 0
 
-    if deliver(f"job #{job_id} ({job['title']}) finished: {report}", problems):
+    banner = ""
+    if verified is False:
+        banner = (f"[verification flag] an independent check thinks this may not fully "
+                  f"satisfy the task: {verify_reason}\n")
+    if deliver(f"{banner}job #{job_id} ({job['title']}) finished: {report}", problems):
         store.update(job_id, report_delivered=True)
 
     try:

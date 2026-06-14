@@ -111,6 +111,12 @@ class Config:
     # everyday tasks run on the cheaper base model, hard ones escalate to this.
     job_model_heavy: str = "claude-opus-4-8"
     job_persona: str = ""
+    # Verification gate: before a finished job reports "done", an independent
+    # cheap model rules whether its report actually satisfies the instructions
+    # (it can only annotate, never suppress; a failed check flags the report).
+    # Off by default. Empty job_verify_model falls back to goal_judge_model.
+    job_verify_enabled: bool = False
+    job_verify_model: str = ""
     # The browser job grant: how to launch the Playwright MCP server, and the
     # isolated profile directory it gets (never the owner's real browser
     # profile). Only used when a job is granted 'browser'.
@@ -267,6 +273,8 @@ class Config:
             job_model=os.environ.get("IRIS_JOB_MODEL", ""),
             job_model_heavy=os.environ.get("IRIS_JOB_MODEL_HEAVY", "claude-opus-4-8"),
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
+            job_verify_enabled=_flag(os.environ.get("IRIS_JOB_VERIFY"), False),
+            job_verify_model=os.environ.get("IRIS_JOB_VERIFY_MODEL", ""),
             browser_mcp_cmd=os.environ.get(
                 "IRIS_BROWSER_MCP_CMD", "npx @playwright/mcp@latest --headless"),
             browser_profile_dir=os.environ.get(

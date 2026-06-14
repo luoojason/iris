@@ -253,6 +253,13 @@ with a `jobs` server entry in your MCP config
   model call), and the report folds into your next chat turn via the inbox
   (`IRIS_INBOX_FILE`), so the agent knows the outcome without polling.
   Parked and queued jobs launch only when you say so (`resume_job`).
+- **Verification gate** (`IRIS_JOB_VERIFY=true`, off by default). Before a
+  finished job reports "done", an independent cheap model
+  (`IRIS_JOB_VERIFY_MODEL`, defaults to the goal judge model) rules whether the
+  report actually satisfies the instructions — the worker can't wave its own work
+  through. It only **annotates**: the result is always delivered, a failed check
+  prepends a clear flag (and shows in `job` status), an unreachable reviewer fails
+  open to "couldn't verify", and it's skipped when the credit guard is parked.
 
 ### Job console
 

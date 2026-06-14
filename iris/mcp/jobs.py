@@ -161,6 +161,11 @@ def job_status(job_id: int) -> str:
         lines.append(f"error: {job['error']}")
     if job.get("artifacts"):
         lines.append("artifacts: " + ", ".join(job["artifacts"]))
+    if job.get("verified") is False:
+        lines.append("verification: an independent check flagged this result as "
+                     "possibly not satisfying the task.")
+    elif job.get("verified") is True:
+        lines.append("verification: independently checked, looks good.")
     report = (job.get("report") or "").strip()
     if report:
         lines.append("report:")

@@ -169,6 +169,7 @@ def run_with(env):
         store=env["store"], workspace_store=env["ws_store"], inbox=env["inbox"],
         driver_factory=env["driver_factory"],
         send_message=env["send_message"], send_file=env["send_file"],
+        verify=env.get("verify"),
     )
 
 
@@ -186,6 +187,52 @@ def test_run_job_happy_path(tmp_path):
     assert "job #1" in text and "finished" in text and "all done" in text
     folded = env["inbox"].drain("discord:chan-9")
     assert len(folded) == 1 and "job #1" in folded[0] and "all done" in folded[0]
+
+
+def test_run_job_verification_pass_delivers_clean(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="wrote report.md", session_id="s", is_error=False))
+    env["verify"] = lambda instructions, report: {"ok": True, "reason": "file present"}
+    assert run_with(env) == 0
+    assert env["store"].get(1)["verified"] is True
+    text = env["pings"][0][1]
+    assert "verification flag" not in text  # a pass adds no warning
+    assert "wrote report.md" in text
+
+
+def test_run_job_verification_fail_flags_but_still_delivers(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="I think it's basically done", session_id="s", is_error=False))
+    env["verify"] = lambda instructions, report: {"ok": False, "reason": "no file was produced"}
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["verified"] is False
+    assert job["state"] == "done"  # the work still completed; verification only annotates
+    text = env["pings"][0][1]
+    assert "verification flag" in text and "no file was produced" in text
+    assert "I think it's basically done" in text  # the full report is still delivered
+    # the fold-back note carries the warning too
+    assert any("verification flag" in n for n in env["inbox"].drain("discord:chan-9"))
+
+
+def test_run_job_verification_fails_open_when_the_reviewer_crashes(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+
+    def boom(instructions, report):
+        raise RuntimeError("reviewer model unreachable")
+
+    env["verify"] = boom
+    assert run_with(env) == 0  # the report is delivered regardless
+    job = env["store"].get(1)
+    assert job["verified"] is None  # unverified, not failed
+    assert "verification flag" not in env["pings"][0][1]  # no false alarm
+
+
+def test_run_job_without_verification_is_unchanged(tmp_path):
+    # No verify seam (the default): no verified field is forced true/false, and
+    # the report delivers exactly as before.
+    env = runner_env(tmp_path, result=ClaudeResult(text="all done", session_id="s", is_error=False))
+    assert run_with(env) == 0
+    assert env["store"].get(1)["verified"] is None
+    assert "verification flag" not in env["pings"][0][1]
 
 
 def test_run_job_failure_path(tmp_path):
