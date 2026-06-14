@@ -10,7 +10,28 @@ turn, and judges progress with an independent cheap-model check. The seams
 from __future__ import annotations
 
 from iris.config import Config
-from iris.goals import GoalStore, run_goal_tick
+from iris.goals import GoalStore, parse_verdict, run_goal_tick
+
+
+# -- parse_verdict -----------------------------------------------------------
+
+def test_parse_verdict_reads_each_status():
+    assert parse_verdict("DONE: it is finished")["status"] == "done"
+    assert parse_verdict("BLOCKED: need a credential")["status"] == "blocked"
+    assert parse_verdict("CONTINUE: more to do")["status"] == "continue"
+    assert parse_verdict("DONE: shipped")["summary"] == "shipped"
+
+
+def test_parse_verdict_tolerates_a_leading_line():
+    assert parse_verdict("Here's my call:\nCONTINUE: keep at it")["status"] == "continue"
+
+
+def test_parse_verdict_unreadable_reply_fails_open_to_blocked():
+    # No recognizable verdict -> the judge did not rule -> ask the owner.
+    assert parse_verdict("I'm honestly not sure about this")["status"] == "blocked"
+    assert parse_verdict("")["status"] == "blocked"
+    # "not done" mid-sentence must not trip a false DONE
+    assert parse_verdict("This is not done yet, needs more")["status"] == "blocked"
 
 
 # -- GoalStore ---------------------------------------------------------------
@@ -165,6 +186,25 @@ def test_tick_judge_error_fails_open_to_asking(tmp_path):
     assert status == "blocked"
     assert store.get(goal["id"])["status"] == "blocked"
     assert sent  # the owner was pinged
+
+
+def test_tick_does_not_clobber_a_cancel_during_the_step(tmp_path):
+    # The owner cancels the goal while the step/judge is running. The tick must
+    # not overwrite that with "done" or ping the owner about a goal they dropped.
+    store, goal = _seed(tmp_path, max_steps=5)
+    sent = []
+
+    def judge_then_owner_cancels(g, t):
+        store.transition(g["id"], "cancelled", now=99.0)
+        return {"status": "done", "summary": "claims done"}
+
+    status = run_goal_tick(_cfg(tmp_path), now=40.0, fetch=lambda: 5.0,
+                           step=lambda g: "did work",
+                           judge=judge_then_owner_cancels,
+                           sender=lambda c, t, k: sent.append(t))
+    assert status == "cancelled"
+    assert store.get(goal["id"])["status"] == "cancelled"  # cancel preserved
+    assert sent == []  # no "done" ping for a cancelled goal
 
 
 def test_tick_budget_exhausted_blocks_without_stepping(tmp_path):

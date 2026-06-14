@@ -166,6 +166,32 @@ class GoalStore:
     def transition(self, goal_id: int, status: str, now: float) -> Optional[dict]:
         return self.update(goal_id, status=status, updated_ts=now)
 
+    def record_step(self, goal_id: int, *, now: float, entry: dict,
+                    status: Optional[str] = None) -> Optional[dict]:
+        """Atomically record one step's outcome (steps+1, log, updated_ts, and an
+        optional terminal status) in a single locked write.
+
+        Returns the updated goal, or None if it is gone or no longer active — e.g.
+        the owner cancelled it during the step. Folding the step record and the
+        status flip into one lock (and refusing to write a non-active goal) keeps a
+        cancel that lands mid-step from being overwritten with "done"/"blocked",
+        so the owner can always preempt a goal.
+        """
+        with self._locked():
+            items = self._load()
+            for goal in items:
+                if int(goal.get("id", 0)) == int(goal_id):
+                    if goal.get("status") != "active":
+                        return None
+                    goal["steps"] = int(goal.get("steps", 0)) + 1
+                    goal["log"] = goal.get("log", []) + [entry]
+                    goal["updated_ts"] = now
+                    if status:
+                        goal["status"] = status
+                    self._save(items)
+                    return goal
+            return None
+
 
 def _gate(config, now: float, fetch: Optional[Callable]) -> tuple[bool, str]:
     """Reuse the proactive leash: headroom on the real weekly usage, unparked guard."""
@@ -180,8 +206,9 @@ def _gate(config, now: float, fetch: Optional[Callable]) -> tuple[bool, str]:
         from .usage import CreditGuard
         parked = CreditGuard.from_config(config).should_park()
     except Exception:
-        parked = False  # a broken ledger must not silently license goal spend;
-        # the usage gate below still applies, park is only the extra backstop.
+        # A broken ledger drops only the park backstop; the real weekly-usage gate
+        # below is then the sole leash (and an unknown usage value fails safe).
+        parked = False
 
     creds = config.proactive_creds_path or os.path.expanduser("~/.claude/.credentials.json")
     fetcher = fetch or (lambda: fetch_weekly_utilization(read_oauth_token(creds)))
@@ -193,17 +220,20 @@ def _gate(config, now: float, fetch: Optional[Callable]) -> tuple[bool, str]:
 def parse_verdict(text: str) -> dict:
     """A judge reply into ``{"status": done|blocked|continue, "summary": ...}``.
 
-    Lenient: an unrecognized or empty reply defaults to ``continue`` so a garbled
-    judge line never silently strands a goal as done; the step budget still bounds
-    a goal that keeps drawing ``continue``.
+    Scans for the first line that *starts with* one of the three tokens (so leading
+    prose before the verdict line is tolerated, while a "not done" mid-sentence
+    never trips a false DONE). A reply with no recognizable verdict fails OPEN to
+    ``blocked`` — the judge did not actually rule, so the tick asks the owner rather
+    than looping silently or claiming success.
     """
-    line = next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
-    upper = line.upper()
-    for status in ("done", "blocked", "continue"):
-        if upper.startswith(status.upper()):
-            summary = line.split(":", 1)[1].strip() if ":" in line else ""
-            return {"status": status, "summary": summary}
-    return {"status": "continue", "summary": line}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        upper = line.upper()
+        for status in ("done", "blocked", "continue"):
+            if upper.startswith(status.upper()):
+                summary = line.split(":", 1)[1].strip() if ":" in line else ""
+                return {"status": status, "summary": summary}
+    return {"status": "blocked", "summary": "couldn't read a verdict from the judge"}
 
 
 def _default_step(config):
@@ -311,15 +341,17 @@ def run_goal_tick(config, *, now: float, store: Optional[GoalStore] = None,
     status = (verdict or {}).get("status", "continue")
     summary = (verdict or {}).get("summary", "")
     entry = {"ts": now, "step": (step_text or "")[:600], "status": status, "summary": summary}
-    store.update(goal_id, steps=done_steps + 1, log=goal.get("log", []) + [entry],
-                 updated_ts=now)
+    terminal = status if status in ("done", "blocked") else None
+    recorded = store.record_step(goal_id, now=now, entry=entry, status=terminal)
+    if recorded is None:
+        # The goal was cancelled (or otherwise left active) during the step;
+        # don't clobber that or report on a goal the owner just dropped.
+        return "cancelled"
 
     if status == "done":
-        store.transition(goal_id, "done", now)
-        report(f"[goal done] “{goal['text']}” — {summary or step_text}".strip())
+        report(f"[goal done] “{goal['text']}”: {summary or step_text}".strip())
         return "done"
     if status == "blocked":
-        store.transition(goal_id, "blocked", now)
         report(f"[goal needs you] on “{goal['text']}”: {summary or step_text}".strip())
         return "blocked"
     return "advanced"
