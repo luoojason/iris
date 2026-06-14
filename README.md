@@ -255,6 +255,11 @@ with a `jobs` server entry in your MCP config
   model call), and the report folds into your next chat turn via the inbox
   (`IRIS_INBOX_FILE`), so the agent knows the outcome without polling.
   Parked and queued jobs launch only when you say so (`resume_job`).
+- **Chaining.** A job can be started with `after=<job_id>` so it waits until that
+  job finishes and then launches automatically (and is cancelled if the
+  prerequisite fails). Chains resolve with no poller — on the prerequisite's
+  completion and on the next time jobs are touched — so a sequence of dependent
+  work runs itself in order without holding slots while it waits.
 - **Pause and ask.** A job that hits a fork it genuinely can't resolve (a choice
   between real options, a missing credential) can end its turn with a single
   `QUESTION: ...` line instead of guessing. The runner pauses it (state

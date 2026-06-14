@@ -206,7 +206,8 @@ class JobStore:
 
     def add(self, title: str, instructions: str, grants: list[str],
             workspace: str, channel_id: str, state: str = "pending",
-            admit_below: Optional[int] = None, heavy: bool = False) -> dict:
+            admit_below: Optional[int] = None, heavy: bool = False,
+            after: Optional[int] = None) -> dict:
         """Record a job. With ``admit_below``, the active-jobs admission check
         happens under the same lock as the insert (no TOCTOU between counting
         and adding); the returned dict carries an ephemeral ``admitted`` flag
@@ -232,6 +233,7 @@ class JobStore:
                 "report_delivered": False,
                 "channel_id": channel_id,
                 "heavy": heavy,
+                "after": after,
             }
             items.append(job)
             returned = dict(job)
@@ -320,7 +322,7 @@ def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
     # Transition-first: the store's guard decides who wins a race with the
     # runner, so a cancel is never claimed unless it actually stuck. A
     # needs_input job has no live runner, so it cancels straight away too.
-    if store.transition(job_id, ("pending", "parked", "needs_input"), "cancelled",
+    if store.transition(job_id, ("pending", "parked", "needs_input", "waiting"), "cancelled",
                         finished_ts=time.time()):
         return f"Cancelled job #{job_id} before it started."
     job = store.get(job_id)
@@ -392,6 +394,61 @@ def repair_dead_runners(store: JobStore) -> int:
                             error=error, finished_ts=time.time()):
             repaired += 1
     return repaired
+
+
+def launch_ready_dependents(store: JobStore, config: Config, *, spawn=None,
+                            guard=None, notify=None) -> int:
+    """Resolve jobs chained with ``after=<id>``: launch the ones whose prerequisite
+    finished, cancel the ones whose prerequisite failed.
+
+    No poller — this runs on the same touches as ``repair_dead_runners`` (a job
+    completing, the owner starting more work), the established no-idle pattern. A
+    waiting job launches only when its prerequisite is ``done`` (and the credit
+    guard is unparked, else it parks); it is cancelled if the prerequisite failed
+    or was cancelled, and left waiting while the prerequisite is still in flight or
+    has been pruned away. Returns how many dependents were launched.
+    """
+    spawn = spawn or spawn_runner
+    if guard is None:
+        from .usage import CreditGuard
+        guard = CreditGuard.from_config(config)
+    if notify is None:
+        from .reminders import send_discord_message
+
+        def notify(dep: dict, msg: str) -> None:
+            channel = dep.get("channel_id") or config.home_channel
+            if channel and config.discord_token:
+                send_discord_message(channel, msg, config.discord_token)
+
+    launched = 0
+    for dep in store.all():
+        if dep.get("state") != "waiting":
+            continue
+        prereq_id = dep.get("after")
+        prereq = store.get(prereq_id) if prereq_id is not None else None
+        if prereq is None:
+            continue  # prerequisite still unknown or pruned: leave it waiting
+        state = prereq.get("state")
+        if state in ("failed", "cancelled"):
+            if store.transition(dep["id"], ("waiting",), "cancelled",
+                                error=f"prerequisite job #{prereq_id} did not succeed",
+                                finished_ts=time.time()):
+                notify(dep, f"job #{dep['id']} ({dep['title']}) cancelled: "
+                            f"its prerequisite job #{prereq_id} {state}.")
+            continue
+        if state != "done":
+            continue  # still pending / running / waiting / needs_input / parked
+        if guard.should_park():
+            if store.transition(dep["id"], ("waiting",), "parked"):
+                notify(dep, f"job #{dep['id']} ({dep['title']}) is parked (credit "
+                            f"guard); resume_job({dep['id']}) to launch it.")
+            continue
+        if store.transition(dep["id"], ("waiting",), "pending"):
+            spawn(dep["id"], store=store)
+            launched += 1
+            notify(dep, f"job #{dep['id']} ({dep['title']}) started: its "
+                        f"prerequisite job #{prereq_id} finished.")
+    return launched
 
 
 def _pid_alive(pid: int) -> bool:
@@ -527,6 +584,7 @@ def run_job(
     send_file=None,
     guard=None,
     verify=None,
+    spawn=spawn_runner,
 ) -> int:
     """Run one recorded job to completion. This IS the detached runner.
 
@@ -703,6 +761,13 @@ def run_job(
                                  conversation_id=(f"discord:{channel}" if channel else None))
     except Exception:
         log.exception("job %s artifact upload crashed after completion", job_id)
+
+    # This job succeeded; launch any job chained to run after it. Best-effort and
+    # isolated so a chaining hiccup never taints the completed job's own outcome.
+    try:
+        launch_ready_dependents(store, config, spawn=spawn, guard=guard)
+    except Exception:
+        log.exception("job %s: launching chained dependents failed", job_id)
     return 0
 
 

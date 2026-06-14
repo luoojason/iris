@@ -20,6 +20,7 @@ from iris.config import Config
 from iris.jobs import (
     JobStore,
     clamp_grants,
+    launch_ready_dependents,
     parse_grants,
     repair_dead_runners,
     spawn_runner,
@@ -62,7 +63,7 @@ def _kill_runner(pid) -> bool:
 
 @mcp.tool()
 def start_job(title: str, instructions: str, grants: str = "", workspace: str = "",
-              heavy: bool = False) -> str:
+              heavy: bool = False, after: int = 0) -> str:
     """Start a background job: one deep claude run, detached from this chat.
 
     Use it for work that takes minutes (audits, refactors, research). The job
@@ -80,6 +81,9 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
         heavy: Set True ONLY for genuinely hard jobs (deep reasoning, tricky
             multi-step work) to run them on the stronger model. Everyday jobs
             leave this False and run on the cheaper default model.
+        after: Chain this job to run only after job #<after> finishes
+            successfully. It waits until then (and is cancelled if that job
+            fails). Use it to sequence dependent work.
     """
     config = _config()
     if not config.jobs_enabled:
@@ -103,6 +107,29 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
                 f"No workspace named {workspace!r} (registered: {names}). "
                 "The owner registers one with: iris workspaces add <name> <path>."
             )
+
+    if after:
+        if store.get(after) is None:
+            return f"No job #{after} to chain after."
+        job = store.add(title.strip(), instructions, granted, workspace, origin,
+                        state="waiting", heavy=heavy, after=after)
+        # Resolve immediately: if the prerequisite already finished, this launches
+        # the dependent now; otherwise it stays waiting until that job completes.
+        launch_ready_dependents(store, config, spawn=SPAWN)
+        state_now = (store.get(job["id"]) or {}).get("state")
+        lines = []
+        if state_now == "waiting":
+            lines.append(f"Job #{job['id']} ({job['title']}) queued to run after "
+                         f"job #{after} finishes.")
+        elif state_now == "pending":
+            lines.append(f"Job #{job['id']} ({job['title']}) started: prerequisite "
+                         f"job #{after} was already done.")
+        else:
+            lines.append(f"Job #{job['id']} ({job['title']}) is {state_now}.")
+        if clamped:
+            lines.append(f"Refused grants (over IRIS_JOB_GRANTS): {', '.join(clamped)}.")
+        return "\n".join(lines)
+
     from iris.usage import CreditGuard
 
     lines = []
@@ -116,6 +143,7 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
         )
     else:
         repair_dead_runners(store)
+        launch_ready_dependents(store, config, spawn=SPAWN)  # progress any ready chains
         # The admission check runs inside the store's lock with the insert,
         # so two simultaneous start_job calls cannot both slip under the cap.
         job = store.add(title.strip(), instructions, granted, workspace,

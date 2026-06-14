@@ -148,6 +148,29 @@ def test_resume_refuses_terminal_states(env):
     assert "only parked or queued" in srv.resume_job(1)
 
 
+def test_start_job_chained_after_another_waits(env):
+    srv.start_job("A", "first")  # job 1, spawned
+    reply = srv.start_job("B", "second", after=1)
+    assert "#2" in reply and "after" in reply.lower()
+    job2 = env["store"].get(2)
+    assert job2["state"] == "waiting" and job2["after"] == 1
+    assert env["spawned"] == [1]  # the dependent is not launched yet
+
+
+def test_start_job_after_unknown_prereq_is_rejected(env):
+    reply = srv.start_job("B", "x", after=9)
+    assert "no job #9" in reply.lower()
+    assert env["store"].all() == []  # nothing recorded
+
+
+def test_start_job_after_a_finished_prereq_launches_now(env):
+    srv.start_job("A", "first")
+    env["store"].transition(1, ("pending",), "done")
+    srv.start_job("B", "second", after=1)
+    assert env["store"].get(2)["state"] == "pending"  # prereq already done -> resolved
+    assert env["spawned"][-1] == 2
+
+
 def test_resume_a_waiting_job_with_an_answer(env):
     srv.start_job("a", "one")
     env["store"].transition(1, ("pending",), "needs_input", question="prod or staging?")

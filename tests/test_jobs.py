@@ -283,6 +283,82 @@ class _ParkedGuard:
         pass
 
 
+class _OpenGuard:
+    def should_park(self):
+        return False
+
+    def record(self, *a, **k):
+        pass
+
+
+# -- after:<job_id> chaining -------------------------------------------------
+
+def test_launch_ready_dependents_launches_when_prereq_is_done(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="done")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    n = launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                                guard=_OpenGuard(), notify=lambda dep, m: None)
+    assert n == 1 and spawned == [b["id"]]
+    assert store.get(b["id"])["state"] == "pending"
+
+
+def test_launch_ready_dependents_cancels_when_prereq_failed(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="failed")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                            guard=_OpenGuard(), notify=lambda dep, m: None)
+    assert spawned == []
+    assert store.get(b["id"])["state"] == "cancelled"
+
+
+def test_launch_ready_dependents_waits_while_prereq_active(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="running")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    n = launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                                guard=_OpenGuard(), notify=lambda dep, m: None)
+    assert n == 0 and spawned == []
+    assert store.get(b["id"])["state"] == "waiting"
+
+
+def test_launch_ready_dependents_parks_when_the_guard_is_parked(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="done")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                            guard=_ParkedGuard(), notify=lambda dep, m: None)
+    assert spawned == []
+    assert store.get(b["id"])["state"] == "parked"
+
+
+def test_run_job_launches_a_chained_dependent_on_success(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+    dep = env["store"].add("B", "i", ["subagents"], "", "chan-9", state="waiting",
+                           after=env["job_id"])
+    spawned = []
+    run_job(env["job_id"], env["config"], store=env["store"], workspace_store=env["ws_store"],
+            inbox=env["inbox"], driver_factory=env["driver_factory"],
+            send_message=env["send_message"], send_file=env["send_file"],
+            spawn=lambda jid, **k: spawned.append(jid))
+    assert env["store"].get(env["job_id"])["state"] == "done"
+    assert spawned == [dep["id"]]  # the chained job launched when its prereq finished
+    assert env["store"].get(dep["id"])["state"] == "pending"
+
+
 def test_run_job_skips_verification_when_the_credit_guard_is_parked(tmp_path):
     env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
     calls = []
