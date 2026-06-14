@@ -11,10 +11,24 @@ that is the same format Claude Code uses, so skills port directly.
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
+import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 _DESCRIPTION = re.compile(r"(?mi)^description:\s*(.+)$")
+# A skill folder name must be a safe slug: no path separators, no traversal, no
+# surprises when it becomes a directory under the owner's skills dir.
+_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
 def _skills_root(claude_home: str | None = None) -> Path:
@@ -67,3 +81,126 @@ def link_skills(skills_dir: str, claude_home: str | None = None) -> int:
         except OSError:
             pass
     return made
+
+
+# -- Self-improving skills: staging + owner approval -------------------------
+#
+# A skill is an instruction the model follows, so letting Iris rewrite her own
+# skills is the highest-stakes self-modification there is. She may PROPOSE one
+# (via the maintain review or the propose_skill chat tool), but a proposal is
+# only staged: it is applied to the live skills dir solely by an explicit owner
+# action (`iris skills approve <id>`), never silently. The full content is stored
+# so the owner reviews exactly what will run before approving.
+
+def validate_skill(name: str, content: str) -> Optional[str]:
+    """An error string if this is not a safe, well-formed skill, else None."""
+    if not _SAFE_NAME.match(name or ""):
+        return ("Skill name must be a lowercase slug (letters, digits, hyphens), "
+                "no spaces or path separators.")
+    if not _DESCRIPTION.search(content or ""):
+        return "A skill needs a 'description:' line in its frontmatter."
+    return None
+
+
+class SkillProposalStore:
+    """File-backed staging area for proposed skill changes (flock + atomic
+    replace, same as the other stores). Nothing here is live until the owner
+    approves it and `apply_proposal` writes it into the skills dir."""
+
+    CAP = 50
+
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = Path(path)
+
+    @contextmanager
+    def _locked(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if fcntl is None:  # pragma: no cover - Windows
+            yield
+            return
+        lock = self.path.with_suffix(self.path.suffix + ".lock")
+        with open(lock, "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _load(self) -> list[dict]:
+        if not self.path.exists():
+            return []
+        try:
+            data = json.loads(self.path.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+    def _save(self, items: list[dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(items, handle, indent=2, ensure_ascii=False)
+        os.replace(tmp, self.path)
+
+    def add(self, name: str, content: str, rationale: str, *,
+            kind: str = "edit", now: Optional[float] = None) -> dict:
+        now = time.time() if now is None else now
+        with self._locked():
+            items = self._load()
+            pid = max((int(p.get("id", 0)) for p in items), default=0) + 1
+            proposal = {
+                "id": pid, "name": name, "content": content, "rationale": rationale,
+                "kind": kind, "status": "pending", "created_ts": now,
+            }
+            items.append(proposal)
+            if len(items) > self.CAP:
+                items = items[-self.CAP:]
+            self._save(items)
+            return proposal
+
+    def all(self) -> list[dict]:
+        return self._load()
+
+    def get(self, proposal_id: int) -> Optional[dict]:
+        for p in self._load():
+            if int(p.get("id", 0)) == int(proposal_id):
+                return p
+        return None
+
+    def pending(self) -> list[dict]:
+        return [p for p in self._load() if p.get("status") == "pending"]
+
+    def transition(self, proposal_id: int, status: str, now: float) -> Optional[dict]:
+        with self._locked():
+            items = self._load()
+            updated = None
+            for p in items:
+                if int(p.get("id", 0)) == int(proposal_id):
+                    p["status"] = status
+                    p["decided_ts"] = now
+                    updated = p
+                    break
+            if updated is not None:
+                self._save(items)
+            return updated
+
+
+def apply_proposal(proposal: dict, skills_dir: str, claude_home: str | None = None) -> Path:
+    """Write an approved proposal into the skills dir and link it live.
+
+    Validates again at apply time (defence in depth) and refuses to escape the
+    skills dir. Returns the path to the written SKILL.md.
+    """
+    name, content = proposal.get("name", ""), proposal.get("content", "")
+    error = validate_skill(name, content)
+    if error:
+        raise ValueError(error)
+    root = Path(skills_dir).expanduser()
+    target_dir = (root / name).resolve()
+    if root.resolve() not in target_dir.parents:
+        raise ValueError("skill path escapes the skills directory")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    skill_md = target_dir / "SKILL.md"
+    skill_md.write_text(content, encoding="utf-8")
+    link_skills(str(root), claude_home)  # make it discoverable to claude
+    return skill_md

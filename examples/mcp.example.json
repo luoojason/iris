@@ -30,6 +30,10 @@
     "session_search": {
       "command": "python",
       "args": ["-m", "iris.mcp.session_search"]
+    },
+    "skills": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.skills"]
     }
   }
 }

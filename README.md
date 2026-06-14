@@ -451,6 +451,25 @@ with one cron entry:
 0 */4 * * *  cd /path/to/iris && python -m iris goal-tick
 ```
 
+### Self-improving skills
+
+Iris can refine her own skills, but never silently — rewriting a skill is the
+highest-stakes self-modification there is (a skill is an instruction she follows),
+so it is always owner-gated. When she learns something durable about how she should
+work (often during a maintain review), she calls `propose_skill`, which **stages** a
+full `SKILL.md` for your review without changing her behavior. You then:
+
+```bash
+iris skills pending            # list staged proposals
+iris skills show <id>          # read the full proposed SKILL.md and rationale
+iris skills approve <id>       # write it into IRIS_SKILLS_DIR and link it live
+iris skills reject <id>        # discard it
+```
+
+Approval is the only path from proposal to live behavior. Proposals are capped
+(`IRIS_SKILL_PROPOSALS_MAX`), validated (safe slug name, real frontmatter), and
+confined to the skills directory.
+
 ### Voice messages
 
 Iris can transcribe inbound voice notes locally and for free, so you can talk to

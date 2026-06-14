@@ -373,6 +373,68 @@ def goals_cmd(config: Config, args) -> int:
     return 0
 
 
+def skills_cmd(config: Config, args) -> int:
+    """Owner-side review and approval of Iris's proposed changes to her own skills.
+
+    A proposal is staged by the model (propose_skill / the maintain review) but
+    only becomes live behavior here, on an explicit approve: self-modification is
+    always owner-gated.
+    """
+    import time
+
+    from .skills import SkillProposalStore, apply_proposal
+
+    store = SkillProposalStore(config.skill_proposals_file)
+    action = getattr(args, "skills_action", None)
+
+    if action == "show":
+        p = store.get(args.proposal_id)
+        if p is None:
+            print(f"No skill proposal #{args.proposal_id}.")
+            return 1
+        print(f"Proposal #{p['id']} [{p.get('status')}] {p.get('kind')} '{p['name']}'")
+        print(f"rationale: {(p.get('rationale') or '').strip()}")
+        print("--- SKILL.md ---")
+        print(p.get("content", ""))
+        return 0
+
+    if action == "approve":
+        p = store.get(args.proposal_id)
+        if p is None:
+            print(f"No skill proposal #{args.proposal_id}.")
+            return 1
+        if not config.skills_dir:
+            print("Set IRIS_SKILLS_DIR first: that's the directory an approved skill "
+                  "is written into and linked from.")
+            return 2
+        try:
+            path = apply_proposal(p, config.skills_dir)
+        except ValueError as exc:
+            print(f"skills approve: {exc}")
+            return 2
+        store.transition(args.proposal_id, "approved", time.time())
+        print(f"Approved skill #{p['id']} ('{p['name']}') -> {path}. It is now live.")
+        return 0
+
+    if action == "reject":
+        if store.transition(args.proposal_id, "rejected", time.time()) is None:
+            print(f"No skill proposal #{args.proposal_id}.")
+            return 1
+        print(f"Rejected skill proposal #{args.proposal_id}.")
+        return 0
+
+    # "pending" (and any unrecognized action) -> list staged proposals
+    items = store.pending()
+    if not items:
+        print("No pending skill proposals. Iris stages them here when she proposes a "
+              "change to her own skills; review with 'iris skills show <id>'.")
+        return 0
+    for p in items:
+        print(f"#{p['id']} {p.get('kind')} '{p['name']}': {(p.get('rationale') or '').strip()[:140]}")
+    print("Approve with 'iris skills approve <id>' (or reject <id>); show <id> for the full text.")
+    return 0
+
+
 def skills(config: Config) -> int:
     """List the skills the agent can use (and link IRIS_SKILLS_DIR if set)."""
     from .skills import discover, link_skills
@@ -401,7 +463,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("chat", help="plain terminal REPL")
     doctor_parser = sub.add_parser("doctor", help="check that claude is installed and signed in")
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
-    sub.add_parser("skills", help="list the skills the agent can use")
+    skills_parser = sub.add_parser("skills", help="list skills; review/approve Iris's proposed skill changes")
+    skills_sub = skills_parser.add_subparsers(dest="skills_action")
+    skills_sub.add_parser("pending", help="list staged skill proposals")
+    for act in ("show", "approve", "reject"):
+        p = skills_sub.add_parser(act, help=f"{act} a skill proposal by id")
+        p.add_argument("proposal_id", type=int)
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
     pro_parser = sub.add_parser("proactive-tick", help="run a proactive review (assist|maintain) from cron; gated on weekly usage")
     pro_parser.add_argument("kind", choices=["assist", "maintain"], help="which review to run")
@@ -499,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
     if command == "chat":
         return chat(config)
     if command == "skills":
+        if getattr(args, "skills_action", None):
+            return skills_cmd(config, args)
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)

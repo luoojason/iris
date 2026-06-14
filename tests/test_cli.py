@@ -267,6 +267,51 @@ def test_schedule_cmd_rejects_bad_rules(tmp_path, capsys):
     assert rc == 2
 
 
+def test_skills_cmd_pending_approve_reject(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from iris.cli import skills_cmd
+    from iris.config import Config
+    from iris.skills import SkillProposalStore, discover
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # don't touch the real ~/.claude
+    skills_dir = tmp_path / "myskills"
+    pfile = tmp_path / "p.json"
+    content = "---\nname: summarize\ndescription: Summarize docs into bullets\n---\nBody."
+    SkillProposalStore(pfile).add("summarize", content, "often asked", kind="new", now=1.0)
+    config = Config(skills_dir=str(skills_dir), skill_proposals_file=str(pfile))
+
+    def ns(**kw):
+        return argparse.Namespace(**kw)
+
+    assert skills_cmd(config, ns(skills_action="pending")) == 0
+    assert "summarize" in capsys.readouterr().out
+
+    assert skills_cmd(config, ns(skills_action="approve", proposal_id=1)) == 0
+    assert SkillProposalStore(pfile).get(1)["status"] == "approved"
+    assert (skills_dir / "summarize" / "SKILL.md").read_text("utf-8") == content
+    # the approved skill is now discoverable to claude
+    assert "summarize" in dict(discover(str(tmp_path / "home")))
+
+    assert skills_cmd(config, ns(skills_action="reject", proposal_id=99)) == 1  # no such id
+
+
+def test_skills_cmd_approve_needs_a_skills_dir(tmp_path, capsys):
+    import argparse
+
+    from iris.cli import skills_cmd
+    from iris.config import Config
+    from iris.skills import SkillProposalStore
+
+    pfile = tmp_path / "p.json"
+    content = "---\nname: s\ndescription: d\n---\nbody"
+    SkillProposalStore(pfile).add("s", content, "r", kind="new", now=1.0)
+    config = Config(skills_dir="", skill_proposals_file=str(pfile))
+    rc = skills_cmd(config, argparse.Namespace(skills_action="approve", proposal_id=1))
+    assert rc == 2
+    assert "IRIS_SKILLS_DIR" in capsys.readouterr().out
+
+
 def test_doctor_reports_goals_when_enabled(tmp_path, capsys):
     from iris.cli import doctor
     from iris.config import Config
