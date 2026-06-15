@@ -38,6 +38,7 @@ log = logging.getLogger("iris.webhooks")
 
 MAX_BODY = 64 * 1024
 MAX_MESSAGE = 1000
+MAX_NAME = 64
 
 
 def _authorized(provided: Optional[str], expected: str) -> bool:
@@ -50,7 +51,7 @@ def _authorized(provided: Optional[str], expected: str) -> bool:
 def build_message(name: str, body: str) -> str:
     """Render a hook into a note. A JSON body's ``message`` field is preferred,
     else the raw body; truncated so a flood can't blow the next turn's context."""
-    name = (name or "hook").strip() or "hook"
+    name = ((name or "hook").strip() or "hook")[:MAX_NAME]
     text = (body or "").strip()
     try:
         obj = json.loads(text)

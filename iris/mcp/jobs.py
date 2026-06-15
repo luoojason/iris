@@ -244,19 +244,36 @@ def resume_job(job_id: int, answer: str = "") -> str:
     job = store.get(job_id)
     if job is None:
         return f"No job #{job_id}."
-    if job["state"] == "needs_input":
+    state = job["state"]
+    if state == "needs_input":
         if not (answer or "").strip():
             return (f"Job #{job_id} is waiting for your answer to: {job.get('question', '')}\n"
                     f"Call resume_job({job_id}, answer=...) with your decision.")
-        # Record the answer and re-queue it; the runner resumes the paused session.
-        store.transition(job_id, ("needs_input",), "pending", pending_answer=answer)
+        # Gate the spawn on winning the transition so two concurrent answers can't
+        # both launch a runner for the same job.
+        if store.transition(job_id, ("needs_input",), "pending", pending_answer=answer):
+            SPAWN(job_id, store=store)
+            return f"Answered job #{job_id} ({job['title']}); resuming it now."
+        return f"Job #{job_id} was already resumed by a concurrent answer."
+    if state == "parked":
+        if store.transition(job_id, ("parked",), "pending"):
+            SPAWN(job_id, store=store)
+            return f"Resumed job #{job_id} ({job['title']})."
+        return f"Job #{job_id} was already resumed."
+    if state == "pending":
+        # A queued job: launch it, but never spawn a second runner for one already
+        # starting (a pending job with a live pid is mid-spawn, not idle-queued).
+        from iris.jobs import _pid_alive, repair_dead_runners
+        repair_dead_runners(store)
+        fresh = store.get(job_id)
+        if fresh is None or fresh["state"] != "pending":
+            return f"Job #{job_id} is {fresh['state'] if fresh else 'gone'}."
+        pid = fresh.get("pid")
+        if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
+            return f"Job #{job_id} is already starting."
         SPAWN(job_id, store=store)
-        return f"Answered job #{job_id} ({job['title']}); resuming it now."
-    if job["state"] not in ("pending", "parked"):
-        return f"Job #{job_id} is {job['state']}; only parked or queued jobs can be resumed."
-    store.transition(job_id, ("parked",), "pending")
-    SPAWN(job_id, store=store)
-    return f"Resumed job #{job_id} ({job['title']})."
+        return f"Resumed job #{job_id} ({job['title']})."
+    return f"Job #{job_id} is {state}; only parked or queued jobs can be resumed."
 
 
 _SCHEDULES_DISABLED = ("Scheduled jobs are disabled. The owner can set "

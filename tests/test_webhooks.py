@@ -27,6 +27,13 @@ def test_build_message_truncates_a_huge_body():
     assert len(out) < 1100
 
 
+def test_build_message_caps_an_oversized_name():
+    # the URL path segment becomes the name; it must be bounded like the body so a
+    # huge path can't inflate the inbox note.
+    out = build_message("z" * 5000, "ok")
+    assert len(out) < 1100
+
+
 def _cfg(tmp_path, **kw):
     base = dict(webhook_enabled=True, webhook_token="s3cret", home_channel="home-1",
                 discord_token="tok", inbox_file=str(tmp_path / "inbox.json"))

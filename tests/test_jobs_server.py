@@ -148,6 +148,17 @@ def test_resume_refuses_terminal_states(env):
     assert "only parked or queued" in srv.resume_job(1)
 
 
+def test_resume_pending_with_a_live_runner_does_not_double_spawn(env):
+    import os
+
+    srv.start_job("a", "one")  # job 1, pending
+    env["store"].update(1, pid=os.getpid())  # pretend its runner is alive
+    before = len(env["spawned"])
+    reply = srv.resume_job(1)
+    assert "already" in reply.lower()
+    assert len(env["spawned"]) == before  # no second runner spawned
+
+
 def test_start_job_chained_after_another_waits(env):
     srv.start_job("A", "first")  # job 1, spawned
     reply = srv.start_job("B", "second", after=1)
