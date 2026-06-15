@@ -14,6 +14,11 @@ What makes it safe to let the clock push work forward:
 * Independent judge. After each step the worker reports what it did; a separate,
   cheap-model check (no tools, fresh session) decides done / blocked / continue.
   The worker cannot mark its own goal done — a skeptical second model must agree.
+* Independent verify on done. The judge rules on the worker's self-report, so a
+  "done" verdict is then re-checked by an independent read-only turn that inspects
+  the actual work (the wiki page, the memory, the page). It fires only on done, so
+  it costs at most one cheap call per completion; an unconfirmed or erroring verify
+  asks the owner instead of accepting a "done" the work doesn't back up.
 * Fail-open, never wedge. If the judge errors, the tick asks the owner instead of
   silently looping or claiming success.
 * Per-goal step budget. A goal that never converges hits ``max_steps``, stops,
@@ -58,6 +63,21 @@ STEP_PROMPT = (
     "- whether the goal is now fully achieved (not just attempted),\n"
     "- anything you need from Jason to keep going.\n"
     "Be concise and do not repeat work from earlier steps."
+)
+
+VERIFY_PROMPT = (
+    "An autonomous worker reported that this goal is now COMPLETE:\n\n"
+    "GOAL: {text}\n\n"
+    "The worker's report:\n\n{step}\n\n"
+    "You are an independent verifier. Do NOT take the report at face value. Using "
+    "your read-only tools, check the actual evidence — read the wiki page it claims "
+    "to have written, recall the memory it says it saved, fetch the page, look at "
+    "what was actually produced. Then decide whether the goal is genuinely and "
+    "verifiably achieved. Reply with ONE line beginning with exactly one of:\n"
+    "CONFIRMED: <the evidence you actually checked that proves it>\n"
+    "UNCONFIRMED: <what is missing or could not be verified>\n"
+    "Say CONFIRMED only if you verified the work yourself, not merely that the worker "
+    "claims it. Do not change anything; only read."
 )
 
 JUDGE_PROMPT = (
@@ -256,6 +276,46 @@ def _default_step(config):
     return step
 
 
+def parse_confirmation(text: str) -> dict:
+    """A verifier reply into ``{"confirmed": bool, "note": str}``.
+
+    Conservative: only an explicit CONFIRMED counts as confirmed; an unreadable or
+    missing verdict is treated as NOT confirmed, so an unverifiable "done" never
+    slips through on a garbled check. UNCONFIRMED is matched first so it is never
+    mistaken for the CONFIRMED substring it contains.
+    """
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        upper = line.upper()
+        if upper.startswith("UNCONFIRMED"):
+            note = line.split(":", 1)[1].strip() if ":" in line else ""
+            return {"confirmed": False, "note": note}
+        if upper.startswith("CONFIRMED"):
+            note = line.split(":", 1)[1].strip() if ":" in line else ""
+            return {"confirmed": True, "note": note}
+    return {"confirmed": False, "note": "verifier gave no clear verdict"}
+
+
+def _default_verify(config):
+    from .agent import Agent
+    agent = Agent.from_config(config)
+
+    def verify(goal: dict, step_text: str) -> dict:
+        # A fresh, independent session on the cheap model with the chat toolset, so
+        # it can actually read the wiki/memory/web to check the claim. Prompted to
+        # only read; runs on its own conversation id so it shares no worker context.
+        result = agent.respond(
+            f"goal-verify:{goal['id']}",
+            VERIFY_PROMPT.format(text=goal["text"], step=step_text),
+            model=(config.goal_judge_model or None),
+        )
+        if result.is_error:
+            raise RuntimeError(result.error or "goal verify failed")
+        return parse_confirmation(result.text)
+
+    return verify
+
+
 def _default_judge(config):
     from .driver import ClaudeDriver
 
@@ -279,7 +339,7 @@ def _default_judge(config):
 
 def run_goal_tick(config, *, now: float, store: Optional[GoalStore] = None,
                   step: Optional[Callable] = None, judge: Optional[Callable] = None,
-                  sender: Optional[Callable] = None,
+                  sender: Optional[Callable] = None, verify: Optional[Callable] = None,
                   fetch: Optional[Callable] = None) -> str:
     """Advance one active goal by a single step. Returns a one-word-ish status.
 
@@ -343,6 +403,23 @@ def run_goal_tick(config, *, now: float, store: Optional[GoalStore] = None,
 
     status = (verdict or {}).get("status", "continue")
     summary = (verdict or {}).get("summary", "")
+
+    # Independent verification of a "done" claim: the judge ruled on the worker's
+    # self-report, so before accepting completion an independent read-only turn
+    # checks the actual work. Fires ONLY on done (bounded cost). An unconfirmed or
+    # erroring verify fails open to "ask the owner" rather than completing blind.
+    if status == "done" and getattr(config, "goals_verify_done", True):
+        verify_fn = verify or _default_verify(config)
+        try:
+            confirmation = verify_fn(goal, step_text)
+        except Exception as exc:
+            log.warning("goal %s verify failed: %s", goal_id, exc)
+            confirmation = {"confirmed": False, "note": "independent verification was unavailable"}
+        if not confirmation.get("confirmed"):
+            status = "blocked"
+            summary = ("reported done, but independent verification did not confirm it: "
+                       + (confirmation.get("note") or "")).strip()
+
     entry = {"ts": now, "step": (step_text or "")[:600], "status": status, "summary": summary}
     terminal = status if status in ("done", "blocked") else None
     recorded = store.record_step(goal_id, now=now, entry=entry, status=terminal)

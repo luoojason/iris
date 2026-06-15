@@ -10,7 +10,16 @@ turn, and judges progress with an independent cheap-model check. The seams
 from __future__ import annotations
 
 from iris.config import Config
-from iris.goals import GoalStore, parse_verdict, run_goal_tick
+from iris.goals import GoalStore, parse_confirmation, parse_verdict, run_goal_tick
+
+
+def test_parse_confirmation_reads_confirmed_and_unconfirmed():
+    assert parse_confirmation("CONFIRMED: the wiki page exists")["confirmed"] is True
+    assert parse_confirmation("UNCONFIRMED: nothing was written")["confirmed"] is False
+    assert parse_confirmation("UNCONFIRMED: x")["note"] == "x"
+    # unreadable reply is conservative: not confirmed
+    assert parse_confirmation("I'm not sure")["confirmed"] is False
+    assert parse_confirmation("")["confirmed"] is False
 
 
 # -- parse_verdict -----------------------------------------------------------
@@ -89,8 +98,11 @@ def test_active_filters_terminal_goals(tmp_path):
 # -- run_goal_tick -----------------------------------------------------------
 
 def _cfg(tmp_path, **kw):
+    # goals_verify_done defaults OFF here so the existing tick tests don't reach
+    # the real verifier; the verify-path tests below turn it on and inject a seam.
     base = dict(goals_enabled=True, home_channel="home-1", discord_token="tok",
                 goals_file=str(tmp_path / "goals.json"),
+                goals_verify_done=False,
                 proactive_usage_cache=str(tmp_path / "weekly.json"),
                 usage_file=str(tmp_path / "usage.json"))
     base.update(kw)
@@ -193,6 +205,60 @@ def test_tick_judge_error_fails_open_to_asking(tmp_path):
     assert status == "blocked"
     assert store.get(goal["id"])["status"] == "blocked"
     assert sent  # the owner was pinged
+
+
+def test_tick_verifies_a_done_claim_and_accepts_when_confirmed(tmp_path):
+    store, goal = _seed(tmp_path, text="document the runbook", max_steps=5)
+    sent, verified = [], []
+    status = run_goal_tick(_cfg(tmp_path, goals_verify_done=True), now=30.0, fetch=lambda: 5.0,
+                           step=lambda g: "wrote the runbook page",
+                           judge=lambda g, t: {"status": "done", "summary": "page written"},
+                           verify=lambda g, t: verified.append((g["id"], t)) or {"confirmed": True, "note": "wiki page present"},
+                           sender=lambda c, t, k: sent.append(t))
+    assert status == "done"
+    assert verified  # the done claim was independently checked
+    assert store.get(goal["id"])["status"] == "done"
+    assert sent  # owner told it's done
+
+
+def test_tick_blocks_a_done_claim_verification_cannot_confirm(tmp_path):
+    store, goal = _seed(tmp_path, max_steps=5)
+    sent = []
+    status = run_goal_tick(_cfg(tmp_path, goals_verify_done=True), now=30.0, fetch=lambda: 5.0,
+                           step=lambda g: "claims it's done",
+                           judge=lambda g, t: {"status": "done", "summary": "all set"},
+                           verify=lambda g, t: {"confirmed": False, "note": "no such wiki page exists"},
+                           sender=lambda c, t, k: sent.append(t))
+    assert status == "blocked"  # not silently completed
+    assert store.get(goal["id"])["status"] == "blocked"
+    assert sent and "no such wiki page exists" in sent[0]
+
+
+def test_tick_verify_error_blocks_to_ask_the_owner(tmp_path):
+    store, goal = _seed(tmp_path, max_steps=5)
+    sent = []
+
+    def boom(g, t):
+        raise RuntimeError("verifier unreachable")
+
+    status = run_goal_tick(_cfg(tmp_path, goals_verify_done=True), now=30.0, fetch=lambda: 5.0,
+                           step=lambda g: "claims done", judge=lambda g, t: {"status": "done", "summary": "x"},
+                           verify=boom, sender=lambda c, t, k: sent.append(t))
+    assert status == "blocked"  # fail open: ask rather than accept an unverified done
+    assert store.get(goal["id"])["status"] == "blocked"
+    assert sent
+
+
+def test_tick_does_not_verify_a_continue_verdict(tmp_path):
+    store, goal = _seed(tmp_path, max_steps=5)
+    verified = []
+    status = run_goal_tick(_cfg(tmp_path, goals_verify_done=True), now=20.0, fetch=lambda: 5.0,
+                           step=lambda g: "made progress",
+                           judge=lambda g, t: {"status": "continue", "summary": "more to do"},
+                           verify=lambda g, t: verified.append(g) or {"confirmed": True, "note": ""},
+                           sender=lambda c, t, k: None)
+    assert status == "advanced"
+    assert verified == []  # verification only fires on a done claim (bounded cost)
 
 
 def test_tick_does_not_clobber_a_cancel_during_the_step(tmp_path):

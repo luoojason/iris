@@ -173,6 +173,11 @@ class Config:
     goals_file: str = "iris-goals.json"
     goals_max_steps: int = 20
     goal_judge_model: str = "claude-haiku-4-5"
+    # When the judge rules a goal "done", an independent verifier turn (read-only)
+    # checks the actual work before it's accepted; an unconfirmed/erroring verify
+    # asks the owner instead of silently completing. Fires ONLY on a done verdict,
+    # so it adds at most one cheap call per goal completion, not per step.
+    goals_verify_done: bool = True
 
     # Scheduled jobs: the one place the clock may start work, and only work
     # the owner pre-recorded verbatim (see iris/schedules.py). Off by default,
@@ -328,6 +333,7 @@ class Config:
             goals_file=os.environ.get("IRIS_GOALS_FILE", "iris-goals.json"),
             goals_max_steps=int(os.environ.get("IRIS_GOALS_MAX_STEPS", "20")),
             goal_judge_model=os.environ.get("IRIS_GOAL_JUDGE_MODEL", "claude-haiku-4-5"),
+            goals_verify_done=_flag(os.environ.get("IRIS_GOALS_VERIFY_DONE"), True),
             scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),
             schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
             schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),

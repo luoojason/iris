@@ -492,7 +492,12 @@ You say "your goal is to ..." and Iris records it (`set_goal`, scoped to the
 thread you set it in); a cron tick then runs **one work step per fire** on the
 goal's own continuous session, and an **independent cheap-model judge** rules each
 step done / blocked / continue — the worker model cannot declare its own goal
-finished. When it is done or stuck, Iris pings the thread you set it in. The line
+finished. And when the judge does rule "done", an **independent verifier** turn
+re-checks the actual work (reads the wiki page / memory / page the worker claims)
+before the goal is accepted; if it can't confirm, the goal asks you instead of
+completing blind (`IRIS_GOALS_VERIFY_DONE`, on by default, fires only on a done
+verdict so it costs at most one extra cheap call per completion). When it is done
+or stuck, Iris pings the thread you set it in. The line
 it keeps is the same as the others: *a goal exists only because you set it.* It
 rides the proactive weekly-usage leash and the credit-guard park (a step runs only
 with real headroom) and is bounded further — a per-goal step budget

@@ -53,7 +53,15 @@ Beyond the gate, three loop-specific bounds:
    `DONE` / `BLOCKED` / `CONTINUE`. The worker cannot mark its own goal done; a
    skeptical second model must agree. An unrecognized reply defaults to
    `continue` (the budget still bounds it).
-6. Record the step (steps+1, log entry, `updated_ts`). Then:
+6a. **Verify (only on a `done` verdict).** The judge ruled on the worker's
+   self-report, so a `done` is re-checked by an independent read-only turn
+   (`IRIS_GOALS_VERIFY_DONE`, default on; cheap model, chat toolset, fresh
+   `goal-verify:<id>` session) that inspects the actual work and replies
+   `CONFIRMED` / `UNCONFIRMED`. Unconfirmed or an erroring verify downgrades the
+   verdict to `blocked` and asks the owner, so a `done` the work doesn't back up
+   is never accepted. It fires only on `done`, so it adds at most one cheap call
+   per completion, not per step.
+7. Record the step (steps+1, log entry, `updated_ts`). Then:
    - `done` → transition `done`, report to the origin thread, return `done`.
    - `blocked` → transition `blocked`, ask the owner, return `blocked`.
    - `continue` → stay active, **silent** (no Discord noise), return `advanced`.
