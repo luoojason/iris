@@ -428,10 +428,44 @@ def repair_dead_runners(store: JobStore) -> int:
             continue
         error = ("the job runner died" if state == "running"
                  else "the job runner died before starting")
+        # death_notified=False marks this as a SILENT death (the runner never got
+        # to deliver its own failure ping); notify_dead_jobs surfaces it once.
         if store.transition(job["id"], (state,), "failed",
-                            error=error, finished_ts=time.time()):
+                            error=error, finished_ts=time.time(), death_notified=False):
             repaired += 1
     return repaired
+
+
+def notify_dead_jobs(config: Config, *, send=None, inbox: Optional[Inbox] = None) -> int:
+    """Surface jobs whose runner died silently. Returns how many were notified.
+
+    A job that fails inside its runner (timeout, error, crash) delivers its own
+    failure ping. But a runner that is killed outright (OOM, an external kill, a
+    crash before delivery) leaves the job stuck until ``repair_dead_runners`` flips
+    it to ``failed`` with no ping at all, so the owner is left guessing. This sweep
+    (run on the reminders tick) repairs those, then pings the originating thread
+    and folds an inbox note for each newly-dead job exactly once. No model call.
+    """
+    store = JobStore(config.jobs_file, keep=config.jobs_keep)
+    repair_dead_runners(store)  # flip any newly-dead runners, marking death_notified=False
+    if send is None:
+        from .reminders import send_discord_message as send
+    inbox = inbox or Inbox(config.inbox_file)
+    notified = 0
+    for job in store.all():
+        if job.get("state") != "failed" or job.get("death_notified") is not False:
+            continue
+        channel = job.get("channel_id") or config.home_channel
+        message = (f"job #{job['id']} ({job.get('title') or ''}) failed: "
+                   f"{job.get('error') or 'the runner died'}")
+        inbox.append(message, conversation_id=(f"discord:{channel}" if channel else None))
+        delivered = True
+        if channel and config.discord_token:
+            delivered = bool(send(channel, message, config.discord_token))
+        if delivered:
+            store.update(job["id"], death_notified=True)
+            notified += 1
+    return notified
 
 
 def launch_ready_dependents(store: JobStore, config: Config, *, spawn=None,

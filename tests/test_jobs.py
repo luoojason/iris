@@ -275,6 +275,57 @@ def test_cancel_handles_a_waiting_job(tmp_path):
     assert "ancel" in out and store.get(1)["state"] == "cancelled"
 
 
+# -- silent job-death notification ------------------------------------------
+
+def _death_cfg(tmp_path, **kw):
+    base = dict(jobs_enabled=True, discord_token="tok", home_channel="home-1",
+                jobs_file=str(tmp_path / "jobs.json"),
+                inbox_file=str(tmp_path / "inbox.json"))
+    base.update(kw)
+    return Config(**base)
+
+
+def test_notify_dead_jobs_pings_once_for_a_runner_that_died(tmp_path):
+    from iris.jobs import notify_dead_jobs
+
+    cfg = _death_cfg(tmp_path)
+    store = JobStore(cfg.jobs_file)
+    store.add("browser pull", "i", ["subagents"], "", "chan-9", state="running")
+    store.update(1, pid=999999)  # a pid that is not alive: the runner died
+
+    sent = []
+    n = notify_dead_jobs(cfg, send=lambda c, t, k: sent.append((c, t)) or True)
+    assert n == 1
+    assert store.get(1)["state"] == "failed"
+    assert sent and sent[0][0] == "chan-9" and "failed" in sent[0][1].lower()
+    assert any("failed" in note.lower() for note in Inbox(cfg.inbox_file).drain("discord:chan-9"))
+
+    # a second sweep does not re-ping the same death
+    sent.clear()
+    assert notify_dead_jobs(cfg, send=lambda c, t, k: sent.append(1) or True) == 0
+    assert sent == []
+
+
+def test_notify_dead_jobs_leaves_clean_failures_and_healthy_jobs_alone(tmp_path):
+    import os
+
+    from iris.jobs import notify_dead_jobs
+
+    cfg = _death_cfg(tmp_path)
+    store = JobStore(cfg.jobs_file)
+    # a cleanly-failed job already delivered its own failure ping
+    store.add("clean fail", "i", ["subagents"], "", "h")
+    store.transition(1, ("pending",), "failed", error="boom")
+    # a healthy running job with a live pid
+    store.add("healthy", "i", ["subagents"], "", "h", state="running")
+    store.update(2, pid=os.getpid())
+
+    sent = []
+    n = notify_dead_jobs(cfg, send=lambda c, t, k: sent.append(1) or True)
+    assert n == 0 and sent == []
+    assert store.get(2)["state"] == "running"  # healthy job untouched
+
+
 class _ParkedGuard:
     def should_park(self):
         return True

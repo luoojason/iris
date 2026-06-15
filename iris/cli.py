@@ -300,6 +300,12 @@ def reminders_tick(config: Config) -> int:
         print(tick_heartbeat(config))
     except Exception as exc:
         print(f"heartbeat tick failed: {exc}")
+    if config.jobs_enabled:
+        try:
+            from .jobs import notify_dead_jobs
+            print(f"dead-jobs: {notify_dead_jobs(config)} notified")
+        except Exception as exc:
+            print(f"dead-jobs sweep failed: {exc}")
     return 0
 
 
