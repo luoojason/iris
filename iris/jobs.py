@@ -341,6 +341,44 @@ def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
     return f"Job #{job_id} is already {job['state'] if job else 'gone'}."
 
 
+def resume_job(store: JobStore, job_id: int, *, answer: str = "", spawn=None) -> str:
+    """Launch a parked/queued job, or answer a job paused on a question. Returns a
+    short owner-facing status. Shared by the jobs MCP tool and the terminal UI so
+    the concurrency-careful logic (spawn only on a won transition; never a second
+    runner for a job already starting) lives in exactly one place.
+    """
+    spawn = spawn or spawn_runner
+    job = store.get(job_id)
+    if job is None:
+        return f"No job #{job_id}."
+    state = job["state"]
+    if state == "needs_input":
+        if not (answer or "").strip():
+            return (f"Job #{job_id} is waiting for your answer to: {job.get('question', '')}")
+        if store.transition(job_id, ("needs_input",), "pending", pending_answer=answer):
+            spawn(job_id, store=store)
+            return f"Answered job #{job_id} ({job['title']}); resuming it now."
+        return f"Job #{job_id} was already resumed by a concurrent answer."
+    if state == "parked":
+        if store.transition(job_id, ("parked",), "pending"):
+            spawn(job_id, store=store)
+            return f"Resumed job #{job_id} ({job['title']})."
+        return f"Job #{job_id} was already resumed."
+    if state == "pending":
+        # A queued job: launch it, but never spawn a second runner for one already
+        # starting (a pending job with a live pid is mid-spawn, not idle-queued).
+        repair_dead_runners(store)
+        fresh = store.get(job_id)
+        if fresh is None or fresh["state"] != "pending":
+            return f"Job #{job_id} is {fresh['state'] if fresh else 'gone'}."
+        pid = fresh.get("pid")
+        if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
+            return f"Job #{job_id} is already starting."
+        spawn(job_id, store=store)
+        return f"Resumed job #{job_id} ({job['title']})."
+    return f"Job #{job_id} is {state}; only parked or queued jobs can be resumed."
+
+
 def _apply_prune(items: list[dict], keep: int) -> tuple[list[dict], int]:
     """Return (items, dropped) with terminal jobs beyond the newest ``keep`` removed.
 

@@ -240,40 +240,12 @@ def resume_job(job_id: int, answer: str = "") -> str:
     config = _config()
     if not config.jobs_enabled:
         return "Background jobs are disabled. The owner can set IRIS_JOBS=true."
-    store = _store()
-    job = store.get(job_id)
-    if job is None:
-        return f"No job #{job_id}."
-    state = job["state"]
-    if state == "needs_input":
-        if not (answer or "").strip():
-            return (f"Job #{job_id} is waiting for your answer to: {job.get('question', '')}\n"
-                    f"Call resume_job({job_id}, answer=...) with your decision.")
-        # Gate the spawn on winning the transition so two concurrent answers can't
-        # both launch a runner for the same job.
-        if store.transition(job_id, ("needs_input",), "pending", pending_answer=answer):
-            SPAWN(job_id, store=store)
-            return f"Answered job #{job_id} ({job['title']}); resuming it now."
-        return f"Job #{job_id} was already resumed by a concurrent answer."
-    if state == "parked":
-        if store.transition(job_id, ("parked",), "pending"):
-            SPAWN(job_id, store=store)
-            return f"Resumed job #{job_id} ({job['title']})."
-        return f"Job #{job_id} was already resumed."
-    if state == "pending":
-        # A queued job: launch it, but never spawn a second runner for one already
-        # starting (a pending job with a live pid is mid-spawn, not idle-queued).
-        from iris.jobs import _pid_alive, repair_dead_runners
-        repair_dead_runners(store)
-        fresh = store.get(job_id)
-        if fresh is None or fresh["state"] != "pending":
-            return f"Job #{job_id} is {fresh['state'] if fresh else 'gone'}."
-        pid = fresh.get("pid")
-        if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
-            return f"Job #{job_id} is already starting."
-        SPAWN(job_id, store=store)
-        return f"Resumed job #{job_id} ({job['title']})."
-    return f"Job #{job_id} is {state}; only parked or queued jobs can be resumed."
+    from iris.jobs import resume_job as resume_core
+    reply = resume_core(_store(), job_id, answer=answer, spawn=SPAWN)
+    # The chat tool nudges the owner toward the answer= form for a paused job.
+    if reply.startswith(f"Job #{job_id} is waiting for your answer"):
+        reply += f"\nCall resume_job({job_id}, answer=...) with your decision."
+    return reply
 
 
 _SCHEDULES_DISABLED = ("Scheduled jobs are disabled. The owner can set "

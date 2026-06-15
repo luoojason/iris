@@ -75,9 +75,13 @@ thinking indicator and proper line editing on the left, and a **live sidebar** o
 the right that shows Iris's state at a glance, active jobs, goals and their step
 progress, this month's usage, and pending reminders, refreshed on a timer so you
 never have to leave the chat to see what she's doing. Ctrl+N starts a new chat,
-Ctrl+R refreshes the sidebar, Ctrl+C quits. The sidebar only reads the state
-files (no model call). The `chat` REPL is the no-frills version (history and a
-thinking spinner).
+Ctrl+R refreshes the sidebar, Ctrl+C quits. **Ctrl+O (or Tab) opens the
+inspector** — a drill-in over the active jobs and goals where you select one to
+see its full detail and act on it: `c` cancel, `s` resume a parked/queued job,
+`a` answer a job paused on a question, `esc` to close. The inspector routes every
+action through the same shared functions the CLI and chat tools use, so it adds no
+behavior and makes no model call. The `chat` REPL is the no-frills version
+(history and a thinking spinner).
 
 To run it on Discord, create a bot at the [Discord Developer
 Portal](https://discord.com/developers/applications), enable the **Message

@@ -118,15 +118,181 @@ def render_sidebar(config: Config, now: Optional[float] = None) -> str:
     return "\n\n".join(blocks)
 
 
+def inspector_rows(config: Config) -> list[dict]:
+    """The actionable items for the drill-in inspector: active jobs and goals.
+
+    Pure (reads state files only). Each row is ``{kind, id, state, label}`` where
+    kind is 'job' or 'goal'. Jobs first, then goals.
+    """
+    rows: list[dict] = []
+    if getattr(config, "jobs_enabled", False):
+        try:
+            from .jobs import JobStore, repair_dead_runners
+            store = JobStore(config.jobs_file, keep=config.jobs_keep)
+            try:
+                repair_dead_runners(store)
+            except Exception:
+                pass
+            for j in store.all():
+                if j.get("state") in _ACTIVE_JOB_STATES:
+                    rows.append({"kind": "job", "id": j.get("id"),
+                                 "state": j.get("state", ""), "label": (j.get("title") or "")[:40]})
+        except Exception:
+            pass
+    try:
+        from .goals import GoalStore
+        for g in GoalStore(config.goals_file).active():
+            rows.append({"kind": "goal", "id": g.get("id"),
+                         "state": f"{g.get('steps', 0)}/{g.get('max_steps', '?')}",
+                         "label": (g.get("text") or "")[:40]})
+    except Exception:
+        pass
+    return rows
+
+
+def _goal_detail(config: Config, goal_id: int) -> str:
+    from .goals import GoalStore
+    goal = GoalStore(config.goals_file).get(goal_id)
+    if not goal:
+        return f"goal #{goal_id}: gone"
+    lines = [f"goal #{goal['id']} [{goal.get('status')}]  {goal.get('steps', 0)}/{goal.get('max_steps', '?')} steps",
+             goal.get("text", "")]
+    for entry in (goal.get("log") or [])[-3:]:
+        lines.append(f"  - [{entry.get('status')}] {(entry.get('summary') or entry.get('step') or '')[:80]}")
+    return "\n".join(lines)
+
+
 def build_app(agent: Agent, config: Optional[Config] = None):
     """Build the Textual app class bound to an agent (and optional config for the
     live sidebar). Importing textual lazily so the package imports without it."""
     from textual import work
     from textual.app import App, ComposeResult
-    from textual.containers import Horizontal
-    from textual.widgets import Footer, Header, Input, LoadingIndicator, RichLog, Static
+    from textual.containers import Horizontal, Vertical
+    from textual.screen import ModalScreen
+    from textual.widgets import DataTable, Footer, Header, Input, LoadingIndicator, RichLog, Static
     from rich.markdown import Markdown
     from rich.text import Text
+
+    class Inspector(ModalScreen):
+        """Drill-in over the active jobs and goals: select one, see its detail, and
+        act on it (cancel, resume, answer a paused job). Reuses the same shared
+        functions the CLI/MCP use, so it adds no behavior and makes no model call."""
+
+        CSS = """
+        Inspector { align: center middle; }
+        #panel { width: 84%; height: 84%; border: round $primary; background: $surface; padding: 0 1; }
+        #itable { height: 1fr; }
+        #idetail { height: auto; max-height: 45%; padding: 0 1; color: $text; }
+        #ianswer { display: none; border: round $accent; }
+        #ianswer.show { display: block; }
+        #istatus { dock: bottom; height: 1; color: $accent; }
+        """
+        BINDINGS = [
+            ("escape", "close", "Close"),
+            ("enter", "detail", "Detail"),
+            ("c", "cancel_item", "Cancel"),
+            ("s", "resume_item", "Resume"),
+            ("a", "answer_item", "Answer"),
+        ]
+
+        def __init__(self, cfg: Config) -> None:
+            super().__init__()
+            self.cfg = cfg
+            self._rows: list[dict] = []
+
+        def compose(self) -> ComposeResult:
+            with Vertical(id="panel"):
+                yield DataTable(id="itable")
+                yield Static("", id="idetail")
+                yield Input(placeholder="Answer for the paused job…  (Enter sends)", id="ianswer")
+                yield Static("[dim]enter: detail · c: cancel · s: resume · a: answer · esc: close[/dim]",
+                             id="istatus")
+
+        def on_mount(self) -> None:
+            table = self.query_one("#itable", DataTable)
+            table.cursor_type = "row"
+            table.add_columns("Kind", "ID", "State", "What")
+            self._reload()
+            table.focus()
+
+        def _reload(self) -> None:
+            table = self.query_one("#itable", DataTable)
+            table.clear()
+            self._rows = inspector_rows(self.cfg)
+            for r in self._rows:
+                table.add_row(r["kind"], f"#{r['id']}", r["state"], r["label"])
+
+        def _selected(self) -> Optional[dict]:
+            if not self._rows:
+                return None
+            row = self.query_one("#itable", DataTable).cursor_row
+            if row is None or row < 0 or row >= len(self._rows):
+                return None
+            return self._rows[row]
+
+        def _status(self, text: str) -> None:
+            self.query_one("#istatus", Static).update(text)
+
+        def action_close(self) -> None:
+            self.dismiss()
+
+        def action_detail(self) -> None:
+            item = self._selected()
+            if not item:
+                return
+            if item["kind"] == "job":
+                from .jobs import JobStore
+                from .jobs_console import format_detail
+                job = JobStore(self.cfg.jobs_file, keep=self.cfg.jobs_keep).get(item["id"])
+                self.query_one("#idetail", Static).update(format_detail(job) if job else "(gone)")
+            else:
+                self.query_one("#idetail", Static).update(_goal_detail(self.cfg, item["id"]))
+
+        def action_cancel_item(self) -> None:
+            item = self._selected()
+            if not item:
+                return
+            import time
+            if item["kind"] == "job":
+                from .jobs import JobStore, cancel
+                self._status(cancel(JobStore(self.cfg.jobs_file, keep=self.cfg.jobs_keep), item["id"]))
+            else:
+                from .goals import GoalStore
+                GoalStore(self.cfg.goals_file).transition(item["id"], "cancelled", time.time())
+                self._status(f"cancelled goal #{item['id']}")
+            self._reload()
+
+        def action_resume_item(self) -> None:
+            item = self._selected()
+            if not item or item["kind"] != "job":
+                self._status("resume applies to a job")
+                return
+            from .jobs import JobStore, resume_job, spawn_runner
+            store = JobStore(self.cfg.jobs_file, keep=self.cfg.jobs_keep)
+            self._status(resume_job(store, item["id"], spawn=spawn_runner))
+            self._reload()
+
+        def action_answer_item(self) -> None:
+            item = self._selected()
+            if not item or item["kind"] != "job":
+                return
+            box = self.query_one("#ianswer", Input)
+            box.add_class("show")
+            box.focus()
+
+        def on_input_submitted(self, event: Input.Submitted) -> None:
+            if event.input.id != "ianswer":
+                return
+            item = self._selected()
+            value = event.value.strip()
+            event.input.value = ""
+            event.input.remove_class("show")
+            if item and item["kind"] == "job" and value:
+                from .jobs import JobStore, resume_job, spawn_runner
+                store = JobStore(self.cfg.jobs_file, keep=self.cfg.jobs_keep)
+                self._status(resume_job(store, item["id"], answer=value, spawn=spawn_runner))
+                self._reload()
+            self.query_one("#itable", DataTable).focus()
 
     class IrisApp(App):
         CSS = """
@@ -143,6 +309,8 @@ def build_app(agent: Agent, config: Optional[Config] = None):
             ("ctrl+q", "quit", "Quit"),
             ("ctrl+n", "reset", "New chat"),
             ("ctrl+r", "refresh", "Refresh"),
+            ("ctrl+o", "inspect", "Inspect"),
+            ("tab", "inspect", "Inspect"),
         ]
 
         def __init__(self) -> None:
@@ -234,6 +402,13 @@ def build_app(agent: Agent, config: Optional[Config] = None):
 
         def action_refresh(self) -> None:
             self.refresh_sidebar()
+
+        def action_inspect(self) -> None:
+            # Open the drill-in over jobs/goals. Guard against re-entry so the
+            # binding firing while the modal is already up can't stack inspectors.
+            if self.config is None or len(self.screen_stack) > 1:
+                return
+            self.push_screen(Inspector(self.config))
 
     return IrisApp
 

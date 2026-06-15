@@ -7,7 +7,28 @@ import pytest
 pytest.importorskip("textual")
 
 from iris.driver import ClaudeResult
-from iris.tui import build_app, render_sidebar
+from iris.tui import build_app, inspector_rows, render_sidebar
+
+
+def test_inspector_rows_lists_active_jobs_and_goals(tmp_path):
+    import os
+
+    from iris.config import Config
+    from iris.goals import GoalStore
+    from iris.jobs import JobStore
+
+    cfg = Config(jobs_enabled=True, goals_enabled=True,
+                 jobs_file=str(tmp_path / "jobs.json"),
+                 goals_file=str(tmp_path / "goals.json"),
+                 usage_file=str(tmp_path / "usage.json"))
+    js = JobStore(cfg.jobs_file)
+    js.add("upload shorts", "do it", ["subagents"], "", "h", state="running")
+    js.update(1, pid=os.getpid())  # live pid so repair leaves it active
+    GoalStore(cfg.goals_file).add("ship the roadmap", now=1.0)
+
+    rows = inspector_rows(cfg)
+    seen = {(r["kind"], r["id"]) for r in rows}
+    assert ("job", 1) in seen and ("goal", 1) in seen
 
 
 def test_render_sidebar_shows_live_state(tmp_path):
@@ -83,3 +104,28 @@ async def test_blank_input_does_nothing():
         await pilot.press("enter")
         await pilot.pause()
     assert agent.calls == []
+
+
+async def test_inspector_opens_and_closes(tmp_path):
+    import os
+
+    from iris.config import Config
+    from iris.jobs import JobStore
+
+    cfg = Config(jobs_enabled=True, goals_enabled=True,
+                 jobs_file=str(tmp_path / "jobs.json"),
+                 goals_file=str(tmp_path / "goals.json"),
+                 usage_file=str(tmp_path / "usage.json"))
+    js = JobStore(cfg.jobs_file)
+    js.add("upload", "i", ["subagents"], "", "h", state="running")
+    js.update(1, pid=os.getpid())
+
+    app = build_app(FakeAgent(), cfg)()
+    async with app.run_test() as pilot:
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        assert len(app.screen_stack) == 2  # inspector pushed
+        assert app.screen.__class__.__name__ == "Inspector"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert len(app.screen_stack) == 1  # back to the chat
