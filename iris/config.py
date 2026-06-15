@@ -190,6 +190,12 @@ class Config:
     # The owner's wiki vault (Obsidian-style). Empty disables the wiki tools.
     wiki_dir: str = ""
 
+    # YouTube channel view-counts tool (channel_views): reads public view counts
+    # via yt-dlp, no browser. Empty channel disables it. yt_dlp_bin is the path to
+    # yt-dlp (the MCP server runs with a minimal PATH, so a full path is safest).
+    youtube_channel_id: str = ""
+    yt_dlp_bin: str = "yt-dlp"
+
     # Event wakes: owner-authored rules the reminders tick evaluates cheaply
     # (no model call, ever). The state file is tick-owned bookkeeping.
     wakes_file: str = "iris-wakes.json"
@@ -338,6 +344,8 @@ class Config:
             schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
             schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),
             wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
+            youtube_channel_id=os.environ.get("IRIS_YOUTUBE_CHANNEL", ""),
+            yt_dlp_bin=os.environ.get("IRIS_YT_DLP_BIN", "yt-dlp"),
             wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
             wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
             wake_http_timeout=float(os.environ.get("IRIS_WAKE_HTTP_TIMEOUT", "15")),

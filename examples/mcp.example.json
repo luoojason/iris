@@ -34,6 +34,10 @@
     "skills": {
       "command": "python",
       "args": ["-m", "iris.mcp.skills"]
+    },
+    "youtube": {
+      "command": "python",
+      "args": ["-m", "iris.mcp.youtube"]
     }
   }
 }
