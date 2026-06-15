@@ -311,6 +311,53 @@ def test_doctor_warns_self_started_work_without_a_budget(tmp_path, capsys):
     assert "IRIS_USAGE_BUDGET_USD" in out and "park" in out.lower()
 
 
+def test_doctor_fix_repairs_dead_job_runners(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.jobs import JobStore
+
+    fake = _fake_claude(tmp_path)
+    store = JobStore(tmp_path / "jobs.json", keep=10)
+    store.add("dead", "i", ["subagents"], "", "h", state="running")
+    store.update(1, pid=999999)  # a pid that is not alive
+    doctor(Config(claude_bin=fake, jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"),
+                  jobs_keep=10), probe=False, fix=True)
+    out = capsys.readouterr().out
+    assert "repair" in out.lower()
+    assert JobStore(tmp_path / "jobs.json").get(1)["state"] == "failed"
+
+
+def test_doctor_fix_prunes_old_terminal_jobs(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.jobs import JobStore
+
+    fake = _fake_claude(tmp_path)
+    store = JobStore(tmp_path / "jobs.json", keep=1)
+    for i in range(3):
+        j = store.add(f"old{i}", "i", ["subagents"], "", "h")
+        store.transition(j["id"], ("pending",), "done")
+    doctor(Config(claude_bin=fake, jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"),
+                  jobs_keep=1), probe=False, fix=True)
+    assert "prune" in capsys.readouterr().out.lower()
+    assert len(JobStore(tmp_path / "jobs.json").all()) <= 2  # keep=1 (+ id anchor)
+
+
+def test_doctor_without_fix_does_not_repair(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.jobs import JobStore
+
+    fake = _fake_claude(tmp_path)
+    store = JobStore(tmp_path / "jobs.json", keep=10)
+    store.add("dead", "i", ["subagents"], "", "h", state="running")
+    store.update(1, pid=999999)
+    doctor(Config(claude_bin=fake, jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json")),
+           probe=False)  # no fix
+    # untouched: doctor without --fix never mutates state
+    assert JobStore(tmp_path / "jobs.json").get(1)["state"] == "running"
+
+
 def test_doctor_warns_webhook_without_a_token(tmp_path, capsys):
     from iris.cli import doctor
     from iris.config import Config

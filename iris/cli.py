@@ -55,8 +55,13 @@ class _Spinner:
             sys.stdout.flush()
 
 
-def doctor(config: Config, probe: bool = True) -> int:
-    """Verify the claude binary is present and actually signed in."""
+def doctor(config: Config, probe: bool = True, fix: bool = False) -> int:
+    """Verify the claude binary is present and actually signed in.
+
+    With ``fix`` it also performs safe, mechanical repairs (no config changes):
+    flips crashed job runners to failed so they stop holding a slot, and prunes
+    old terminal jobs past IRIS_JOBS_KEEP.
+    """
     path = shutil.which(config.claude_bin)
     if not path:
         print(f"claude binary not found: {config.claude_bin!r}")
@@ -207,6 +212,15 @@ def doctor(config: Config, probe: bool = True) -> int:
         print("WARNING: IRIS_ALLOWED_USER_IDS is empty, so a network transport will")
         print("  answer ANYONE who can reach it (any DM sender, any group member).")
         print("  A personal subscription is single-user only; set it to your own id.")
+    if fix:
+        if config.jobs_enabled:
+            from .jobs import JobStore, repair_dead_runners
+            store = JobStore(config.jobs_file, keep=config.jobs_keep)
+            repaired = repair_dead_runners(store)
+            pruned = store.prune(config.jobs_keep)
+            print(f"fix: repaired {repaired} dead job runner(s), pruned {pruned} old job(s).")
+        else:
+            print("fix: nothing to repair (background jobs are off).")
     print("Run 'python -m iris chat' to talk to it, or 'python -m iris' for Discord.")
     return 0
 
@@ -524,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("chat", help="plain terminal REPL")
     doctor_parser = sub.add_parser("doctor", help="check that claude is installed and signed in")
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
+    doctor_parser.add_argument("--fix", action="store_true", help="also do safe mechanical repairs (dead job runners, prune old jobs)")
     skills_parser = sub.add_parser("skills", help="list skills; review/approve Iris's proposed skill changes")
     skills_sub = skills_parser.add_subparsers(dest="skills_action")
     skills_sub.add_parser("pending", help="list staged skill proposals")
@@ -625,7 +640,8 @@ def main(argv: list[str] | None = None) -> int:
         link_skills(config.skills_dir)
 
     if command == "doctor":
-        return doctor(config, probe=not getattr(args, "no_probe", False))
+        return doctor(config, probe=not getattr(args, "no_probe", False),
+                      fix=getattr(args, "fix", False))
     if command == "chat":
         return chat(config)
     if command == "skills":
