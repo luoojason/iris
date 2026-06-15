@@ -70,9 +70,14 @@ python -m iris tui          # full-screen terminal UI (needs: pip install -e ".[
 python -m iris chat         # or a plain REPL, no extra dependency
 ```
 
-The `tui` is a full-screen terminal app with a scrolling conversation, a live
-thinking indicator, and proper line editing. The `chat` REPL is the no-frills
-version (now with history and a thinking spinner).
+The `tui` is a full-screen terminal app: a scrolling conversation with a live
+thinking indicator and proper line editing on the left, and a **live sidebar** on
+the right that shows Iris's state at a glance, active jobs, goals and their step
+progress, this month's usage, and pending reminders, refreshed on a timer so you
+never have to leave the chat to see what she's doing. Ctrl+N starts a new chat,
+Ctrl+R refreshes the sidebar, Ctrl+C quits. The sidebar only reads the state
+files (no model call). The `chat` REPL is the no-frills version (history and a
+thinking spinner).
 
 To run it on Discord, create a bot at the [Discord Developer
 Portal](https://discord.com/developers/applications), enable the **Message
