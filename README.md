@@ -378,6 +378,28 @@ Kinds: `disk_free` (free space above a floor), `file_fresh` (a file changed with
 `max_age_secs` — proof a backup or cron actually ran), and `url_ok` (a URL returns
 the expected status). `iris doctor` validates the file and names every problem.
 
+### Webhook wakes
+
+Event wakes and the heartbeat *poll*; a webhook wake lets an external system
+**push**. Run a small inbound listener (`python -m iris webhook`, its own process)
+and an authorized POST becomes a Discord ping plus a fold-back inbox note — never
+a model call, exactly like any other wake.
+
+```bash
+# in .env: IRIS_WEBHOOK=true and a token (required), then run the listener:
+IRIS_WEBHOOK_TOKEN=$(openssl rand -hex 16)
+python -m iris webhook
+# from anywhere allowed to reach it:
+curl -X POST -H "X-Iris-Token: $IRIS_WEBHOOK_TOKEN" -d "build passed" http://127.0.0.1:8787/ci
+```
+
+It is an inbound surface, so it is deliberately tight: **off by default**, bound to
+`127.0.0.1` unless you widen it (e.g. a tailnet address — never `0.0.0.0`
+casually), and a **token is mandatory** — the server refuses to start without
+`IRIS_WEBHOOK_TOKEN` and checks every request with a constant-time compare. The
+body is capped and only ever becomes note text — it is never executed or fed to
+the model. `iris doctor` flags a missing token or an all-interfaces bind.
+
 ### Reminders
 
 The `reminders` tool (`iris/mcp/reminders.py`: `schedule_reminder`,

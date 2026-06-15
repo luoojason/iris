@@ -188,6 +188,16 @@ def doctor(config: Config, probe: bool = True) -> int:
         print("NOTE: self-started work is on (IRIS_GOALS/IRIS_PROACTIVE) but")
         print("  IRIS_USAGE_BUDGET_USD is 0, so the credit-guard park backstop is")
         print("  disarmed. The weekly-usage gate still bounds it; set a budget to arm park.")
+    if config.webhook_enabled:
+        if not config.webhook_token:
+            print("WARNING: IRIS_WEBHOOK is on but IRIS_WEBHOOK_TOKEN is empty; the")
+            print("  listener will refuse to start (an unauthenticated webhook is unsafe).")
+        elif config.webhook_bind in ("0.0.0.0", "::"):
+            print(f"WARNING: the webhook listener binds {config.webhook_bind} (all")
+            print("  interfaces). Bind 127.0.0.1 or a tailnet address unless you intend")
+            print("  to expose it; it is token-checked but still an inbound surface.")
+        else:
+            print(f"webhook: on ({config.webhook_bind}:{config.webhook_port}, token set)")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
@@ -531,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
     g_cancel.add_argument("goal_id", type=int)
     sub.add_parser("usage", help="show this month's credit draw and budget level")
     sub.add_parser("heartbeat", help="show the current status of your health checklist")
+    sub.add_parser("webhook", help="run the inbound webhook-wake listener (own process)")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
     job_run_parser.add_argument("job_id", type=int)
     jobs_parser = sub.add_parser("jobs", help="the terminal job console: see and steer background jobs")
@@ -639,6 +650,9 @@ def main(argv: list[str] | None = None) -> int:
         return usage_cmd(config)
     if command == "heartbeat":
         return heartbeat_cmd(config)
+    if command == "webhook":
+        from .webhooks import run_webhook_server
+        return run_webhook_server(config)
     if command == "schedule":
         return schedule_cmd(config, args)
     if command == "workspaces":

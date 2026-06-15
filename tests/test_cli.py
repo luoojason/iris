@@ -311,6 +311,27 @@ def test_doctor_warns_self_started_work_without_a_budget(tmp_path, capsys):
     assert "IRIS_USAGE_BUDGET_USD" in out and "park" in out.lower()
 
 
+def test_doctor_warns_webhook_without_a_token(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, webhook_enabled=True, webhook_token=""), probe=False)
+    out = capsys.readouterr().out
+    assert "IRIS_WEBHOOK_TOKEN" in out and "refuse" in out.lower()
+
+
+def test_doctor_warns_webhook_bound_to_all_interfaces(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, webhook_enabled=True, webhook_token="s",
+                  webhook_bind="0.0.0.0"), probe=False)
+    out = capsys.readouterr().out
+    assert "all" in out.lower() and "interface" in out.lower()
+
+
 def test_doctor_quiet_about_budget_when_one_is_set(tmp_path, capsys):
     from iris.cli import doctor
     from iris.config import Config

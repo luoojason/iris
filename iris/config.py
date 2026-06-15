@@ -192,6 +192,17 @@ class Config:
     # Per-fetch timeout for url / url_pattern wake kinds (the change watcher).
     wake_http_timeout: float = 15.0
 
+    # Webhook wakes: a small inbound HTTP listener that turns an authorized POST
+    # into a wake (a Discord ping + a fold-back inbox note), never a model call.
+    # Off by default. Bound to localhost by default; a mandatory shared token is
+    # required (the server refuses to run without one). The payload only ever
+    # becomes text in a note, never code and never a model prompt.
+    webhook_enabled: bool = False
+    webhook_bind: str = "127.0.0.1"
+    webhook_port: int = 8787
+    webhook_token: str = ""
+    webhook_channel: str = ""
+
     # Quiet heartbeat: an owner-authored checklist of "should be true" conditions
     # (disk free, a file is fresh, a URL is up) the reminders tick evaluates with
     # no model call. Silent when healthy; one consolidated ping only when the set
@@ -324,6 +335,11 @@ class Config:
             wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
             wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
             wake_http_timeout=float(os.environ.get("IRIS_WAKE_HTTP_TIMEOUT", "15")),
+            webhook_enabled=_flag(os.environ.get("IRIS_WEBHOOK"), False),
+            webhook_bind=os.environ.get("IRIS_WEBHOOK_BIND", "127.0.0.1"),
+            webhook_port=int(os.environ.get("IRIS_WEBHOOK_PORT", "8787")),
+            webhook_token=os.environ.get("IRIS_WEBHOOK_TOKEN", ""),
+            webhook_channel=os.environ.get("IRIS_WEBHOOK_CHANNEL", ""),
             heartbeat_file=os.environ.get("IRIS_HEARTBEAT_FILE", "iris-heartbeat.json"),
             heartbeat_state=os.environ.get("IRIS_HEARTBEAT_STATE", "iris-heartbeat.state.json"),
             heartbeat_http_timeout=float(os.environ.get("IRIS_HEARTBEAT_HTTP_TIMEOUT", "15")),
