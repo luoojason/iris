@@ -8,10 +8,31 @@ from __future__ import annotations
 
 import asyncio
 
-from iris.discord_adapter import parse_conversation_channel, submit_resume_turn
+from iris.discord_adapter import (
+    format_reply_context,
+    parse_conversation_channel,
+    submit_resume_turn,
+)
 from iris.textutil import chunk_text
 
 DISCORD_LIMIT = 2000
+
+
+def test_format_reply_context_quotes_the_replied_to_message():
+    out = format_reply_context("Jason", "take down the knicks videos")
+    assert out.startswith("[replying to Jason:") and "knicks videos" in out
+    assert out.endswith("\n")
+
+
+def test_format_reply_context_empty_when_nothing_to_quote():
+    assert format_reply_context("Jason", "") == ""
+    assert format_reply_context("Jason", "   ") == ""
+
+
+def test_format_reply_context_truncates_and_collapses():
+    out = format_reply_context("Iris", "line one\n\n  line two   " + "x" * 1000)
+    assert "\n" not in out[:-1]  # collapsed to one line (only the trailing newline)
+    assert len(out) < 400  # truncated
 
 
 def test_parse_conversation_channel():
