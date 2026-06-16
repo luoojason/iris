@@ -290,8 +290,8 @@ class Config:
             telegram_token=os.environ.get("IRIS_TELEGRAM_TOKEN", ""),
             allowed_user_ids=_split(os.environ.get("IRIS_ALLOWED_USER_IDS")),
             allowed_channel_ids=_split(os.environ.get("IRIS_ALLOWED_CHANNEL_IDS")),
-            respond_without_mention=_truthy(os.environ.get("IRIS_RESPOND_WITHOUT_MENTION")),
-            auto_thread=_truthy(os.environ.get("IRIS_AUTO_THREAD")),
+            respond_without_mention=_flag(os.environ.get("IRIS_RESPOND_WITHOUT_MENTION"), False),
+            auto_thread=_flag(os.environ.get("IRIS_AUTO_THREAD"), False),
             claude_bin=os.environ.get("IRIS_CLAUDE_BIN", "claude"),
             model=os.environ.get("IRIS_MODEL") or None,
             light_model=os.environ.get("IRIS_MODEL_LIGHT", ""),
@@ -308,7 +308,7 @@ class Config:
             attachments_dir=os.environ.get("IRIS_ATTACHMENTS_DIR", "iris-attachments"),
             skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
             skill_proposals_file=os.environ.get("IRIS_SKILL_PROPOSALS_FILE", "iris-skill-proposals.json"),
-            voice_enabled=_truthy(os.environ.get("IRIS_VOICE")),
+            voice_enabled=_flag(os.environ.get("IRIS_VOICE"), False),
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
             workspaces_file=os.environ.get("IRIS_WORKSPACES_FILE", "iris-workspaces.json"),
             jobs_enabled=_flag(os.environ.get("IRIS_JOBS"), False),
@@ -380,7 +380,7 @@ class Config:
             max_retries=int(os.environ.get("IRIS_MAX_RETRIES", "2")),
             retry_base_delay=float(os.environ.get("IRIS_RETRY_BASE_DELAY", "2")),
             timeout_max_retries=int(os.environ.get("IRIS_TIMEOUT_RETRIES", "0")),
-            live_interrupt=_truthy(os.environ.get("IRIS_LIVE_INTERRUPT")),
+            live_interrupt=_flag(os.environ.get("IRIS_LIVE_INTERRUPT"), False),
             stream_idle_timeout=float(os.environ.get("IRIS_STREAM_IDLE_TIMEOUT", "300")),
             stream_total_timeout=float(os.environ.get("IRIS_STREAM_TOTAL_TIMEOUT", "1800")),
             ack_delay=float(os.environ.get("IRIS_ACK_DELAY", "4")),
@@ -390,7 +390,3 @@ class Config:
             watch_min_seconds=float(os.environ.get("IRIS_WATCH_MIN_SECONDS", "30")),
             notify_persona=os.environ.get("IRIS_NOTIFY_PERSONA") or None,
         )
-
-
-def _truthy(value: Optional[str]) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}

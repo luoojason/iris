@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from iris.config import Config, load_dotenv, _split, _truthy
+from iris.config import Config, load_dotenv, _split, _flag
 
 
 def test_split_handles_blanks_and_spacing():
@@ -11,9 +11,11 @@ def test_split_handles_blanks_and_spacing():
     assert _split(None) == []
 
 
-def test_truthy():
-    assert _truthy("true") and _truthy("1") and _truthy("YES") and _truthy("on")
-    assert not _truthy("false") and not _truthy("") and not _truthy(None)
+def test_flag_parses_truthy_values_and_respects_default():
+    assert _flag("true", False) and _flag("1", False) and _flag("YES", False) and _flag("on", False)
+    assert not _flag("false", True) and not _flag("off", True)
+    assert _flag(None, True) is True and _flag(None, False) is False  # unset falls back to default
+    assert _flag("", True) is False  # an explicit empty value is not truthy
 
 
 def test_dotenv_does_not_override_real_env(tmp_path, monkeypatch):
