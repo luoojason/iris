@@ -23,10 +23,11 @@ def test_list_store_corrupt_recovers_and_quarantines(tmp_path):
     assert (tmp_path / "x.json.corrupt").exists()  # the bad file is preserved
 
 
-def test_list_store_wrong_type_reads_as_default(tmp_path):
+def test_list_store_wrong_type_quarantines_and_reads_as_default(tmp_path):
     p = tmp_path / "x.json"
     p.write_text(json.dumps({"not": "a list"}), "utf-8")
     assert JsonListStore(p, "t").load() == []
+    assert (tmp_path / "x.json.corrupt").exists()  # wrong-shape owner data is preserved
 
 
 def test_dict_store_roundtrip(tmp_path):

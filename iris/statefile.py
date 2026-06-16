@@ -50,10 +50,11 @@ class JsonStateFile:
     a read-modify-write under ``with store.locked(): store.save(mutate(store.load()))``.
     """
 
-    def __init__(self, path, label: str, default):
+    def __init__(self, path, label: str, default, *, sort_keys: bool = False):
         self.path = Path(path)
         self.label = label
         self._default = default
+        self._sort_keys = sort_keys
 
     @contextmanager
     def locked(self):
@@ -84,6 +85,9 @@ class JsonStateFile:
             quarantine_corrupt(self.path, self.label)
             return copy.deepcopy(self._default)
         if type(data) is not type(self._default):
+            # Valid JSON of the wrong top-level shape (a hand edit) is still owner
+            # data; quarantine it rather than let the next save overwrite it.
+            quarantine_corrupt(self.path, self.label)
             return copy.deepcopy(self._default)
         return data
 
@@ -93,7 +97,7 @@ class JsonStateFile:
         fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, ensure_ascii=False)
+                json.dump(data, handle, indent=2, ensure_ascii=False, sort_keys=self._sort_keys)
             os.replace(tmp, self.path)
         finally:
             if os.path.exists(tmp):
@@ -103,12 +107,12 @@ class JsonStateFile:
 class JsonListStore(JsonStateFile):
     """A JSON state file whose top level is a list."""
 
-    def __init__(self, path, label: str):
-        super().__init__(path, label, [])
+    def __init__(self, path, label: str, *, sort_keys: bool = False):
+        super().__init__(path, label, [], sort_keys=sort_keys)
 
 
 class JsonDictStore(JsonStateFile):
     """A JSON state file whose top level is a dict."""
 
-    def __init__(self, path, label: str):
-        super().__init__(path, label, {})
+    def __init__(self, path, label: str, *, sort_keys: bool = False):
+        super().__init__(path, label, {}, sort_keys=sort_keys)

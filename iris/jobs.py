@@ -40,13 +40,8 @@ from typing import Optional
 from .config import Config
 from .driver import DANGEROUS_BUILTINS, ClaudeDriver
 from .inbox import Inbox
-from .statefile import quarantine_corrupt
+from .statefile import JsonListStore
 from .workspaces import WorkspaceStore, collect_artifacts
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
 
 log = logging.getLogger("iris.jobs")
 
@@ -244,41 +239,22 @@ class JobStore:
     """The job registry: a JSON list with a cross-process lock, like reminders."""
 
     def __init__(self, path: str | os.PathLike[str], keep: Optional[int] = None):
-        self.path = Path(path)
+        self._store = JsonListStore(path, "job registry")
+        self.path = self._store.path
         # When set, add() auto-prunes terminal jobs past this many. None means
         # no auto-prune (the default; tests and ad-hoc readers opt out).
         self.keep = keep
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-            return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError):
-            quarantine_corrupt(self.path, "job registry")
-            return []
+        return self._store.load()
 
     def _save(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        self._store.save(items)
 
     def add(self, title: str, instructions: str, grants: list[str],
             workspace: str, channel_id: str, state: str = "pending",

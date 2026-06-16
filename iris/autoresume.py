@@ -22,17 +22,12 @@ docs/superpowers/specs/2026-06-12-auto-resume-design.md.
 
 from __future__ import annotations
 
-import json
 import os
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from .statefile import JsonDictStore, JsonListStore
 
 
 class ResumeQueue:
@@ -46,41 +41,19 @@ class ResumeQueue:
     CAP = 50
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        self._store = JsonListStore(path, "resume queue")
+        self.path = self._store.path
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-        except (json.JSONDecodeError, OSError):
-            from .statefile import quarantine_corrupt
-            quarantine_corrupt(self.path, "resume queue")
-            return []
-        if not isinstance(data, list):
-            return []
-        return [item for item in data if isinstance(item, dict)]
+        return [item for item in self._store.load() if isinstance(item, dict)]
 
     def _save(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        self._store.save(items)
 
     def enqueue(self, conversation_id: str, prompt: str) -> None:
         with self._locked():
@@ -119,37 +92,20 @@ class ResumeBudget:
     """
 
     def __init__(self, path: str | os.PathLike[str], cap: int):
-        self.path = Path(path)
+        self._store = JsonDictStore(path, "resume budget", sort_keys=True)
+        self.path = self._store.path
         self.cap = cap
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> dict:
-        if not self.path.exists():
-            return {}
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
+        return self._store.load()
 
     def _save(self, state: dict) -> None:
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
-        os.replace(tmp, self.path)
+        self._store.save(state)
 
     def take(self, now: float) -> bool:
         if self.cap <= 0:

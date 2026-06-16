@@ -19,7 +19,6 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import time
 import urllib.request
 from contextlib import contextmanager
@@ -28,11 +27,7 @@ from typing import Optional
 
 from .config import Config
 from .inbox import Inbox
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from .statefile import JsonDictStore
 
 log = logging.getLogger("iris.heartbeat")
 
@@ -153,37 +148,16 @@ class _StateStore:
     """The tick-owned failing-set state, locked across read-evaluate-write."""
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        self._store = JsonDictStore(path, "heartbeat state", sort_keys=True)
+        self.path = self._store.path
 
     @contextmanager
     def locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:  # pragma: no cover - Windows
-            yield self._load()
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield self._load()
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-
-    def _load(self) -> dict:
-        if not self.path.exists():
-            return {}
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
+        with self._store.locked():
+            yield self._store.load()
 
     def save(self, state: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
-        os.replace(tmp, self.path)
+        self._store.save(state)
 
 
 def evaluate_all(config: Config, now: float, fetch=None) -> tuple[dict, list[str], int]:

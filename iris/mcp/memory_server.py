@@ -19,21 +19,14 @@ Wire into Claude via an mcp config file (see examples/mcp.example.json):
 
 from __future__ import annotations
 
-import json
 import os
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 import time as _time
 
 from iris.memory import DEFAULT_IMPORTANCE, normalize, rank
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from iris.statefile import JsonListStore
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -50,38 +43,23 @@ MEMORY_FILE = Path(os.environ.get("IRIS_MEMORY_FILE", "iris-memory.json"))
 mcp = FastMCP("iris-memory")
 
 
-@contextmanager
+def _store() -> JsonListStore:
+    # Built per call from the module global so tests that monkeypatch MEMORY_FILE
+    # still hit the right path; a JsonListStore is a cheap stateless wrapper.
+    return JsonListStore(MEMORY_FILE, "memory")
+
+
 def _locked():
     """Hold an exclusive cross-process lock for a load-modify-save."""
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if fcntl is None:
-        yield
-        return
-    lock_path = MEMORY_FILE.with_suffix(MEMORY_FILE.suffix + ".lock")
-    with open(lock_path, "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    return _store().locked()
 
 
 def _load() -> list[dict]:
-    if not MEMORY_FILE.exists():
-        return []
-    try:
-        data = json.loads(MEMORY_FILE.read_text("utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
+    return _store().load()
 
 
 def _save(items: list[dict]) -> None:
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=MEMORY_FILE.parent or ".", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(items, handle, indent=2, ensure_ascii=False)
-    os.replace(tmp, MEMORY_FILE)
+    _store().save(items)
 
 
 def _fmt(entry: dict) -> str:

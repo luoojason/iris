@@ -14,18 +14,13 @@ or rejected artifact is reported by name, never silently dropped.
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from .statefile import JsonDictStore
 
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
@@ -44,42 +39,20 @@ class WorkspaceStore:
     """Registry of name -> resolved directory, owner-edited via the CLI only."""
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        self._store = JsonDictStore(path, "workspace registry", sort_keys=True)
+        self.path = self._store.path
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> dict[str, str]:
-        if not self.path.exists():
-            return {}
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-        except (json.JSONDecodeError, OSError):
-            
-            from .statefile import quarantine_corrupt
-            quarantine_corrupt(self.path, "workspace registry")
-            return {}
-        if not isinstance(data, dict):
-            return {}
+        data = self._store.load()
         return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
 
     def _save(self, items: dict[str, str]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2, sort_keys=True)
-        os.replace(tmp, self.path)
+        self._store.save(items)
 
     def add(self, name: str, path: str) -> str:
         """Register a directory under a name. Returns the resolved path stored."""

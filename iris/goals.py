@@ -33,19 +33,14 @@ See docs/superpowers/specs/2026-06-14-goal-loop-design.md.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Optional
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from .statefile import JsonListStore
 
 log = logging.getLogger("iris.goals")
 
@@ -101,41 +96,19 @@ class GoalStore:
     cron tick (which advances them) never tear the file."""
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        self._store = JsonListStore(path, "goals")
+        self.path = self._store.path
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:  # pragma: no cover - Windows
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-        except (json.JSONDecodeError, OSError):
-            from .statefile import quarantine_corrupt
-            quarantine_corrupt(self.path, "goals")
-            return []
-        if not isinstance(data, list):
-            return []
-        return [item for item in data if isinstance(item, dict)]
+        return [item for item in self._store.load() if isinstance(item, dict)]
 
     def _save(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        self._store.save(items)
 
     def add(self, text: str, *, conversation_id: Optional[str] = None,
             max_steps: int = 20, now: Optional[float] = None) -> dict:

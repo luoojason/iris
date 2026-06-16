@@ -11,19 +11,14 @@ that is the same format Claude Code uses, so skills port directly.
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from .statefile import JsonListStore
 
 _DESCRIPTION = re.compile(r"(?mi)^description:\s*(.+)$")
 # A skill folder name must be a safe slug: no path separators, no traversal, no
@@ -111,37 +106,19 @@ class SkillProposalStore:
     CAP = 50
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        self._store = JsonListStore(path, "skill proposals")
+        self.path = self._store.path
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:  # pragma: no cover - Windows
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return []
-        return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+        return [item for item in self._store.load() if isinstance(item, dict)]
 
     def _save(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        self._store.save(items)
 
     def add(self, name: str, content: str, rationale: str, *,
             kind: str = "edit", now: Optional[float] = None) -> dict:

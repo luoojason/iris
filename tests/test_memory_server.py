@@ -61,3 +61,10 @@ def test_forget_removes(store):
     store.remember("disposable")
     assert "Deleted" in store.forget(1)
     assert store.recall() == "No notes saved yet."
+
+
+def test_corrupt_memory_file_is_quarantined(store, tmp_path):
+    (tmp_path / "mem.json").write_text("{not json", encoding="utf-8")
+    out = store.recall("anything")  # must not crash on a corrupt store
+    assert isinstance(out, str)
+    assert (tmp_path / "mem.json.corrupt").exists()

@@ -35,12 +35,10 @@ the clock.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -48,13 +46,8 @@ from typing import Optional
 
 from .config import Config
 from .reminders import parse_every, parse_when
-from .statefile import quarantine_corrupt
+from .statefile import JsonListStore
 from .usage import month_key
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
 
 log = logging.getLogger("iris.schedules")
 
@@ -64,43 +57,19 @@ class ScheduleStore:
     """The schedule registry: a JSON list with a cross-process lock."""
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        self._store = JsonListStore(path, "schedule registry")
+        self.path = self._store.path
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-        except (json.JSONDecodeError, OSError):
-            quarantine_corrupt(self.path, "schedule registry")
-            return []
-        if not isinstance(data, list):
-            # Valid JSON of the wrong shape (a hand edit) is still owner data;
-            # quarantine it rather than letting the next save overwrite it.
-            quarantine_corrupt(self.path, "schedule registry")
-            return []
-        return data
+        return self._store.load()
 
     def _save(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        self._store.save(items)
 
     def add(self, **fields) -> dict:
         with self._locked():
