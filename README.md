@@ -210,6 +210,18 @@ only the home channel / configured guild unless ids are added to
 transcripts Claude Code already keeps. Point Claude at any other MCP server
 (filesystem, browser, web search, your own) the same way.
 
+### Trace ledger
+
+Set `IRIS_TRACE_FILE` and every `claude -p` invocation — chat, jobs, proactive
+reviews, the goal loop, compaction — appends one structured record at the single
+choke point they all pass through: kind, model, outcome, an error category,
+timings, model turns, context tokens, and cost. It is how you tell, over time,
+whether Iris is getting better or worse. `iris trace --days 7` digests it (runs,
+errors by category, total cost, average latency); the digest is model-free, so an
+owner-authored scheduled job can deliver it through the notify spine. Content
+(the prompt and reply) is captured only with `IRIS_TRACE_CAPTURE_CONTENT=true`,
+off by default for privacy.
+
 ### Background jobs
 
 Chat turns are short on purpose. For work that takes minutes to hours (audit

@@ -79,6 +79,59 @@ def test_record_trace_no_path_is_a_noop(tmp_path):
     record_trace("", "chat", _ok(), prompt="x")  # must not raise
 
 
+def test_load_and_summarize_traces(tmp_path):
+    from iris.trace import load_traces, summarize_traces
+
+    path = tmp_path / "trace.jsonl"
+    record_trace(str(path), "chat", _ok(cost_usd=0.1, num_turns=2, duration_ms=1000))
+    record_trace(str(path), "job", _ok(cost_usd=0.5, num_turns=4, duration_ms=3000))
+    record_trace(str(path), "job", _err("No conversation found"))
+    records = load_traces(str(path))
+    assert len(records) == 3
+    s = summarize_traces(records)
+    assert s["runs"] == 3
+    assert s["errors"] == 1
+    assert round(s["error_rate"], 3) == round(1 / 3, 3)
+    assert s["by_kind"] == {"chat": 1, "job": 2}
+    assert s["by_error_category"] == {"dead_session": 1}
+    assert round(s["total_cost_usd"], 4) == 0.6
+    assert s["total_turns"] == 6
+    assert s["avg_duration_ms"] == 2000  # only successful turns carry a duration here
+
+
+def test_load_traces_filters_by_since_and_skips_bad_lines(tmp_path):
+    from iris.trace import load_traces
+
+    path = tmp_path / "trace.jsonl"
+    path.write_text(
+        '{"ts": 100, "kind": "chat"}\n'
+        "not json\n"
+        '{"ts": 200, "kind": "job"}\n',
+        encoding="utf-8",
+    )
+    assert [r["ts"] for r in load_traces(str(path))] == [100, 200]
+    assert [r["ts"] for r in load_traces(str(path), since_ts=150)] == [200]
+
+
+def test_load_traces_missing_file_is_empty(tmp_path):
+    from iris.trace import load_traces
+
+    assert load_traces(str(tmp_path / "absent.jsonl")) == []
+
+
+def test_render_digest_is_readable_and_model_free(tmp_path):
+    from iris.trace import render_digest, summarize_traces
+
+    s = summarize_traces([
+        {"kind": "chat", "is_error": False, "cost_usd": 0.1, "num_turns": 2, "duration_ms": 1000},
+        {"kind": "job", "is_error": True, "error_category": "timeout"},
+    ])
+    text = render_digest(s, days=7)
+    assert "2 runs" in text
+    assert "timeout" in text  # the error taxonomy shows up
+    assert "$" in text        # cost is reported
+
+
 def test_record_trace_is_fail_soft(tmp_path):
     # An unwritable path must never raise (telemetry can't break a turn).
     record_trace(str(tmp_path / "nope" / "deep" / "trace.jsonl"), "chat", _ok(), prompt="x")

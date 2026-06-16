@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
@@ -92,3 +93,83 @@ def record_trace(
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as exc:  # fail-soft: telemetry must never break a turn
         log.debug("trace emit failed: %s", exc)
+
+
+def load_traces(path: str, since_ts: Optional[float] = None) -> list[dict]:
+    """Read trace records from a JSONL ledger, newest-last. Bad lines are skipped.
+
+    With ``since_ts`` only records at or after that timestamp are returned.
+    A missing or unreadable file reads as no records.
+    """
+    p = Path(path)
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        with open(p, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if since_ts is not None and (rec.get("ts") or 0) < since_ts:
+                    continue
+                out.append(rec)
+    except OSError:
+        return []
+    return out
+
+
+def _nums(records: list[dict], key: str) -> list[float]:
+    return [r[key] for r in records if isinstance(r.get(key), (int, float))]
+
+
+def summarize_traces(records: list[dict]) -> dict:
+    """Aggregate trace records into counts, cost, latency, and the error taxonomy.
+
+    Pure: it computes the numbers a weekly digest needs without touching disk or
+    a model, so the digest can be rendered and delivered through the notify spine.
+    """
+    total = len(records)
+    errors = [r for r in records if r.get("is_error")]
+    costs = _nums(records, "cost_usd")
+    durations = _nums([r for r in records if not r.get("is_error")], "duration_ms")
+    turns = _nums(records, "num_turns")
+    by_error = Counter(r.get("error_category") for r in errors if r.get("error_category"))
+    return {
+        "runs": total,
+        "errors": len(errors),
+        "error_rate": (len(errors) / total) if total else 0.0,
+        "by_kind": dict(Counter(r.get("kind") for r in records)),
+        "by_error_category": dict(by_error),
+        "total_cost_usd": round(sum(costs), 4),
+        "avg_duration_ms": (sum(durations) / len(durations)) if durations else None,
+        "total_turns": int(sum(turns)),
+    }
+
+
+def render_digest(summary: dict, days: Optional[int] = None) -> str:
+    """A compact, model-free text digest of a trace summary, for the notify spine."""
+    window = f" (last {days}d)" if days else ""
+    runs = summary.get("runs", 0)
+    errors = summary.get("errors", 0)
+    rate = summary.get("error_rate", 0.0) * 100
+    lines = [f"Iris trace digest{window}: {runs} runs, {errors} errors ({rate:.0f}%)."]
+    by_kind = summary.get("by_kind") or {}
+    if by_kind:
+        lines.append("by kind: " + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items())))
+    by_error = summary.get("by_error_category") or {}
+    if by_error:
+        lines.append("errors: " + ", ".join(f"{k} {n}" for k, n in sorted(by_error.items())))
+    cost = summary.get("total_cost_usd") or 0.0
+    avg_ms = summary.get("avg_duration_ms")
+    tail = [f"cost ${cost:.2f}", f"{summary.get('total_turns', 0)} model turns"]
+    if avg_ms:
+        tail.append(f"avg {avg_ms / 1000:.1f}s/run")
+    lines.append("; ".join(tail) + ".")
+    return "\n".join(lines)

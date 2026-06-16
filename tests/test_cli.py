@@ -581,3 +581,31 @@ def test_reminders_tick_runs_subticks_without_a_discord_token(tmp_path, monkeypa
     assert rc == 0
     assert "schedules: 1 due, 1 launched" in out
     assert calls  # the script rule actually spawned despite no token
+
+
+def test_trace_cmd_digests_the_ledger(tmp_path, capsys):
+    import json
+
+    from iris.cli import trace_cmd
+    from iris.config import Config
+
+    ledger = tmp_path / "trace.jsonl"
+    ledger.write_text(
+        json.dumps({"ts": 1000.0, "kind": "chat", "is_error": False, "cost_usd": 0.2,
+                    "num_turns": 2, "duration_ms": 1000}) + "\n"
+        + json.dumps({"ts": 1001.0, "kind": "job", "is_error": True,
+                      "error_category": "timeout"}) + "\n",
+        encoding="utf-8",
+    )
+    rc = trace_cmd(Config(trace_file=str(ledger)), days=7, now=1000.0 + 86400)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2 runs" in out and "timeout" in out
+
+
+def test_trace_cmd_without_a_ledger_is_friendly(tmp_path, capsys):
+    from iris.cli import trace_cmd
+    from iris.config import Config
+
+    assert trace_cmd(Config(trace_file=""), days=7) == 0
+    assert "IRIS_TRACE_FILE" in capsys.readouterr().out

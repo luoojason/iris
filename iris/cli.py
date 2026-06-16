@@ -317,6 +317,27 @@ def usage_cmd(config: Config) -> int:
     return 0
 
 
+def trace_cmd(config: Config, *, days: int = 7, as_json: bool = False, now=None) -> int:
+    """Digest the trace ledger over a window: runs, errors by category, cost, latency.
+
+    Model-free, so a scheduled owner-authored job can render and deliver it through
+    the notify spine. ``now`` is injectable for tests.
+    """
+    import json as _json
+    import time as _time
+
+    from .trace import load_traces, render_digest, summarize_traces
+
+    if not config.trace_file:
+        print("No trace ledger configured (set IRIS_TRACE_FILE).")
+        return 0
+    now = _time.time() if now is None else now
+    since = now - days * 86400
+    summary = summarize_traces(load_traces(config.trace_file, since_ts=since))
+    print(_json.dumps(summary, indent=2) if as_json else render_digest(summary, days=days))
+    return 0
+
+
 def workspaces_cmd(config: Config, action: str, name: str = "", path: str = "") -> int:
     """Owner-side registry of directories jobs may work in (names, not paths)."""
     from .workspaces import WorkspaceStore
@@ -561,6 +582,9 @@ def main(argv: list[str] | None = None) -> int:
     g_cancel = goals_sub.add_parser("cancel", help="cancel a goal by id")
     g_cancel.add_argument("goal_id", type=int)
     sub.add_parser("usage", help="show this month's credit draw and budget level")
+    trace_parser = sub.add_parser("trace", help="digest the trace ledger: runs, errors, cost over a window")
+    trace_parser.add_argument("--days", type=int, default=7, help="how many days back to summarize (default 7)")
+    trace_parser.add_argument("--json", action="store_true", help="emit the raw summary as JSON")
     sub.add_parser("heartbeat", help="show the current status of your health checklist")
     sub.add_parser("webhook", help="run the inbound webhook-wake listener (own process)")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
@@ -670,6 +694,8 @@ def main(argv: list[str] | None = None) -> int:
         return goals_cmd(config, args)
     if command == "usage":
         return usage_cmd(config)
+    if command == "trace":
+        return trace_cmd(config, days=args.days, as_json=args.json)
     if command == "heartbeat":
         return heartbeat_cmd(config)
     if command == "webhook":
