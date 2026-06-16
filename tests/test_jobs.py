@@ -1088,6 +1088,99 @@ def test_browser_deny_list_empty_denies_no_mcp_tools(tmp_path):
         assert tool in driver.disallowed_tools
 
 
+# -- sandbox cleanup (D3): no /tmp leak across scheduled runs ----------------
+
+
+def test_build_job_driver_tracks_scratch_cwd_for_cleanup(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True)
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    # A no-workspace job runs in a throwaway scratch dir that build owns.
+    assert os.path.isdir(driver.cwd)
+    assert driver.cwd in driver._job_temp_paths
+
+
+def test_build_job_driver_does_not_track_a_workspace_dir(tmp_path):
+    from iris.jobs import build_job_driver
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    driver = build_job_driver(Config(jobs_enabled=True),
+                              {"grants": ["subagents"], "workspace": "ws"}, str(ws))
+    # The workspace is the owner's; build must never list it for deletion.
+    assert driver.cwd == str(ws)
+    assert str(ws) not in driver._job_temp_paths
+    assert driver._job_temp_paths == []
+
+
+def test_build_job_driver_tracks_browser_mcp_config_for_cleanup(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    assert os.path.exists(driver.mcp_config)
+    assert driver.mcp_config in driver._job_temp_paths
+    assert driver.cwd in driver._job_temp_paths  # scratch dir tracked too
+
+
+def test_run_job_cleans_the_scratch_sandbox_on_completion(tmp_path):
+    import tempfile
+
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+    scratch = tempfile.mkdtemp(prefix="iris-job-test-")
+    fd, cfg = tempfile.mkstemp(prefix="iris-job-mcp-test-", suffix=".json")
+    os.close(fd)
+    base = env["driver_factory"]
+
+    def factory(config, job, workspace_path, child_pid_callback=None):
+        drv = base(config, job, workspace_path, child_pid_callback)
+        drv._job_temp_paths = [cfg, scratch]
+        return drv
+
+    env["driver_factory"] = factory
+    assert run_with(env) == 0
+    assert not os.path.exists(scratch)
+    assert not os.path.exists(cfg)
+
+
+def test_run_job_cleans_the_sandbox_even_when_the_turn_errors(tmp_path):
+    import tempfile
+
+    env = runner_env(tmp_path, result=ClaudeResult(text="", session_id="s", is_error=True, error="boom"))
+    scratch = tempfile.mkdtemp(prefix="iris-job-test-")
+    base = env["driver_factory"]
+
+    def factory(config, job, workspace_path, child_pid_callback=None):
+        drv = base(config, job, workspace_path, child_pid_callback)
+        drv._job_temp_paths = [scratch]
+        return drv
+
+    env["driver_factory"] = factory
+    assert run_with(env) == 1  # the turn failed
+    assert not os.path.exists(scratch)  # ...but the sandbox is still cleaned
+
+
+def test_run_job_does_not_delete_a_workspace_backed_dir(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "keep.txt").write_text("artifact", encoding="utf-8")
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False),
+                     workspace=ws)
+    # A workspace-backed driver owns no scratch, so _job_temp_paths is empty.
+    base = env["driver_factory"]
+
+    def factory(config, job, workspace_path, child_pid_callback=None):
+        drv = base(config, job, workspace_path, child_pid_callback)
+        drv._job_temp_paths = []
+        return drv
+
+    env["driver_factory"] = factory
+    assert run_with(env) == 0
+    assert ws.exists() and (ws / "keep.txt").exists()
+
+
 def test_run_job_delivers_a_long_report_in_full_across_messages(tmp_path):
     # The Discord ping must carry the WHOLE report (split across messages),
     # never cut; only the fold-back into the next chat turn stays capped.

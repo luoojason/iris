@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -652,12 +653,20 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
       workspace instead, or a throwaway scratch dir when there is none.
     """
     grants = list(job.get("grants") or ["subagents"])
-    cwd = workspace_path or tempfile.mkdtemp(prefix="iris-job-")
+    # Throwaway resources this driver owns and run_job must clean up afterwards.
+    # A workspace is the owner's and is never listed here.
+    temp_paths: list[str] = []
+    if workspace_path:
+        cwd = workspace_path
+    else:
+        cwd = tempfile.mkdtemp(prefix="iris-job-")
+        temp_paths.append(cwd)
     allowed = job_allowed_builtins(grants)
     disallowed = job_disallowed(grants)
     mcp_config = None
     if "browser" in grants:
         mcp_config = write_browser_mcp_config(config)
+        temp_paths.append(mcp_config)
         # The bare server name pre-approves every tool the server exposes;
         # --strict-mcp-config (set by the driver whenever mcp_config is given)
         # keeps the job from seeing any other server on the host. The
@@ -669,7 +678,7 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         )
     # Heavy jobs escalate to the stronger model; everyday jobs run on the base.
     model = config.job_model_heavy if job.get("heavy") else (config.job_model or config.model)
-    return ClaudeDriver(
+    driver = ClaudeDriver(
         claude_bin=config.claude_bin,
         model=model,
         append_system_prompt=JOB_QUESTION_PROTOCOL,
@@ -688,6 +697,31 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         retry_base_delay=config.retry_base_delay,
         timeout_max_retries=0,
     )
+    driver._job_temp_paths = temp_paths
+    return driver
+
+
+def _cleanup_job_sandbox(driver) -> None:
+    """Remove the throwaway scratch cwd and browser mcp config a job driver owns.
+
+    Best-effort and non-raising: the job's report and delivery have already
+    happened, so a cleanup hiccup must never turn a finished job into a failure.
+    Only paths build_job_driver created are listed, so a registered workspace
+    (the owner's directory) is never touched. Without this a daily-scheduled-job
+    deployment accumulates iris-job-* dirs and iris-job-mcp-*.json files in /tmp
+    without bound.
+    """
+    if driver is None:
+        return
+    for path in getattr(driver, "_job_temp_paths", ()) or ():
+        try:
+            target = Path(path)
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not clean job sandbox path %s", path)
 
 
 def spawn_runner(job_id: int, *, store: Optional[JobStore] = None, popen=None) -> int:
@@ -812,110 +846,114 @@ def run_job(
         # (driver hardening), so killing the runner alone would orphan it.
         store.update(job_id, claude_pid=pid)
 
+    driver = None
     try:
-        driver = driver_factory(config, job, workspace_path, record_child)
-        result = driver.run(prompt, session_id=resume_session)
-    except Exception as exc:
-        # ClaudeError (binary missing) or anything else: the job must never
-        # be left 'running' with no ping — the owner is never left guessing.
-        log.exception("job %s crashed while launching claude", job_id)
-        store.transition(job_id, ("running",), "failed",
-                         error=f"the job turn crashed: {exc}", finished_ts=time.time())
-        deliver(f"job #{job_id} ({job['title']}) failed: the job turn crashed: {exc}")
-        return 1
-    guard.record("job", result)
-
-    if result.is_error:
-        error = result.error or "the job turn failed"
-        store.transition(job_id, ("running",), "failed",
-                         error=error, finished_ts=time.time())
-        deliver(f"job #{job_id} ({job['title']}) failed: {error}")
-        return 1
-
-    report = result.text or ""
-
-    # Pause-and-ask: if the job ended with a QUESTION: and it has not used up its
-    # question budget, pause it (needs_input) and ping the owner instead of
-    # finishing. The session_id is stored so resume_job(answer=...) can continue
-    # the same conversation. At the cap, the question rides along in a normal
-    # completion (delivered, not paused) so the job can never loop on the clock.
-    question = extract_question(report)
-    rounds = int(job.get("question_rounds", 0))
-    if question and rounds < int(getattr(config, "job_max_questions", 5)):
-        paused = store.transition(job_id, ("running",), "needs_input",
-                                  report=report, question=question,
-                                  session_id=result.session_id,
-                                  question_rounds=rounds + 1)
-        if paused is None:
-            log.info("job %s left running during its question; skipping the ask", job_id)
-            return 0
-        deliver(f"job #{job_id} ({job['title']}) needs your input: {question}\n"
-                f"Answer with resume_job({job_id}, answer=...).")
-        return 0
-
-    try:
-        files, problems = collect_artifacts(report, workspace_path)
-        artifact_names = [str(Path(f).relative_to(Path(workspace_path).resolve())) if workspace_path else f
-                          for f in files]
-    except Exception as exc:
-        # The turn is already paid for; its report must survive the crash.
-        log.exception("job %s finished but artifact handling crashed", job_id)
-        store.transition(job_id, ("running",), "failed",
-                         error=f"finished, but artifact handling crashed: {exc}",
-                         report=report, finished_ts=time.time())
-        deliver(f"job #{job_id} ({job['title']}) finished, but artifact handling crashed: {exc}")
-        return 1
-
-    # Independent check that the report actually satisfies the ask. It only
-    # annotates (the result is always delivered) and never raises: a crashing or
-    # unreadable reviewer fails open to "couldn't verify" rather than blocking.
-    verified: Optional[bool] = None
-    verify_reason = ""
-    if verify is not None and not guard.should_park():
-        # Re-checked here, not at setup: the job's own turn may have just pushed
-        # usage into park, and a parked guard means no extra reviewer spend.
         try:
-            verdict = verify(job["instructions"], report)
+            driver = driver_factory(config, job, workspace_path, record_child)
+            result = driver.run(prompt, session_id=resume_session)
+        except Exception as exc:
+            # ClaudeError (binary missing) or anything else: the job must never
+            # be left 'running' with no ping — the owner is never left guessing.
+            log.exception("job %s crashed while launching claude", job_id)
+            store.transition(job_id, ("running",), "failed",
+                             error=f"the job turn crashed: {exc}", finished_ts=time.time())
+            deliver(f"job #{job_id} ({job['title']}) failed: the job turn crashed: {exc}")
+            return 1
+        guard.record("job", result)
+
+        if result.is_error:
+            error = result.error or "the job turn failed"
+            store.transition(job_id, ("running",), "failed",
+                             error=error, finished_ts=time.time())
+            deliver(f"job #{job_id} ({job['title']}) failed: {error}")
+            return 1
+
+        report = result.text or ""
+
+        # Pause-and-ask: if the job ended with a QUESTION: and it has not used up its
+        # question budget, pause it (needs_input) and ping the owner instead of
+        # finishing. The session_id is stored so resume_job(answer=...) can continue
+        # the same conversation. At the cap, the question rides along in a normal
+        # completion (delivered, not paused) so the job can never loop on the clock.
+        question = extract_question(report)
+        rounds = int(job.get("question_rounds", 0))
+        if question and rounds < int(getattr(config, "job_max_questions", 5)):
+            paused = store.transition(job_id, ("running",), "needs_input",
+                                      report=report, question=question,
+                                      session_id=result.session_id,
+                                      question_rounds=rounds + 1)
+            if paused is None:
+                log.info("job %s left running during its question; skipping the ask", job_id)
+                return 0
+            deliver(f"job #{job_id} ({job['title']}) needs your input: {question}\n"
+                    f"Answer with resume_job({job_id}, answer=...).")
+            return 0
+
+        try:
+            files, problems = collect_artifacts(report, workspace_path)
+            artifact_names = [str(Path(f).relative_to(Path(workspace_path).resolve())) if workspace_path else f
+                              for f in files]
+        except Exception as exc:
+            # The turn is already paid for; its report must survive the crash.
+            log.exception("job %s finished but artifact handling crashed", job_id)
+            store.transition(job_id, ("running",), "failed",
+                             error=f"finished, but artifact handling crashed: {exc}",
+                             report=report, finished_ts=time.time())
+            deliver(f"job #{job_id} ({job['title']}) finished, but artifact handling crashed: {exc}")
+            return 1
+
+        # Independent check that the report actually satisfies the ask. It only
+        # annotates (the result is always delivered) and never raises: a crashing or
+        # unreadable reviewer fails open to "couldn't verify" rather than blocking.
+        verified: Optional[bool] = None
+        verify_reason = ""
+        if verify is not None and not guard.should_park():
+            # Re-checked here, not at setup: the job's own turn may have just pushed
+            # usage into park, and a parked guard means no extra reviewer spend.
+            try:
+                verdict = verify(job["instructions"], report)
+            except Exception:
+                log.exception("job %s verification crashed; delivering unverified", job_id)
+                verdict = {"ok": None, "reason": "verification crashed"}
+            verified = verdict.get("ok")
+            verify_reason = verdict.get("reason", "") or ""
+
+        final = store.transition(job_id, ("running",), "done",
+                                 report=report, artifacts=artifact_names,
+                                 verified=verified, verify_reason=verify_reason,
+                                 session_id=result.session_id, finished_ts=time.time())
+        if final is None:
+            # The job left 'running' under us (an owner cancel won the race).
+            # Don't follow a cancel with a confusing 'finished' ping.
+            log.info("job %s was cancelled mid-run; skipping delivery", job_id)
+            return 0
+
+        banner = ""
+        if verified is False:
+            banner = (f"[verification flag] an independent check thinks this may not fully "
+                      f"satisfy the task: {verify_reason}\n")
+        if deliver(f"{banner}job #{job_id} ({job['title']}) finished: {report}", problems):
+            store.update(job_id, report_delivered=True)
+
+        try:
+            for path in files:
+                if channel and token:
+                    res = send_file(channel, path, f"job #{job_id} artifact", token)
+                    if isinstance(res, dict) and res.get("error"):
+                        inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}",
+                                     conversation_id=(f"discord:{channel}" if channel else None))
         except Exception:
-            log.exception("job %s verification crashed; delivering unverified", job_id)
-            verdict = {"ok": None, "reason": "verification crashed"}
-        verified = verdict.get("ok")
-        verify_reason = verdict.get("reason", "") or ""
+            log.exception("job %s artifact upload crashed after completion", job_id)
 
-    final = store.transition(job_id, ("running",), "done",
-                             report=report, artifacts=artifact_names,
-                             verified=verified, verify_reason=verify_reason,
-                             session_id=result.session_id, finished_ts=time.time())
-    if final is None:
-        # The job left 'running' under us (an owner cancel won the race).
-        # Don't follow a cancel with a confusing 'finished' ping.
-        log.info("job %s was cancelled mid-run; skipping delivery", job_id)
+        # This job succeeded; launch any job chained to run after it. Best-effort and
+        # isolated so a chaining hiccup never taints the completed job's own outcome.
+        try:
+            launch_ready_dependents(store, config, spawn=spawn, guard=guard)
+        except Exception:
+            log.exception("job %s: launching chained dependents failed", job_id)
         return 0
-
-    banner = ""
-    if verified is False:
-        banner = (f"[verification flag] an independent check thinks this may not fully "
-                  f"satisfy the task: {verify_reason}\n")
-    if deliver(f"{banner}job #{job_id} ({job['title']}) finished: {report}", problems):
-        store.update(job_id, report_delivered=True)
-
-    try:
-        for path in files:
-            if channel and token:
-                res = send_file(channel, path, f"job #{job_id} artifact", token)
-                if isinstance(res, dict) and res.get("error"):
-                    inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}",
-                                 conversation_id=(f"discord:{channel}" if channel else None))
-    except Exception:
-        log.exception("job %s artifact upload crashed after completion", job_id)
-
-    # This job succeeded; launch any job chained to run after it. Best-effort and
-    # isolated so a chaining hiccup never taints the completed job's own outcome.
-    try:
-        launch_ready_dependents(store, config, spawn=spawn, guard=guard)
-    except Exception:
-        log.exception("job %s: launching chained dependents failed", job_id)
-    return 0
+    finally:
+        _cleanup_job_sandbox(driver)
 
 
 def _header_safe(filename: str) -> str:
