@@ -47,7 +47,10 @@ So: each person runs Iris against their **own** plan via their own `claude`
 login. Do not build a hosted, multi-tenant service on top of it, and do not
 point your personal bot at a community and answer other members. `.env.example`
 ships with `IRIS_ALLOWED_USER_IDS` so you can lock the bot to yourself in one
-line. Use it.
+line. Use it. The gate also fails closed: an empty allowlist combined with
+`IRIS_RESPOND_WITHOUT_MENTION=true` answers no one rather than the whole channel,
+and the scoped `discord_server` tools are default-deny (home channel / configured
+guild only) so a confused or injected turn cannot read or post elsewhere.
 
 ## Cost, concretely
 
