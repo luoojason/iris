@@ -38,60 +38,46 @@ SEED_TEMPLATE = (
 )
 
 
-def _memory_digest_supplier(path: str, max_bytes: int, guard=None):
-    """A per-turn supplier of the pinned-memory block for the system prompt.
+def _digest_supplier(path: str, render, max_bytes: int, guard=None):
+    """Shared per-turn supplier of a JSON-list-backed tier-0 system-prompt block.
 
-    Reads the memory store fresh each turn — the model pins and unpins through
-    the MCP tool while the bot runs — and halves the byte budget while the
-    credit guard is running hot. Never raises: a missing or broken store reads
-    as no digest, and the next turn proceeds without it.
+    Reads the store fresh each turn (state changes through the MCP tools while the
+    bot runs), halves the byte budget while the credit guard runs hot, and never
+    raises: a missing or broken store reads as no digest. ``render(data, now,
+    budget)`` turns the parsed list into the block. Adding a new tier-0 block is
+    one call with its own renderer.
     """
     import json
     from pathlib import Path
 
-    from .memory import pinned_digest
-
     def supply() -> str:
         try:
-            entries = json.loads(Path(path).read_text("utf-8"))
+            data = json.loads(Path(path).read_text("utf-8"))
         except (OSError, ValueError):
             return ""
-        if not isinstance(entries, list):
+        if not isinstance(data, list):
             return ""
         budget = max_bytes
         if guard is not None and guard.level() in ("tighten", "park"):
             budget = max_bytes // 2
-        return pinned_digest(entries, time.time(), budget)
+        return render(data, time.time(), budget)
 
     return supply
+
+
+def _memory_digest_supplier(path: str, max_bytes: int, guard=None):
+    """Tier-0 pinned-memory block (model pins/unpins through the MCP tool)."""
+    from .memory import pinned_digest
+    return _digest_supplier(
+        path, lambda data, now, budget: pinned_digest(data, now, budget), max_bytes, guard)
 
 
 def _jobs_digest_supplier(path: str, max_bytes: int, recent_secs: int, guard=None):
-    """A per-turn supplier of the active-jobs block for the system prompt.
-
-    Reads the job registry fresh each turn so any session — chat, proactive, or a
-    compaction-seeded one — sees what is already running and does not launch a
-    duplicate. Halves the budget while the credit guard is hot; never raises (a
-    missing or broken registry reads as no digest).
-    """
-    import json
-    from pathlib import Path
-
+    """Tier-0 active-jobs block, so any session sees what is running and never
+    launches a duplicate."""
     from .jobs import jobs_digest
-
-    def supply() -> str:
-        try:
-            jobs = json.loads(Path(path).read_text("utf-8"))
-        except (OSError, ValueError):
-            return ""
-        if not isinstance(jobs, list):
-            return ""
-        budget = max_bytes
-        if guard is not None and guard.level() in ("tighten", "park"):
-            budget = max_bytes // 2
-        return jobs_digest(jobs, time.time(), budget, recent_secs)
-
-    return supply
+    return _digest_supplier(
+        path, lambda data, now, budget: jobs_digest(data, now, budget, recent_secs), max_bytes, guard)
 
 
 def _fold_prompt(entries: list[str], text: str) -> str:
