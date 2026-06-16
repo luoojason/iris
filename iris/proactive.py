@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
@@ -21,6 +22,22 @@ from typing import Callable, Optional
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 DEFAULT_THRESHOLD = 80.0
 CACHE_MAX_AGE = 900.0  # 15 min; the endpoint rate-limits tight polling
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects on the usage fetch. This is the one place Iris's own code
+    handles the raw subscription OAuth token (in an Authorization header); a 30x
+    to another host would forward that token, so a redirect is an error here, not
+    something to silently follow."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url, code, f"refusing redirect to {newurl}", headers, fp)
+
+
+# Built once: an opener with the stock redirect-following handler replaced by the
+# refusing one above. Tests inject their own opener; production uses this.
+_no_redirect_opener = urllib.request.build_opener(_NoRedirectHandler)
 
 # Reply this (and nothing else) when a review finds nothing worth surfacing, so
 # the tick stays silent and spends no Discord noise on busywork.
@@ -85,7 +102,7 @@ def fetch_weekly_utilization(token: Optional[str], opener: Optional[Callable] = 
         "User-Agent": "iris-proactive (https://github.com/luoojason/iris, 0.1)",
     })
     try:
-        opener = opener or urllib.request.urlopen
+        opener = opener or _no_redirect_opener.open
         with opener(req, timeout=20) as resp:
             data = json.loads(resp.read())
     except Exception:

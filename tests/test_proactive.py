@@ -50,6 +50,27 @@ def test_fetch_weekly_utilization_handles_failure_and_missing():
     assert fetch_weekly_utilization("tok", opener=_opener({"seven_day": {}})) is None
 
 
+def test_usage_fetch_opener_refuses_to_follow_redirects():
+    # The default opener carries the raw OAuth token in the Authorization header;
+    # a 30x to another host must not be auto-followed (it would forward the token).
+    import urllib.error
+
+    from iris.proactive import _NoRedirectHandler, _no_redirect_opener
+
+    assert any(isinstance(h, _NoRedirectHandler) for h in _no_redirect_opener.handlers)
+
+    class _Req:
+        full_url = "https://api.anthropic.com/api/oauth/usage"
+
+    handler = _NoRedirectHandler()
+    try:
+        handler.redirect_request(_Req(), None, 302, "Found", {}, "https://evil.example/steal")
+        raised = False
+    except urllib.error.HTTPError:
+        raised = True
+    assert raised  # the redirect was refused, not followed
+
+
 def test_usage_cache_serves_fresh_without_fetching(tmp_path):
     cache = UsageCache(tmp_path / "u.json")
     calls = []
