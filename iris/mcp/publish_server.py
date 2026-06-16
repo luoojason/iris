@@ -22,14 +22,15 @@ mcp = FastMCP("iris-publish")
 
 
 def _within_publish_dir(path: str) -> bool:
-    """If IRIS_PUBLISH_DIR is set, the file must live inside it.
+    """The file must live inside IRIS_PUBLISH_DIR.
 
     Publishing is irreversible and public, so a confused or prompt-injected turn
-    should not be able to post any file on the box. Unset = no restriction.
+    should not be able to post any file on the box. Fail closed: with no
+    IRIS_PUBLISH_DIR set, nothing is publishable until the owner opts in.
     """
     base = os.environ.get("IRIS_PUBLISH_DIR")
     if not base:
-        return True
+        return False
     base_real = os.path.realpath(base)
     target = os.path.realpath(path)
     return target == base_real or target.startswith(base_real + os.sep)
@@ -51,6 +52,9 @@ def publish_video(mp4_path: str, caption: str, platforms: str = "youtube,instagr
     """
     if not os.path.isfile(mp4_path):
         return f"No such file: {mp4_path}"
+    if not os.environ.get("IRIS_PUBLISH_DIR"):
+        return ("Refused: IRIS_PUBLISH_DIR is not set, so publishing is disabled. "
+                "Set it to the directory of finished videos to enable publishing.")
     if not _within_publish_dir(mp4_path):
         return f"Refused: {mp4_path} is outside IRIS_PUBLISH_DIR."
     tokens = SocialTokens.load()
