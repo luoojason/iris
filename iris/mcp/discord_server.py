@@ -10,10 +10,12 @@ Token comes from ``IRIS_DISCORD_TOKEN`` (or ``DISCORD_BOT_TOKEN``). Channel and
 guild default to ``IRIS_DISCORD_HOME_CHANNEL`` / ``IRIS_DISCORD_GUILD_ID`` when not
 given, so the agent can just call ``create_thread("name")``.
 
-The defaults are conveniences, not a boundary: an agent-supplied channel_id or
-guild_id reaches any channel or guild the bot is in. Set
+These tools are default-deny: an agent-supplied channel_id or guild_id reaches
+only the home channel / configured guild unless its id is explicitly listed in
 ``IRIS_DISCORD_ALLOWED_CHANNELS`` / ``IRIS_DISCORD_ALLOWED_GUILDS`` (comma-separated
-ids) to clamp these tools to specific channels or servers; unset means no clamp.
+ids). An empty list does not mean "any channel" — it means home only — so a
+confused or injected turn cannot read or post in an arbitrary channel the bot
+happens to share.
 
 Wire it in next to the memory server in your mcp config, and allowlist its tools.
 """
@@ -49,13 +51,30 @@ def _guild(given: Optional[str]) -> str:
 
 
 def _channel_allowed(channel: str) -> bool:
+    """Default-deny: only the home channel, plus any explicitly allow-listed ids.
+
+    An empty allow-list does NOT mean "any channel" — a confused or prompt-injected
+    turn must not be able to read or post in an arbitrary channel the bot happens
+    to share. Widen by adding ids to IRIS_DISCORD_ALLOWED_CHANNELS.
+    """
     allow = {c.strip() for c in os.environ.get("IRIS_DISCORD_ALLOWED_CHANNELS", "").split(",") if c.strip()}
-    return not allow or channel in allow
+    home = _home_channel(None)
+    if home:
+        allow.add(home)
+    return channel in allow
 
 
 def _guild_allowed(guild: str) -> bool:
+    """Default-deny: only the configured guild, plus any explicitly allow-listed ids.
+
+    An empty allow-list does NOT mean "any guild". Widen by adding ids to
+    IRIS_DISCORD_ALLOWED_GUILDS.
+    """
     allow = {g.strip() for g in os.environ.get("IRIS_DISCORD_ALLOWED_GUILDS", "").split(",") if g.strip()}
-    return not allow or guild in allow
+    home = _guild(None)
+    if home:
+        allow.add(home)
+    return guild in allow
 
 
 def discord_request(method: str, path: str, body: Optional[dict] = None):
@@ -95,7 +114,8 @@ def create_thread(name: str, channel_id: Optional[str] = None) -> str:
     if not channel:
         return "No channel id given and no home channel configured."
     if not _channel_allowed(channel):
-        return f"Channel {channel} is not in IRIS_DISCORD_ALLOWED_CHANNELS."
+        return (f"Channel {channel} is not allowed: only the home channel or ids in "
+                f"IRIS_DISCORD_ALLOWED_CHANNELS may be used.")
     res = discord_request("POST", f"/channels/{channel}/threads",
                           {"name": name[:100], "type": 11, "auto_archive_duration": 1440})
     if _is_err(res):
@@ -110,7 +130,8 @@ def fetch_messages(channel_id: Optional[str] = None, limit: int = 20) -> str:
     if not channel:
         return "No channel id given and no home channel configured."
     if not _channel_allowed(channel):
-        return f"Channel {channel} is not in IRIS_DISCORD_ALLOWED_CHANNELS."
+        return (f"Channel {channel} is not allowed: only the home channel or ids in "
+                f"IRIS_DISCORD_ALLOWED_CHANNELS may be used.")
     res = discord_request("GET", f"/channels/{channel}/messages?limit={min(max(limit, 1), 50)}")
     if _is_err(res):
         return f"Could not fetch messages: {res['error']}"
@@ -125,7 +146,8 @@ def list_channels(guild_id: Optional[str] = None) -> str:
     if not guild:
         return "No guild id given and no guild configured."
     if not _guild_allowed(guild):
-        return f"Guild {guild} is not in IRIS_DISCORD_ALLOWED_GUILDS."
+        return (f"Guild {guild} is not allowed: only the configured guild or ids in "
+                f"IRIS_DISCORD_ALLOWED_GUILDS may be used.")
     res = discord_request("GET", f"/guilds/{guild}/channels")
     if _is_err(res):
         return f"Could not list channels: {res['error']}"
@@ -140,7 +162,8 @@ def search_members(query: str, guild_id: Optional[str] = None, limit: int = 10) 
     if not guild:
         return "No guild id given and no guild configured."
     if not _guild_allowed(guild):
-        return f"Guild {guild} is not in IRIS_DISCORD_ALLOWED_GUILDS."
+        return (f"Guild {guild} is not allowed: only the configured guild or ids in "
+                f"IRIS_DISCORD_ALLOWED_GUILDS may be used.")
     q = urllib.parse.quote(query)
     res = discord_request("GET", f"/guilds/{guild}/members/search?query={q}&limit={min(max(limit, 1), 20)}")
     if _is_err(res):
