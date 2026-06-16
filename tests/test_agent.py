@@ -134,8 +134,8 @@ def test_compaction_summarizes_and_reseeds(tmp_path):
     driver = FakeDriver([
         ClaudeResult(text="reply 1", session_id="s1", is_error=False),
         ClaudeResult(text="reply 2", session_id="s1", is_error=False),
-        ClaudeResult(text="SUMMARY OF CHAT", session_id="s1", is_error=False),  # summary turn
-        ClaudeResult(text="ok", session_id="s2", is_error=False),               # fresh seeded session
+        ClaudeResult(text="SUMMARY OF CHAT", session_id=None, is_error=False),  # summary on a fresh session
+        ClaudeResult(text="ok", session_id="s2", is_error=False),              # fresh seeded session
     ])
     agent = Agent(driver, store, compact_every=2)
     agent.compact_async = False  # run compaction inline for a deterministic test
@@ -144,12 +144,67 @@ def test_compaction_summarizes_and_reseeds(tmp_path):
     assert store.turns("c1") == 1  # no compaction yet
     agent.respond("c1", "second")  # second turn crosses the threshold
 
-    # The old session was asked to summarize, and a fresh session was seeded.
     prompts = [p for p, _ in driver.calls]
-    assert any("Summarize our entire conversation" in p for p in prompts)
+    # The summary is built from the recent-turns buffer on a FRESH session, never
+    # by resuming the live one (so it needn't hold the conversation lock).
+    assert any("Summarize the conversation" in p for p in prompts)
+    summary_call = next(c for c in driver.calls if "Summarize the conversation" in c[0])
+    assert summary_call[1] is None  # a fresh session, not "s1"
+    assert "first" in summary_call[0] and "reply 1" in summary_call[0]
+    assert "second" in summary_call[0] and "reply 2" in summary_call[0]
     assert any("SUMMARY OF CHAT" in p for p in prompts)  # the summary seeded the new one
     assert store.get("c1") == "s2"  # now on the fresh session
     assert store.turns("c1") == 1   # counter reset for the new session
+
+
+def test_compaction_summary_runs_off_the_conversation_lock(tmp_path):
+    # D4: the summary must not hold the conversation lock, or a compaction-triggered
+    # turn blocks every incoming message on that conversation for up to turn_timeout.
+    # Proven deterministically: during the summary and seed model calls the
+    # conversation lock is free (a non-blocking acquire from this thread succeeds;
+    # the lock is non-reentrant, so it would fail if compaction held it).
+    store = SessionStore(tmp_path / "s.json")
+    free = {}
+
+    class ProbeDriver:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
+            self.calls.append((prompt, session_id))
+            if "open threads" in prompt:  # the summary call
+                got = agent._lock_for("c1").acquire(blocking=False)
+                free["summary"] = got
+                if got:
+                    agent._lock_for("c1").release()
+                return ClaudeResult(text="SUMMARY", session_id=None, is_error=False)
+            if "continues an earlier one" in prompt:  # the seed call
+                got = agent._lock_for("c1").acquire(blocking=False)
+                free["seed"] = got
+                if got:
+                    agent._lock_for("c1").release()
+                return ClaudeResult(text="ok", session_id="s2", is_error=False)
+            return ClaudeResult(text="reply", session_id="s1", is_error=False)
+
+    driver = ProbeDriver()
+    agent = Agent(driver, store, compact_every=1)
+    agent.compact_async = False
+    agent.respond("c1", "hello there")  # compact_every=1 triggers compaction this turn
+    assert free.get("summary") is True  # the fix: summary runs with the lock free
+    assert free.get("seed") is True
+    assert store.get("c1") == "s2"
+
+
+def test_compaction_skips_when_the_recent_turns_buffer_is_empty(tmp_path):
+    # Off-lock compaction summarizes the recent-turns buffer; with nothing buffered
+    # (e.g. right after a restart) it must skip rather than resume the live session.
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "s1")
+    driver = FakeDriver([])  # no model call should happen
+    agent = Agent(driver, store)
+    assert agent.compact("c1") is False
+    assert driver.calls == []
+    assert store.get("c1") == "s1"  # session untouched
 
 
 def test_compaction_triggers_on_context_tokens(tmp_path):
@@ -347,6 +402,40 @@ async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
     assert "job #3 finished: done" in sd.prompts[0]
     assert sd.prompts[0].endswith("hello")
     assert box.drain("c1") == []
+
+
+async def test_live_turn_records_a_turn_for_compaction(tmp_path):
+    # The live path must feed the recent-turns buffer too, or its conversations
+    # would never have material for the off-lock compaction summary.
+    class FakeStreamTurn:
+        def __init__(self, result):
+            self._result = result
+            self.open = False
+            self.strays = []
+
+        def wait_primary(self, timeout=None):
+            return self._result
+
+        def wait_finished(self, timeout=None):
+            return True
+
+    class FakeStreamDriver:
+        def __init__(self, results):
+            self.results = list(results)
+
+        def start(self, prompt, session_id=None, model=None):
+            return FakeStreamTurn(self.results.pop(0))
+
+    store = SessionStore(tmp_path / "s.json")
+    sd = FakeStreamDriver([ClaudeResult(text="the reply", session_id="s1", is_error=False)])
+    agent = Agent(FakeDriver([]), store, stream_driver=sd)
+    turn = agent.live_turn("c1", "remember the EUDR deadline")
+    await turn.begin()
+    await turn.result()
+    await turn.aftermath()
+    transcript = agent._recent_transcript("c1")
+    assert "remember the EUDR deadline" in transcript  # the raw user message
+    assert "the reply" in transcript
 
 
 async def test_live_turn_restores_inbox_on_error(tmp_path):

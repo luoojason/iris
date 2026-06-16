@@ -281,6 +281,9 @@ class Config:
     # Backstop trigger: also compact after this many turns on one session, in
     # case usage tokens are ever unavailable. 0 disables it.
     compact_every: int = 60
+    # Recent (user, reply) pairs carried into a compaction summary. The summary
+    # runs on a fresh session seeded with these, off the conversation lock.
+    compact_seed_turns: int = 16
 
     @classmethod
     def from_env(cls, *, dotenv: str | os.PathLike[str] = ".env") -> "Config":
@@ -386,6 +389,7 @@ class Config:
             ack_delay=float(os.environ.get("IRIS_ACK_DELAY", "4")),
             compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
+            compact_seed_turns=int(os.environ.get("IRIS_COMPACT_SEED_TURNS", "16")),
             notify_channel=os.environ.get("IRIS_NOTIFY_CHANNEL", ""),
             watch_min_seconds=float(os.environ.get("IRIS_WATCH_MIN_SECONDS", "30")),
             notify_persona=os.environ.get("IRIS_NOTIFY_PERSONA") or None,
