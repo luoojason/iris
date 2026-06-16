@@ -186,3 +186,19 @@ def test_should_handle_mention_only_in_channel_auto_in_thread():
     assert should_handle(_Msg(chan, mentions=[bot]), bot, cfg) is True      # mention -> handled
     thread = _Chan(guild=True, parent_id=chan.id)
     assert should_handle(_Msg(thread, mentions=[]), bot, cfg) is True       # in a thread -> auto-handled
+
+
+def test_should_handle_fails_closed_on_empty_allowlist_with_open_replies():
+    # The risky combo: no allowlist AND respond_without_mention=true would answer
+    # anyone who posts (or threads), on Jason's subscription. Fail closed.
+    bot = _User(id=999)
+    chan = _Chan(guild=True, parent_id=None)
+    cfg = Config(respond_without_mention=True, allowed_user_ids=[])
+    assert should_handle(_Msg(chan, mentions=[]), bot, cfg) is False
+    thread = _Chan(guild=True, parent_id=chan.id)
+    assert should_handle(_Msg(thread, mentions=[]), bot, cfg) is False
+    # With an allowlist set, answer-without-mention still works for the owner...
+    owned = Config(respond_without_mention=True, allowed_user_ids=["10"])
+    assert should_handle(_Msg(chan, author=_User(id=10), mentions=[]), bot, owned) is True
+    # ...and still denies a stranger.
+    assert should_handle(_Msg(chan, author=_User(id=77), mentions=[]), bot, owned) is False

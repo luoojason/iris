@@ -199,7 +199,15 @@ def should_handle(message, bot_user, config) -> bool:
     author = message.author
     if getattr(author, "bot", False) or (bot_user and author.id == bot_user.id):
         return False
-    if config.allowed_user_ids and str(author.id) not in config.allowed_user_ids:
+    if config.allowed_user_ids:
+        if str(author.id) not in config.allowed_user_ids:
+            return False
+    elif config.respond_without_mention:
+        # Fail closed on the dangerous combination: with no allowlist to bound who
+        # is answered, respond_without_mention would answer anyone who posts a
+        # message or opens a thread, on Jason's subscription. Refuse rather than
+        # open inference to the whole channel. (Set IRIS_ALLOWED_USER_IDS to scope
+        # answer-without-mention to the owner.)
         return False
 
     channel = message.channel
