@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -27,11 +26,7 @@ from typing import Optional
 
 from .config import Config
 from .inbox import Inbox
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+from .statefile import JsonDictStore
 
 log = logging.getLogger("iris.wakes")
 
@@ -110,45 +105,24 @@ def load_rules(path: Path) -> tuple[list, Optional[str]]:
 
 
 class _StateStore:
-    """The tick-owned observation state, locked across read-evaluate-write."""
+    """The tick-owned observation state, locked across read-evaluate-write.
+
+    Thin domain wrapper over the shared JsonDictStore: ``locked()`` yields the
+    loaded state so the tick reads, evaluates, and writes under one lock. The
+    flock, atomic write, and corruption-quarantine all come from the base (this
+    store used to carry its own drifted ``.corrupt`` sidecar code)."""
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        self._store = JsonDictStore(path, "wakes state")
+        self.path = self._store.path
 
     @contextmanager
     def locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
-            yield self._load()
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield self._load()
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-
-    def _load(self) -> dict:
-        if not self.path.exists():
-            return {}
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            # Keep the bad file around for inspection, start fresh.
-            try:
-                self.path.replace(self.path.with_suffix(self.path.suffix + ".corrupt"))
-            except OSError:
-                pass
-            return {}
+        with self._store.locked():
+            yield self._store.load()
 
     def save(self, state: dict) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2, sort_keys=True)
-        os.replace(tmp, self.path)
+        self._store.save(state)
 
 
 def http_get(url: str, timeout: float) -> bytes:

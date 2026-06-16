@@ -9,8 +9,18 @@ not import each other just to share it.
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
+import os
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 
 log = logging.getLogger("iris.statefile")
 
@@ -28,3 +38,77 @@ def quarantine_corrupt(path: Path, label: str) -> None:
             path.replace(sidecar)
     except OSError:
         pass
+
+
+class JsonStateFile:
+    """flock + atomic-write + corruption-quarantine for one JSON state file.
+
+    The lock-handling, atomic-replace, and corruption-recovery dance was
+    copy-pasted across the stores and had already drifted (some returned [] on a
+    bad file, some quarantined, one wrote its own sidecar). This is the single
+    home for it; ``JsonListStore``/``JsonDictStore`` bind the default. Holders run
+    a read-modify-write under ``with store.locked(): store.save(mutate(store.load()))``.
+    """
+
+    def __init__(self, path, label: str, default):
+        self.path = Path(path)
+        self.label = label
+        self._default = default
+
+    @contextmanager
+    def locked(self):
+        """Hold an exclusive cross-process lock for a read-modify-write."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if fcntl is None:  # pragma: no cover - Windows
+            yield
+            return
+        lock = self.path.with_suffix(self.path.suffix + ".lock")
+        with open(lock, "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def load(self):
+        """Parse the file, recovering to a fresh default on corruption.
+
+        A bad file is quarantined (kept as a .corrupt sidecar) so owner data is
+        never silently overwritten. Wrong top-level type reads as the default too.
+        """
+        if not self.path.exists():
+            return copy.deepcopy(self._default)
+        try:
+            data = json.loads(self.path.read_text("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            quarantine_corrupt(self.path, self.label)
+            return copy.deepcopy(self._default)
+        if type(data) is not type(self._default):
+            return copy.deepcopy(self._default)
+        return data
+
+    def save(self, data) -> None:
+        """Atomically replace the file (mkstemp + os.replace)."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+
+class JsonListStore(JsonStateFile):
+    """A JSON state file whose top level is a list."""
+
+    def __init__(self, path, label: str):
+        super().__init__(path, label, [])
+
+
+class JsonDictStore(JsonStateFile):
+    """A JSON state file whose top level is a dict."""
+
+    def __init__(self, path, label: str):
+        super().__init__(path, label, {})
