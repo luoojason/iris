@@ -201,6 +201,21 @@ def test_resume_parked(tmp_path):
     assert JobStore(config.jobs_file).get(1)["state"] == "pending"
 
 
+def test_resume_pending_with_live_runner_does_not_respawn(tmp_path, capsys):
+    # A pending job that is already mid-spawn (a live runner pid is recorded)
+    # must not get a second runner from a console resume. The console used to
+    # spawn unconditionally; it now shares jobs.resume_job's liveness guard.
+    config = env(tmp_path)
+    store = JobStore(config.jobs_file)
+    store.add("a", "x", [], "", "home-1")
+    store.update(1, pid=os.getpid())  # a live runner is already starting it
+    spawned = []
+    rc = run(config, args("resume", job_id=1), spawned=spawned)
+    assert spawned == []  # no second runner
+    assert JobStore(config.jobs_file).get(1)["state"] == "pending"
+    assert "already starting" in capsys.readouterr().out
+
+
 def test_rerun_clones_and_spawns(tmp_path, capsys):
     config = env(tmp_path)
     store = JobStore(config.jobs_file)
