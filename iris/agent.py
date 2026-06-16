@@ -425,6 +425,9 @@ class Agent:
             max_retries=config.max_retries,
             retry_base_delay=config.retry_base_delay,
             timeout_max_retries=config.timeout_max_retries,
+            trace_file=config.trace_file,
+            trace_kind="chat",
+            trace_capture_content=config.trace_capture_content,
         )
         store = SessionStore(config.session_store_path)
         stream_driver = None

@@ -1088,6 +1088,17 @@ def test_browser_deny_list_empty_denies_no_mcp_tools(tmp_path):
         assert tool in driver.disallowed_tools
 
 
+def test_job_driver_inherits_the_trace_config(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, trace_file=str(tmp_path / "trace.jsonl"),
+                    trace_capture_content=True)
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    assert driver.trace_file == str(tmp_path / "trace.jsonl")
+    assert driver.trace_kind == "job"  # so the ledger can tell jobs from chat
+    assert driver.trace_capture_content is True
+
+
 # -- sandbox cleanup (D3): no /tmp leak across scheduled runs ----------------
 
 

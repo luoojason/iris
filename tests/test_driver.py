@@ -123,6 +123,46 @@ def test_error_subtype_marks_error():
     assert result.error
 
 
+def test_run_emits_a_trace_record_when_configured(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    d = ClaudeDriver(trace_file=str(trace), trace_kind="job",
+                     runner=make_runner([FakeProc(0, success_json(text="done", session_id="s1"))]))
+    d.run("do it")
+    rec = json.loads(trace.read_text("utf-8").strip())
+    assert rec["kind"] == "job"
+    assert rec["is_error"] is False
+    assert rec["error_category"] is None
+    assert rec["cost_usd"] == 0.01
+    assert "prompt" not in rec  # content off by default
+
+
+def test_run_traces_an_error_with_its_category(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    bad = json.dumps({"type": "result", "is_error": True,
+                      "result": "No conversation found for session x", "session_id": None})
+    d = ClaudeDriver(max_retries=0, trace_file=str(trace),
+                     runner=make_runner([FakeProc(0, bad)]))
+    d.run("hi", session_id="x")
+    rec = json.loads(trace.read_text("utf-8").strip())
+    assert rec["is_error"] is True
+    assert rec["error_category"] == "dead_session"
+
+
+def test_run_without_a_trace_file_writes_nothing(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    ClaudeDriver(runner=make_runner([FakeProc(0, success_json())])).run("hi")
+    assert not trace.exists()
+
+
+def test_run_captures_content_when_enabled(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    d = ClaudeDriver(trace_file=str(trace), trace_capture_content=True,
+                     runner=make_runner([FakeProc(0, success_json(text="the answer"))]))
+    d.run("the question")
+    rec = json.loads(trace.read_text("utf-8").strip())
+    assert rec["prompt"] == "the question" and rec["result_text"] == "the answer"
+
+
 def test_retries_on_rate_limit_then_succeeds():
     slept = []
     rate = json.dumps({"type": "result", "subtype": "success", "is_error": True,

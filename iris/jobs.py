@@ -696,6 +696,9 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         max_retries=config.max_retries,
         retry_base_delay=config.retry_base_delay,
         timeout_max_retries=0,
+        trace_file=config.trace_file,
+        trace_kind="job",
+        trace_capture_content=config.trace_capture_content,
     )
     driver._job_temp_paths = temp_paths
     return driver

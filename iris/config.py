@@ -249,6 +249,12 @@ class Config:
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
     metrics_file: str = ""
+    # Trace ledger: append one structured record per claude -p invocation across
+    # every path (chat, job, proactive, goal, compaction) to this file. Opt-in.
+    # Content (prompt/reply/raw error) is captured only when trace_capture_content
+    # is true; by default only metadata + an error category are stored.
+    trace_file: str = ""
+    trace_capture_content: bool = False
 
     # Proactive notifications (iris watch). notify_channel is the Discord channel
     # or DM to ping; watch_min_seconds is the success-ping threshold so quick
@@ -379,6 +385,8 @@ class Config:
             jobs_digest_recent_secs=int(os.environ.get("IRIS_JOBS_DIGEST_RECENT_SECS", "3600")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
+            trace_file=os.environ.get("IRIS_TRACE_FILE", ""),
+            trace_capture_content=_flag(os.environ.get("IRIS_TRACE_CAPTURE_CONTENT"), False),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
             max_retries=int(os.environ.get("IRIS_MAX_RETRIES", "2")),
             retry_base_delay=float(os.environ.get("IRIS_RETRY_BASE_DELAY", "2")),

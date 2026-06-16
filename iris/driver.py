@@ -190,10 +190,26 @@ class ClaudeDriver:
     timeout_max_retries: int = 0
     runner: Runner = _default_runner
     sleep: Callable[[float], None] = time.sleep
+    # Trace ledger: when trace_file is set, every invocation appends one record
+    # (kind, model, outcome, error category, timings, turns, tokens, cost) at this
+    # single choke point. Content (prompt/reply/raw error) is kept only when
+    # trace_capture_content is true. Off by default; fail-soft.
+    trace_file: str = ""
+    trace_kind: str = "chat"
+    trace_capture_content: bool = False
 
     @property
     def _owns_subprocess(self) -> bool:
         return self.runner is _default_runner
+
+    def _traced(self, result: "ClaudeResult", prompt: str,
+                session_id: Optional[str]) -> "ClaudeResult":
+        """Append a trace record for this invocation's final result, then return it."""
+        if self.trace_file:
+            from .trace import record_trace
+            record_trace(self.trace_file, self.trace_kind, result, prompt=prompt,
+                         session_id=session_id, capture_content=self.trace_capture_content)
+        return result
 
     def _effective_disallowed(self) -> Optional[Sequence[str]]:
         if self.disallowed_tools:
@@ -337,7 +353,7 @@ class ClaudeDriver:
 
             result = self._parse(proc, session_id)
             if not result.is_error:
-                return result
+                return self._traced(result, prompt, session_id)
 
             last_error = result.error
             if transient_attempts < self.max_retries and self._is_retryable(result):
@@ -349,11 +365,14 @@ class ClaudeDriver:
                 )
                 self._backoff(transient_attempts - 1, rate_limited=rate_limited)
                 continue
-            return result
+            return self._traced(result, prompt, session_id)
 
-        return ClaudeResult(
-            text="", session_id=session_id, is_error=True,
-            error=last_error or "claude failed for an unknown reason",
+        return self._traced(
+            ClaudeResult(
+                text="", session_id=session_id, is_error=True,
+                error=last_error or "claude failed for an unknown reason",
+            ),
+            prompt, session_id,
         )
 
     # -- internals ---------------------------------------------------------
