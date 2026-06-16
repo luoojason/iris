@@ -13,7 +13,6 @@ docs/superpowers/specs/2026-06-14-proactive-design.md.
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -180,18 +179,10 @@ def run_proactive_tick(config, kind: str, *, now: float,
     if kind not in PROMPTS:
         return f"unknown-kind:{kind}"
 
-    try:
-        from .usage import CreditGuard
-        parked = CreditGuard.from_config(config).should_park()
-    except Exception:
-        parked = False  # a broken ledger must not silently license proactive runs... but
-        # the usage gate below still applies; park is only the extra backstop.
-
-    creds = config.proactive_creds_path or os.path.expanduser("~/.claude/.credentials.json")
-    fetcher = fetch or (lambda: fetch_weekly_utilization(read_oauth_token(creds)))
-    utilization = UsageCache(config.proactive_usage_cache).get(now, fetcher, CACHE_MAX_AGE)
-    if not proactive_allowed(utilization, parked, config.proactive_usage_max):
-        return f"skipped(util={utilization},parked={parked})"
+    from .leash import clock_work_allowed
+    allowed, reason = clock_work_allowed(config, now, fetch)
+    if not allowed:
+        return f"skipped({reason})"
 
     if agent is None:
         from .agent import Agent

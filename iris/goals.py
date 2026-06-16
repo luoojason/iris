@@ -214,27 +214,9 @@ class GoalStore:
 
 
 def _gate(config, now: float, fetch: Optional[Callable]) -> tuple[bool, str]:
-    """Reuse the proactive leash: headroom on the real weekly usage, unparked guard."""
-    from .proactive import (
-        UsageCache,
-        fetch_weekly_utilization,
-        proactive_allowed,
-        read_oauth_token,
-    )
-
-    try:
-        from .usage import CreditGuard
-        parked = CreditGuard.from_config(config).should_park()
-    except Exception:
-        # A broken ledger drops only the park backstop; the real weekly-usage gate
-        # below is then the sole leash (and an unknown usage value fails safe).
-        parked = False
-
-    creds = config.proactive_creds_path or os.path.expanduser("~/.claude/.credentials.json")
-    fetcher = fetch or (lambda: fetch_weekly_utilization(read_oauth_token(creds)))
-    utilization = UsageCache(config.proactive_usage_cache).get(now, fetcher)
-    allowed = proactive_allowed(utilization, parked, config.proactive_usage_max)
-    return allowed, f"util={utilization},parked={parked}"
+    """The shared clock-work leash: headroom on the real weekly usage, unparked guard."""
+    from .leash import clock_work_allowed
+    return clock_work_allowed(config, now, fetch)
 
 
 def parse_verdict(text: str) -> dict:
