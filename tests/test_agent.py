@@ -2,24 +2,11 @@
 
 from __future__ import annotations
 
+from fakes import FakeDriver, FakeStreamDriver
+
 from iris.agent import Agent
 from iris.driver import ClaudeResult
 from iris.sessions import SessionStore
-
-
-class FakeDriver:
-    """Records calls and returns queued results."""
-
-    def __init__(self, results, model=None):
-        self.results = list(results)
-        self.calls = []
-        self.model = model  # the driver's default model, read by the router
-
-    def run(self, prompt, session_id=None, model=None, conversation_id=None):
-        self.calls.append((prompt, session_id))
-        self.model_calls = getattr(self, "model_calls", [])
-        self.model_calls.append(model)
-        return self.results.pop(0)
 
 
 def test_respond_persists_new_session(tmp_path):
@@ -367,27 +354,6 @@ def test_empty_inbox_leaves_the_prompt_alone(tmp_path):
 async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
     from iris.inbox import Inbox
 
-    class FakeStreamTurn:
-        def __init__(self, result):
-            self._result = result
-            self.open = False
-            self.strays = []
-
-        def wait_primary(self, timeout=None):
-            return self._result
-
-        def wait_finished(self, timeout=None):
-            return True
-
-    class FakeStreamDriver:
-        def __init__(self, results):
-            self.results = list(results)
-            self.prompts = []
-
-        def start(self, prompt, session_id=None, model=None):
-            self.prompts.append(prompt)
-            return FakeStreamTurn(self.results.pop(0))
-
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
     box.append("job #3 finished: done", conversation_id="c1")
@@ -407,25 +373,6 @@ async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
 async def test_live_turn_records_a_turn_for_compaction(tmp_path):
     # The live path must feed the recent-turns buffer too, or its conversations
     # would never have material for the off-lock compaction summary.
-    class FakeStreamTurn:
-        def __init__(self, result):
-            self._result = result
-            self.open = False
-            self.strays = []
-
-        def wait_primary(self, timeout=None):
-            return self._result
-
-        def wait_finished(self, timeout=None):
-            return True
-
-    class FakeStreamDriver:
-        def __init__(self, results):
-            self.results = list(results)
-
-        def start(self, prompt, session_id=None, model=None):
-            return FakeStreamTurn(self.results.pop(0))
-
     store = SessionStore(tmp_path / "s.json")
     sd = FakeStreamDriver([ClaudeResult(text="the reply", session_id="s1", is_error=False)])
     agent = Agent(FakeDriver([]), store, stream_driver=sd)
@@ -440,27 +387,6 @@ async def test_live_turn_records_a_turn_for_compaction(tmp_path):
 
 async def test_live_turn_restores_inbox_on_error(tmp_path):
     from iris.inbox import Inbox
-
-    class FakeStreamTurn:
-        def __init__(self, result):
-            self._result = result
-            self.open = False
-            self.strays = []
-
-        def wait_primary(self, timeout=None):
-            return self._result
-
-        def wait_finished(self, timeout=None):
-            return True
-
-    class FakeStreamDriver:
-        def __init__(self, results):
-            self.results = list(results)
-            self.prompts = []
-
-        def start(self, prompt, session_id=None, model=None):
-            self.prompts.append(prompt)
-            return FakeStreamTurn(self.results.pop(0))
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
