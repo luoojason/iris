@@ -108,5 +108,7 @@ class Inbox:
             current = self._load()
             merged = [{"conversation_id": conversation_id, "text": t} for t in texts] + current
             if len(merged) > INBOX_CAP:
-                merged = merged[-INBOX_CAP:]
+                # Keep the front: the just-restored entries lead the list, so an
+                # over-cap trim must drop the oldest tail, not the fresh restore.
+                merged = merged[:INBOX_CAP]
             self._save(merged)

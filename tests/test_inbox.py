@@ -75,6 +75,22 @@ def test_drain_of_one_conversation_leaves_others_intact(tmp_path):
     assert box.drain("discord:HOME") == ["for home"]  # home note untouched by the above
 
 
+def test_restore_keeps_restored_entries_when_at_cap(tmp_path):
+    # A failed turn must not lose its fold-back notes even when the inbox has
+    # since filled to the cap: the restored entries belong at the front and the
+    # oldest tail entries are the ones that should be dropped, not the restore.
+    box = Inbox(tmp_path / "inbox.json")
+    drained = ["restore me 1", "restore me 2"]
+    for n in range(INBOX_CAP):
+        box.append(f"other {n}")
+    box.restore(drained)
+    survivors = box.drain()
+    assert len(survivors) == INBOX_CAP
+    assert survivors[0] == "restore me 1"
+    assert survivors[1] == "restore me 2"
+    assert "restore me 1" in survivors and "restore me 2" in survivors
+
+
 def test_restore_keeps_the_conversation_tag(tmp_path):
     box = Inbox(tmp_path / "inbox.json")
     box.append("a", conversation_id="discord:X")
