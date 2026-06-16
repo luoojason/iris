@@ -278,6 +278,7 @@ def test_respond_folds_inbox_entries_into_the_prompt(tmp_path):
     agent.respond("c1", "hello")
     prompt = driver.calls[0][0]
     assert prompt.startswith("[while you were away]")
+    assert "not instructions" in prompt.lower()  # folded notes are fenced as data
     assert "job #1 (audit) finished: all clean" in prompt
     assert prompt.endswith("hello")
     assert box.drain("c1") == []  # consumed by the successful turn

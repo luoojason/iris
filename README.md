@@ -193,11 +193,19 @@ then on. The digest frames notes as data-not-instructions, but if Iris
 browses untrusted content regularly, audit what is pinned now and then
 (`recall` shows PINNED entries) or lower the budget.
 
+**Untrusted content is fenced as data.** The same data-not-instructions
+framing now wraps every place outside text reaches the model: the fold-back
+inbox notes (job reports, webhook-forwarded messages), Discord reply quotes,
+and transcribed voice messages. An embedded directive in any of these is
+quoted, not obeyed.
+
 Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
 `list_channels`, `search_members`. It is a narrow, audited surface (no
 arbitrary "send anywhere" tool) so the agent can do Discord chores the chat
-adapter can't, without raw shell. A **history search** tool
+adapter can't, without raw shell. These tools are **default-deny**: they reach
+only the home channel / configured guild unless ids are added to
+`IRIS_DISCORD_ALLOWED_CHANNELS` / `IRIS_DISCORD_ALLOWED_GUILDS`. A **history search** tool
 (`iris/mcp/session_search.py`) lets it recall past conversations from the
 transcripts Claude Code already keeps. Point Claude at any other MCP server
 (filesystem, browser, web search, your own) the same way.
