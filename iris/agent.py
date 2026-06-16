@@ -66,6 +66,34 @@ def _memory_digest_supplier(path: str, max_bytes: int, guard=None):
     return supply
 
 
+def _jobs_digest_supplier(path: str, max_bytes: int, recent_secs: int, guard=None):
+    """A per-turn supplier of the active-jobs block for the system prompt.
+
+    Reads the job registry fresh each turn so any session — chat, proactive, or a
+    compaction-seeded one — sees what is already running and does not launch a
+    duplicate. Halves the budget while the credit guard is hot; never raises (a
+    missing or broken registry reads as no digest).
+    """
+    import json
+    from pathlib import Path
+
+    from .jobs import jobs_digest
+
+    def supply() -> str:
+        try:
+            jobs = json.loads(Path(path).read_text("utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(jobs, list):
+            return ""
+        budget = max_bytes
+        if guard is not None and guard.level() in ("tighten", "park"):
+            budget = max_bytes // 2
+        return jobs_digest(jobs, time.time(), budget, recent_secs)
+
+    return supply
+
+
 def _fold_prompt(entries: list[str], text: str) -> str:
     """Prefix a turn's prompt with the notes background work left behind."""
     notes = "\n".join(f"- {entry}" for entry in entries)
@@ -374,12 +402,23 @@ class Agent:
         inbox = Inbox(config.inbox_file)
         from .usage import CreditGuard
         guard = CreditGuard.from_config(config)
-        # The pinned-memory digest: tier-0 memory the model never has to ask
-        # for. Wired after the guard exists so a hot month shrinks the block.
+        # Tier-0 system-prompt blocks, read fresh every turn: the pinned-memory
+        # digest, and the active-jobs digest (so any session — chat, proactive, or
+        # a compaction-seeded one — sees what is already running and never launches
+        # a duplicate). Composed into the driver's single system_prompt_extra hook.
+        suppliers = []
         if config.memory_file and config.memory_digest_bytes > 0:
-            driver.system_prompt_extra = _memory_digest_supplier(
-                config.memory_file, config.memory_digest_bytes, guard
-            )
+            suppliers.append(_memory_digest_supplier(
+                config.memory_file, config.memory_digest_bytes, guard))
+        if config.jobs_enabled and config.jobs_digest_bytes > 0:
+            suppliers.append(_jobs_digest_supplier(
+                config.jobs_file, config.jobs_digest_bytes,
+                config.jobs_digest_recent_secs, guard))
+        if suppliers:
+            def _composite_extra() -> str:
+                parts = [s() for s in suppliers]
+                return "\n\n".join(p for p in parts if p)
+            driver.system_prompt_extra = _composite_extra
         return cls(
             driver,
             store,

@@ -448,6 +448,45 @@ def test_memory_digest_supplier_tolerates_a_broken_store(tmp_path):
     assert _memory_digest_supplier(str(corrupt), 2400)() == ""
 
 
+def test_jobs_digest_supplier_renders_active_jobs_and_tolerates_breakage(tmp_path):
+    import json as _json
+
+    from iris.agent import _jobs_digest_supplier
+
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(_json.dumps([
+        {"id": 27, "state": "running", "title": "Publish 5 parked Top-5 Shorts", "finished_ts": None},
+    ]), encoding="utf-8")
+    out = _jobs_digest_supplier(str(jobs), 600, 3600)()
+    assert "#27 [running] Publish 5 parked Top-5 Shorts" in out
+    # broken/missing registry -> empty, never raises
+    assert _jobs_digest_supplier(str(tmp_path / "absent.json"), 600, 3600)() == ""
+    corrupt = tmp_path / "bad.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    assert _jobs_digest_supplier(str(corrupt), 600, 3600)() == ""
+
+
+def test_from_config_composes_memory_and_active_jobs_digests(tmp_path):
+    import json as _json
+
+    from iris.config import Config
+
+    mem = tmp_path / "mem.json"
+    mem.write_text(_json.dumps([{"id": 1, "text": "owner prefers metric", "pinned": True}]), "utf-8")
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(_json.dumps([
+        {"id": 27, "state": "running", "title": "Publish 5 parked Top-5 Shorts", "finished_ts": None},
+    ]), encoding="utf-8")
+    cfg = Config(session_store_path=str(tmp_path / "s.json"), memory_file=str(mem),
+                 jobs_enabled=True, jobs_file=str(jobs))
+    agent = Agent.from_config(cfg)
+    block = agent.driver.system_prompt_extra()
+    # both tier-0 blocks present in one composed prompt extra — the regression guard:
+    # a turn now SEES the in-flight #27 and would not relaunch it.
+    assert "owner prefers metric" in block
+    assert "#27 [running] Publish 5 parked Top-5 Shorts" in block
+
+
 def test_memory_digest_supplier_halves_budget_when_hot(tmp_path):
     import json as _json
 

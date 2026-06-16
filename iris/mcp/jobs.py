@@ -63,7 +63,7 @@ def _kill_runner(pid) -> bool:
 
 @mcp.tool()
 def start_job(title: str, instructions: str, grants: str = "", workspace: str = "",
-              heavy: bool = False, after: int = 0) -> str:
+              heavy: bool = False, after: int = 0, force: bool = False) -> str:
     """Start a background job: one deep claude run, detached from this chat.
 
     Use it for work that takes minutes (audits, refactors, research). The job
@@ -84,6 +84,9 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
         after: Chain this job to run only after job #<after> finishes
             successfully. It waits until then (and is cancelled if that job
             fails). Use it to sequence dependent work.
+        force: Launch even if a near-identical job is already active or just
+            finished. Leave False; only set it when you truly mean to run the
+            same work again.
     """
     config = _config()
     if not config.jobs_enabled:
@@ -100,6 +103,16 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     # falling back to the home channel for non-Discord or unknown origins.
     origin = os.environ.get("IRIS_ORIGIN_CHANNEL") or config.home_channel
     store = _store()
+    # Soft de-dup: a near-identical job already running (or just finished) on this
+    # channel is almost always an accidental re-launch (see the #27/#28 double
+    # upload). Advisory, force-overridable — never a hard block on a real re-run.
+    if not force:
+        from iris.jobs import find_duplicate_job
+        dup = find_duplicate_job(store, title, origin)
+        if dup is not None:
+            return (f"A near-identical job #{dup['id']} ({dup.get('title')}) is already "
+                    f"{dup['state']}. Not launching a duplicate. Check it with job_status"
+                    f"({dup['id']}), or pass force=true if you really mean to run it again.")
     if workspace:
         if _workspaces().resolve(workspace) is None:
             names = ", ".join(_workspaces().list()) or "none registered"

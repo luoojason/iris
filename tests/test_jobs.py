@@ -275,6 +275,59 @@ def test_cancel_handles_a_waiting_job(tmp_path):
     assert "ancel" in out and store.get(1)["state"] == "cancelled"
 
 
+# -- active-jobs digest (tier-0 awareness so a turn can't duplicate work) -----
+
+def test_jobs_digest_lists_active_and_recently_finished():
+    from iris.jobs import jobs_digest
+    now = 1000.0
+    jobs = [
+        {"id": 27, "state": "running", "title": "Publish 5 parked Top-5 Shorts", "finished_ts": None},
+        {"id": 10, "state": "done", "title": "recent done", "finished_ts": now - 100},
+        {"id": 9, "state": "done", "title": "ancient done", "finished_ts": now - 99999},
+        {"id": 5, "state": "pending", "title": "queued one", "finished_ts": None},
+    ]
+    out = jobs_digest(jobs, now, max_bytes=600, recent_secs=3600)
+    assert "#27 [running] Publish 5 parked Top-5 Shorts" in out
+    assert "#5 [pending]" in out
+    assert "#10 [done] recent done" in out      # just-finished still visible
+    assert "ancient done" not in out            # old terminal omitted
+    assert "duplicate" in out.lower()           # the steering header is present
+
+
+def test_jobs_digest_empty_when_nothing_active_or_recent():
+    from iris.jobs import jobs_digest
+    assert jobs_digest([], 1000.0) == ""
+    # a long-finished terminal job alone -> nothing to show
+    assert jobs_digest([{"id": 1, "state": "done", "title": "x", "finished_ts": 0.0}], 1e9) == ""
+
+
+def test_jobs_digest_byte_budget_skips_long_lines():
+    from iris.jobs import jobs_digest
+    now = 1000.0
+    jobs = [{"id": 1, "state": "running", "title": "x" * 2000, "finished_ts": None},
+            {"id": 2, "state": "running", "title": "short one", "finished_ts": None}]
+    out = jobs_digest(jobs, now, max_bytes=220)
+    assert "short one" in out and "xxxx" not in out  # long line skipped, short kept
+    assert len(out.encode("utf-8")) <= 220
+
+
+def test_find_duplicate_job_matches_active_same_title_and_channel():
+    from iris.jobs import JobStore, find_duplicate_job
+
+    import os as _os
+    store = JobStore("/tmp/iris-dedup-test-%d.json" % _os.getpid())
+    store.add("Upload the 5 parked shorts", "i", ["subagents"], "", "chan-9", state="running")
+    store.add("totally different job", "i", ["subagents"], "", "chan-9", state="running")
+    # near-identical title on the same channel -> flagged
+    dup = find_duplicate_job(store, "upload the 5 PARKED shorts!", "chan-9")
+    assert dup is not None and dup["id"] == 1
+    # different channel -> not a duplicate
+    assert find_duplicate_job(store, "Upload the 5 parked shorts", "other-ch") is None
+    # unrelated title -> not a duplicate
+    assert find_duplicate_job(store, "build a new short", "chan-9") is None
+    _os.unlink(store.path)
+
+
 # -- silent job-death notification ------------------------------------------
 
 def _death_cfg(tmp_path, **kw):

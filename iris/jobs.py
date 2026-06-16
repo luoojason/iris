@@ -102,6 +102,81 @@ def extract_question(report: str) -> Optional[str]:
     return None
 
 
+_NONTERMINAL_STATES = ("pending", "running", "waiting", "parked", "needs_input")
+
+
+def jobs_digest(jobs: list[dict], now_ts: float, max_bytes: int = 600,
+                recent_secs: int = 3600) -> str:
+    """Render in-flight (and just-finished) jobs into a compact system-prompt block.
+
+    This is the tier-0 job awareness: injected every turn so any session (chat,
+    proactive, post-compaction) sees what is already running and does not launch a
+    duplicate. Includes non-terminal jobs plus terminal jobs finished within
+    ``recent_secs`` (so a job that just finished is still visible to a turn racing
+    behind it). Whole lines only, byte-budgeted like the pinned-memory digest;
+    returns "" when nothing qualifies or the budget is zero.
+    """
+    if max_bytes <= 0:
+        return ""
+    shown = []
+    for j in jobs:
+        if not isinstance(j, dict):
+            continue
+        state = j.get("state")
+        if state in _NONTERMINAL_STATES:
+            shown.append(j)
+        elif state in _TERMINAL_STATES:
+            fin = j.get("finished_ts")
+            if isinstance(fin, (int, float)) and (now_ts - fin) <= recent_secs:
+                shown.append(j)
+    if not shown:
+        return ""
+    # Active first, then most-recent id; so the live work is at the top.
+    shown.sort(key=lambda j: (j.get("state") in _TERMINAL_STATES, -int(j.get("id", 0))))
+    header = ("Background jobs (live state). Before you start a job, check this list "
+              "and do NOT launch one that duplicates a job already active or just finished:")
+    lines = [header]
+    used = len(header.encode("utf-8"))
+    for j in shown:
+        title = " ".join(str(j.get("title") or "").split())
+        line = f"- #{j.get('id')} [{j.get('state')}] {title}"
+        cost = len(line.encode("utf-8")) + 1
+        if used + cost > max_bytes:
+            continue
+        lines.append(line)
+        used += cost
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _normalize_title(title: str) -> set:
+    """Lowercase alphanumeric word set of a job title, for soft de-dup matching."""
+    return {w for w in re.findall(r"[a-z0-9]+", (title or "").lower()) if len(w) > 2}
+
+
+def find_duplicate_job(store: "JobStore", title: str, channel_id: str, *,
+                       recent_secs: int = 3600, now: Optional[float] = None) -> Optional[dict]:
+    """An active (or just-finished) job on the same channel whose title strongly
+    overlaps ``title``, or None. Soft signal for start_job de-dup; never a hard gate."""
+    now = time.time() if now is None else now
+    want = _normalize_title(title)
+    if not want:
+        return None
+    for j in store.all():
+        if j.get("channel_id") != channel_id:
+            continue
+        state = j.get("state")
+        if state in _TERMINAL_STATES:
+            fin = j.get("finished_ts")
+            if not (isinstance(fin, (int, float)) and (now - fin) <= recent_secs):
+                continue
+        elif state not in _NONTERMINAL_STATES:
+            continue
+        other = _normalize_title(j.get("title", ""))
+        if other and len(want & other) / len(want | other) >= 0.6:
+            return j
+    return None
+
+
 def parse_grants(spec: str) -> list[str]:
     """Parse a comma list of grant names, validating against GRANT_TOOLS."""
     names: list[str] = []

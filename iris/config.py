@@ -238,6 +238,13 @@ class Config:
     memory_file: str = "iris-memory.json"
     memory_digest_bytes: int = 2400
 
+    # The active-jobs digest: a tier-0 view of background jobs in flight (and just
+    # finished), injected into the system prompt every turn so any session (chat,
+    # proactive, post-compaction) sees what is already running and never launches a
+    # duplicate. Read fresh from the job store each turn. 0 disables it.
+    jobs_digest_bytes: int = 600
+    jobs_digest_recent_secs: int = 3600
+
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
@@ -365,6 +372,8 @@ class Config:
             tighten_factor=float(os.environ.get("IRIS_TIGHTEN_FACTOR", "3")),
             memory_file=os.environ.get("IRIS_MEMORY_FILE", "iris-memory.json"),
             memory_digest_bytes=int(os.environ.get("IRIS_MEMORY_DIGEST_BYTES", "2400")),
+            jobs_digest_bytes=int(os.environ.get("IRIS_JOBS_DIGEST_BYTES", "600")),
+            jobs_digest_recent_secs=int(os.environ.get("IRIS_JOBS_DIGEST_RECENT_SECS", "3600")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),

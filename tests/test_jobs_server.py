@@ -159,6 +159,19 @@ def test_resume_pending_with_a_live_runner_does_not_double_spawn(env):
     assert len(env["spawned"]) == before  # no second runner spawned
 
 
+def test_start_job_soft_dedup_blocks_near_identical_relaunch(env, monkeypatch):
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
+    srv.start_job("Upload the 5 parked shorts", "do it")
+    assert len(env["store"].all()) == 1
+    # a near-identical relaunch on the same channel is refused (advisory)
+    reply = srv.start_job("upload the 5 PARKED shorts now", "again")
+    assert "near-identical" in reply.lower() and "#1" in reply
+    assert len(env["store"].all()) == 1  # the duplicate was not recorded
+    # force=true is the deliberate override
+    srv.start_job("upload the 5 parked shorts", "again", force=True)
+    assert len(env["store"].all()) == 2
+
+
 def test_start_job_chained_after_another_waits(env):
     srv.start_job("A", "first")  # job 1, spawned
     reply = srv.start_job("B", "second", after=1)
