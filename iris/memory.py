@@ -90,6 +90,7 @@ def normalize(entry: dict) -> dict:
         use_count = max(0, int(entry.get("use_count", 0)))
     except (TypeError, ValueError):
         use_count = 0
+    conversation_id = entry.get("conversation_id")
     return {
         "id": entry.get("id"),
         "text": str(entry.get("text", "")),
@@ -99,7 +100,22 @@ def normalize(entry: dict) -> dict:
         "pinned": bool(entry.get("pinned", False)),
         "use_count": use_count,
         "last_used": entry.get("last_used"),
+        # The thread a note was saved in. None = global: a universal fact that
+        # applies in every conversation. A non-None id scopes the note to that
+        # one thread, so topic state from one thread cannot prime another.
+        "conversation_id": conversation_id if conversation_id else None,
     }
+
+
+def note_in_scope(note: dict, conversation_id: Optional[str]) -> bool:
+    """Whether a (normalized) note belongs in ``conversation_id``'s context.
+
+    A global note (no conversation_id) is always in scope. A thread-scoped note
+    is in scope only in its own thread, so a note saved while talking about one
+    topic never bleeds into an unrelated conversation.
+    """
+    note_cid = note.get("conversation_id")
+    return note_cid is None or note_cid == conversation_id
 
 
 def _recency_bonus(created_at: Optional[str], now_ts: float) -> float:
@@ -212,7 +228,8 @@ def score(entry: dict, query_tokens: list[str], now_ts: float,
     return s
 
 
-def pinned_digest(entries: list[dict], now_ts: float, max_bytes: int = 2400) -> str:
+def pinned_digest(entries: list[dict], now_ts: float, max_bytes: int = 2400,
+                  conversation_id: Optional[str] = None) -> str:
     """Render the pinned notes into a compact block for the system prompt.
 
     This is the always-loaded memory tier: pinned notes are the human floor of
@@ -220,10 +237,17 @@ def pinned_digest(entries: list[dict], now_ts: float, max_bytes: int = 2400) -> 
     Everything else stays behind the recall tool. Whole notes only — one that
     would overflow the byte budget is skipped so a smaller one can still fit.
     Returns "" when nothing is pinned or the budget is zero.
+
+    Scoped: only global notes and notes saved in ``conversation_id`` load, so a
+    pinned note about one thread's topic never primes a different conversation.
     """
     if max_bytes <= 0:
         return ""
-    pinned = [e for e in entries if isinstance(e, dict) and normalize(e)["pinned"]]
+    pinned = [
+        e for e in entries
+        if isinstance(e, dict) and normalize(e)["pinned"]
+        and note_in_scope(normalize(e), conversation_id)
+    ]
     if not pinned:
         return ""
     # Framed as data, not authority: these notes are model-written (and can

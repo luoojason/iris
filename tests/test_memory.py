@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from iris.memory import normalize, rank, relevance, score
+from iris.memory import note_in_scope, normalize, pinned_digest, rank, relevance, score
 
 NOW = datetime(2026, 6, 7, tzinfo=timezone.utc).timestamp()
 
@@ -13,6 +13,39 @@ def _note(id, text, tags=None, **extra):
     e = {"id": id, "text": text, "tags": tags or [], "created_at": "2026-06-01T00:00:00Z"}
     e.update(extra)
     return e
+
+
+def test_normalize_defaults_conversation_id_to_none():
+    # A legacy note (no conversation_id) is global: it applies in every thread.
+    assert normalize({"id": 1, "text": "hi"})["conversation_id"] is None
+    assert normalize({"id": 2, "text": "hi", "conversation_id": "c-123"})["conversation_id"] == "c-123"
+
+
+def test_note_in_scope_global_vs_conversation():
+    glob = normalize({"id": 1, "text": "Jason prefers metric units"})            # global
+    here = normalize({"id": 2, "text": "the repost plan", "conversation_id": "A"})  # thread A
+    # A global note is in scope everywhere, including an unknown/None context.
+    assert note_in_scope(glob, "A") and note_in_scope(glob, "B") and note_in_scope(glob, None)
+    # A thread-scoped note is in scope only in its own thread.
+    assert note_in_scope(here, "A") is True
+    assert note_in_scope(here, "B") is False
+    assert note_in_scope(here, None) is False
+
+
+def test_pinned_digest_excludes_other_threads_topic_notes():
+    now = NOW
+    notes = [
+        normalize({"id": 1, "text": "Jason's video workflow: delete and repost",
+                   "pinned": True, "conversation_id": "thread-repost"}),
+        normalize({"id": 2, "text": "Jason prefers terse replies", "pinned": True}),  # global
+    ]
+    # In a DIFFERENT thread, the repost note must NOT load; the global one must.
+    digest = pinned_digest(notes, now, 2400, conversation_id="thread-5unposted")
+    assert "delete and repost" not in digest      # the bleed is gone
+    assert "prefers terse replies" in digest       # universal facts still load
+    # In its own thread, the scoped note loads.
+    own = pinned_digest(notes, now, 2400, conversation_id="thread-repost")
+    assert "delete and repost" in own
 
 
 def test_normalize_fills_legacy_note():
