@@ -25,8 +25,14 @@ from typing import Optional
 
 import time as _time
 
-from iris.memory import DEFAULT_IMPORTANCE, normalize, rank
+from iris.memory import DEFAULT_IMPORTANCE, normalize, note_in_scope, rank
 from iris.statefile import JsonListStore
+
+
+def _current_conversation() -> Optional[str]:
+    """The thread this turn belongs to, passed by the driver after the IRIS_* strip.
+    None outside a Discord conversation (CLI, etc.), which means 'global'."""
+    return os.environ.get("IRIS_ORIGIN_CHANNEL") or None
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -79,7 +85,7 @@ def _fmt(entry: dict) -> str:
 
 @mcp.tool()
 def remember(text: str, tags: Optional[str] = None, importance: int = DEFAULT_IMPORTANCE,
-             pinned: bool = False) -> str:
+             pinned: bool = False, scope: str = "conversation") -> str:
     """Save a durable note. Use for facts, preferences, and context worth keeping.
 
     Args:
@@ -87,7 +93,12 @@ def remember(text: str, tags: Optional[str] = None, importance: int = DEFAULT_IM
         tags: Optional comma-separated tags to make recall easier.
         importance: 1-5, how much this should outrank other notes (default 3).
         pinned: Pin a note so it always surfaces near the top of recall.
+        scope: "conversation" (default) ties the note to THIS thread, so topic or
+            project state does not bleed into unrelated conversations. Use "global"
+            only for facts that are true everywhere (who Jason is, lasting
+            preferences) — those load in every thread.
     """
+    cid = None if scope == "global" else _current_conversation()
     with _locked():
         items = _load()
         next_id = max((int(i.get("id", 0)) for i in items), default=0) + 1
@@ -100,14 +111,16 @@ def remember(text: str, tags: Optional[str] = None, importance: int = DEFAULT_IM
             "pinned": bool(pinned),
             "use_count": 0,
             "last_used": None,
+            "conversation_id": cid,
         }
         items.append(entry)
         _save(items)
-    return f"Saved note #{next_id}."
+    where = "globally" if cid is None else "for this conversation"
+    return f"Saved note #{next_id} ({where})."
 
 
 @mcp.tool()
-def recall(query: Optional[str] = None, limit: int = 20) -> str:
+def recall(query: Optional[str] = None, limit: int = 20, scope: str = "conversation") -> str:
     """Recall saved notes, ranked by relevance, importance, recency, and pinning.
 
     Read-only: recall never changes a note's standing. When a recalled note
@@ -117,10 +130,19 @@ def recall(query: Optional[str] = None, limit: int = 20) -> str:
     Args:
         query: Optional words or tags to search for; omit to browse top notes.
         limit: Maximum number of notes to return.
+        scope: "conversation" (default) returns global notes plus this thread's
+            own, so an unrelated topic cannot surface here. Use "all" to search
+            across every conversation on purpose (e.g. "what do I know about X
+            anywhere").
     """
     items = _load()
     if not items:
         return "No notes saved yet."
+    if scope != "all":
+        cid = _current_conversation()
+        items = [i for i in items if note_in_scope(normalize(i), cid)]
+        if not items:
+            return "No matching notes."
     now = _time.time()
     ranked = rank(items, query, now, limit)
     if not ranked:

@@ -68,3 +68,37 @@ def test_corrupt_memory_file_is_quarantined(store, tmp_path):
     out = store.recall("anything")  # must not crash on a corrupt store
     assert isinstance(out, str)
     assert (tmp_path / "mem.json.corrupt").exists()
+
+
+def test_remember_scopes_to_the_current_thread_by_default(store, monkeypatch, tmp_path):
+    import json
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-A")
+    store.remember("the repost plan: delete then reupload")
+    saved = json.loads((tmp_path / "mem.json").read_text("utf-8"))
+    assert saved[0]["conversation_id"] == "thread-A"  # tagged with the thread
+
+
+def test_remember_global_scope_is_universal(store, monkeypatch, tmp_path):
+    import json
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-A")
+    store.remember("Jason prefers terse replies", scope="global")
+    saved = json.loads((tmp_path / "mem.json").read_text("utf-8"))
+    assert saved[0]["conversation_id"] is None  # global despite being saved in a thread
+
+
+def test_recall_does_not_leak_another_threads_notes(store, monkeypatch):
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-repost")
+    store.remember("delete and repost the old uploads")          # scoped to repost thread
+    store.remember("Jason prefers terse replies", scope="global")  # global
+    # Now we're in a DIFFERENT thread about the 5 unposted videos.
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-5unposted")
+    store.remember("there are 5 unposted videos in the queue")
+    out = store.recall("videos")
+    assert "5 unposted videos" in out               # this thread's note
+    assert "delete and repost" not in out           # the other thread's note stays out
+    # global notes are reachable from any thread (when they match the query)
+    assert "terse replies" in store.recall("terse")
+    # scope=all reaches across threads on demand
+    everything = store.recall("repost", scope="all")
+    assert "delete and repost" in everything
+    assert "delete and repost" not in store.recall("repost")  # but not by default
