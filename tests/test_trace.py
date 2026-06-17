@@ -119,6 +119,19 @@ def test_load_traces_missing_file_is_empty(tmp_path):
     assert load_traces(str(tmp_path / "absent.jsonl")) == []
 
 
+def test_render_digest_tolerates_a_record_missing_kind(tmp_path):
+    from iris.trace import render_digest, summarize_traces
+
+    # A corrupted/edited record with no 'kind' puts None in by_kind; sorting must
+    # not crash on mixed None/str keys.
+    s = summarize_traces([
+        {"kind": "chat", "is_error": False, "cost_usd": 0.1},
+        {"is_error": False, "cost_usd": 0.1},  # missing kind -> None
+    ])
+    text = render_digest(s, days=7)  # must not raise
+    assert "2 runs" in text
+
+
 def test_render_digest_is_readable_and_model_free(tmp_path):
     from iris.trace import render_digest, summarize_traces
 

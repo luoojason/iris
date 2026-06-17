@@ -153,6 +153,11 @@ def summarize_traces(records: list[dict]) -> dict:
     }
 
 
+def _sorted_items(counts: dict) -> list:
+    """Sort (key, count) pairs, tolerating a None key (a record missing the field)."""
+    return sorted(counts.items(), key=lambda kv: (kv[0] is None, str(kv[0])))
+
+
 def render_digest(summary: dict, days: Optional[int] = None) -> str:
     """A compact, model-free text digest of a trace summary, for the notify spine."""
     window = f" (last {days}d)" if days else ""
@@ -162,10 +167,10 @@ def render_digest(summary: dict, days: Optional[int] = None) -> str:
     lines = [f"Iris trace digest{window}: {runs} runs, {errors} errors ({rate:.0f}%)."]
     by_kind = summary.get("by_kind") or {}
     if by_kind:
-        lines.append("by kind: " + ", ".join(f"{k} {n}" for k, n in sorted(by_kind.items())))
+        lines.append("by kind: " + ", ".join(f"{k} {n}" for k, n in _sorted_items(by_kind)))
     by_error = summary.get("by_error_category") or {}
     if by_error:
-        lines.append("errors: " + ", ".join(f"{k} {n}" for k, n in sorted(by_error.items())))
+        lines.append("errors: " + ", ".join(f"{k} {n}" for k, n in _sorted_items(by_error)))
     cost = summary.get("total_cost_usd") or 0.0
     avg_ms = summary.get("avg_duration_ms")
     tail = [f"cost ${cost:.2f}", f"{summary.get('total_turns', 0)} model turns"]

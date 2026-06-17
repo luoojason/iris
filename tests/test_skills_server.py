@@ -50,3 +50,9 @@ def test_pending_cap_blocks_runaway_proposals(server, monkeypatch):
     out = server.propose_skill("another", _GOOD.replace("summarize", "another"), "r")
     assert "approve" in out.lower() or "pending" in out.lower()
     assert len(server.STORE.pending()) == 1
+
+
+def test_max_pending_survives_a_non_numeric_env(monkeypatch):
+    monkeypatch.setattr(srv, "MAX_PENDING", None)
+    monkeypatch.setenv("IRIS_SKILL_PROPOSALS_MAX", "10x")  # garbage
+    assert srv._max_pending() == 10  # falls back to the default, does not raise

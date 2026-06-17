@@ -42,7 +42,10 @@ def _max_pending() -> int:
     from iris.config import load_dotenv
 
     load_dotenv()
-    return int(os.environ.get("IRIS_SKILL_PROPOSALS_MAX", "10"))
+    try:
+        return int(os.environ.get("IRIS_SKILL_PROPOSALS_MAX", "10"))
+    except ValueError:
+        return 10  # a non-numeric override must not break the tool
 
 
 @mcp.tool()
