@@ -1102,6 +1102,50 @@ def test_job_driver_inherits_the_trace_config(tmp_path):
 # -- sandbox cleanup (D3): no /tmp leak across scheduled runs ----------------
 
 
+def test_write_browser_mcp_config_unlinks_on_write_failure(tmp_path, monkeypatch):
+    import os
+
+    import iris.jobs as jobs
+
+    created = {}
+    real_mkstemp = jobs.tempfile.mkstemp
+
+    def record(*a, **k):
+        fd, path = real_mkstemp(*a, **k)
+        created["path"] = path
+        return fd, path
+
+    monkeypatch.setattr(jobs.tempfile, "mkstemp", record)
+    monkeypatch.setattr(jobs.json, "dump", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    config = Config(jobs_enabled=True, browser_profile_dir=str(tmp_path / "p"))
+    with pytest.raises(OSError):
+        jobs.write_browser_mcp_config(config)
+    assert not os.path.exists(created["path"])  # the half-written stub is removed
+
+
+def test_build_job_driver_cleans_scratch_when_construction_fails(tmp_path, monkeypatch):
+    import os
+
+    import iris.jobs as jobs
+
+    created = {}
+    real_mkdtemp = jobs.tempfile.mkdtemp
+
+    def record(*a, **k):
+        d = real_mkdtemp(*a, **k)
+        created["dir"] = d
+        return d
+
+    monkeypatch.setattr(jobs.tempfile, "mkdtemp", record)
+    monkeypatch.setattr(jobs, "write_browser_mcp_config",
+                        lambda c: (_ for _ in ()).throw(ValueError("bad browser cmd")))
+    config = Config(jobs_enabled=True, browser_profile_dir=str(tmp_path / "p"))
+    with pytest.raises(ValueError):
+        jobs.build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    # the scratch dir allocated before the failure must not leak
+    assert not os.path.exists(created["dir"])
+
+
 def test_build_job_driver_tracks_scratch_cwd_for_cleanup(tmp_path):
     from iris.jobs import build_job_driver
 

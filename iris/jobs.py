@@ -609,8 +609,14 @@ def write_browser_mcp_config(config: Config) -> str:
         }
     }
     fd, path = tempfile.mkstemp(prefix="iris-job-mcp-", suffix=".json")
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(spec, handle, indent=2)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(spec, handle, indent=2)
+    except Exception:
+        # A write fault (e.g. a full disk) must not leave a half-written stub in
+        # /tmp; the caller registers this path for cleanup only after we return.
+        _remove_temp_paths([path])
+        raise
     return path
 
 
@@ -632,6 +638,18 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
     # Throwaway resources this driver owns and run_job must clean up afterwards.
     # A workspace is the owner's and is never listed here.
     temp_paths: list[str] = []
+    try:
+        return _build_job_driver(config, job, workspace_path, child_pid_callback, grants, temp_paths)
+    except Exception:
+        # Construction failed after allocating scratch/mcp temp files but before
+        # they were attached to the driver for run_job's finally to clean. Remove
+        # them here so a failed launch never leaks into /tmp.
+        _remove_temp_paths(temp_paths)
+        raise
+
+
+def _build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
+                      child_pid_callback, grants: list, temp_paths: list[str]) -> ClaudeDriver:
     if workspace_path:
         cwd = workspace_path
     else:
@@ -680,6 +698,19 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
     return driver
 
 
+def _remove_temp_paths(paths) -> None:
+    """Best-effort removal of throwaway scratch dirs / mcp config files. Non-raising."""
+    for path in paths or ():
+        try:
+            target = Path(path)
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not clean job sandbox path %s", path)
+
+
 def _cleanup_job_sandbox(driver) -> None:
     """Remove the throwaway scratch cwd and browser mcp config a job driver owns.
 
@@ -692,15 +723,7 @@ def _cleanup_job_sandbox(driver) -> None:
     """
     if driver is None:
         return
-    for path in getattr(driver, "_job_temp_paths", ()) or ():
-        try:
-            target = Path(path)
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
-            else:
-                target.unlink(missing_ok=True)
-        except OSError:
-            log.warning("could not clean job sandbox path %s", path)
+    _remove_temp_paths(getattr(driver, "_job_temp_paths", ()))
 
 
 def spawn_runner(job_id: int, *, store: Optional[JobStore] = None, popen=None) -> int:
