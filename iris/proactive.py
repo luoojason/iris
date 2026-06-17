@@ -13,10 +13,13 @@ docs/superpowers/specs/2026-06-14-proactive-design.md.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
+
+log = logging.getLogger("iris.proactive")
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 DEFAULT_THRESHOLD = 80.0
@@ -140,7 +143,12 @@ class UsageCache:
             return val  # fresh enough; do not hit the endpoint
         fresh = fetcher()
         if fresh is not None:
-            self._save(fresh, now)
+            try:
+                self._save(fresh, now)
+            except OSError:
+                # A read-only or full cache dir must not crash the cron tick that
+                # consults the leash; use the fresh value and re-save next time.
+                log.warning("could not write the usage cache at %s", self.path)
             return fresh
         return val  # refetch failed: fall back to last known (may be None)
 

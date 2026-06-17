@@ -87,6 +87,18 @@ def test_usage_cache_refetches_when_stale(tmp_path):
     assert val == 42.0
 
 
+def test_usage_cache_survives_a_write_failure(tmp_path):
+    # A read-only / full cache dir must not crash the cron tick: get() returns the
+    # fresh value even when it can't persist it.
+    cache = UsageCache(tmp_path / "cache.json")
+
+    def boom(*a, **k):
+        raise OSError("read-only filesystem")
+
+    cache._save = boom
+    assert cache.get(1000.0, lambda: 42.0) == 42.0  # fresh value used despite save failure
+
+
 def test_usage_cache_keeps_last_value_when_refetch_fails(tmp_path):
     cache = UsageCache(tmp_path / "u.json")
     cache.get(now=0.0, fetcher=lambda: 6.0)
