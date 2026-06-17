@@ -45,6 +45,7 @@ def test_error_is_surfaced_not_raised(monkeypatch):
 
 def test_list_channels_filters_to_text(monkeypatch):
     monkeypatch.delenv("IRIS_DISCORD_ALLOWED_GUILDS", raising=False)
+    monkeypatch.setenv("IRIS_DISCORD_GUILD_ID", "guild1")  # default-deny: name the guild
     monkeypatch.setattr(ds, "discord_request", lambda m, p, b=None: [
         {"name": "general", "id": "1", "type": 0},
         {"name": "Voice", "id": "2", "type": 2},  # voice, should be dropped
@@ -56,7 +57,7 @@ def test_list_channels_filters_to_text(monkeypatch):
 def test_channel_allowlist_blocks_other_channels(monkeypatch):
     monkeypatch.setenv("IRIS_DISCORD_ALLOWED_CHANNELS", "123")
     out = ds.fetch_messages(channel_id="999")  # not in the allowlist
-    assert "not in IRIS_DISCORD_ALLOWED_CHANNELS" in out
+    assert "IRIS_DISCORD_ALLOWED_CHANNELS" in out
 
 
 def test_channel_allowlist_admits_listed_channel(monkeypatch):
@@ -69,4 +70,46 @@ def test_channel_allowlist_admits_listed_channel(monkeypatch):
 def test_guild_allowlist_blocks_other_guilds(monkeypatch):
     monkeypatch.setenv("IRIS_DISCORD_ALLOWED_GUILDS", "g1")
     out = ds.list_channels("g2")
-    assert "not in IRIS_DISCORD_ALLOWED_GUILDS" in out
+    assert "IRIS_DISCORD_ALLOWED_GUILDS" in out
+
+
+def test_fetch_messages_default_denies_a_non_home_channel(monkeypatch):
+    # Default-deny: with a home channel but no explicit allowlist, an arbitrary
+    # channel must NOT be reachable (it would be a data-exfil primitive).
+    monkeypatch.setenv("IRIS_DISCORD_HOME_CHANNEL", "123")
+    monkeypatch.delenv("IRIS_DISCORD_ALLOWED_CHANNELS", raising=False)
+
+    def must_not_call(*a, **k):
+        raise AssertionError("must not reach the Discord API for a non-home channel")
+
+    monkeypatch.setattr(ds, "discord_request", must_not_call)
+    out = ds.fetch_messages(channel_id="999")
+    assert "IRIS_DISCORD_ALLOWED_CHANNELS" in out
+
+
+def test_list_channels_default_denies_a_non_configured_guild(monkeypatch):
+    monkeypatch.delenv("IRIS_DISCORD_GUILD_ID", raising=False)
+    monkeypatch.delenv("IRIS_DISCORD_ALLOWED_GUILDS", raising=False)
+
+    def must_not_call(*a, **k):
+        raise AssertionError("must not reach the Discord API for a non-configured guild")
+
+    monkeypatch.setattr(ds, "discord_request", must_not_call)
+    out = ds.list_channels("g2")
+    assert "IRIS_DISCORD_ALLOWED_GUILDS" in out
+
+
+def test_home_channel_is_allowed_without_an_explicit_allowlist(monkeypatch):
+    monkeypatch.setenv("IRIS_DISCORD_HOME_CHANNEL", "123")
+    monkeypatch.delenv("IRIS_DISCORD_ALLOWED_CHANNELS", raising=False)
+    monkeypatch.setattr(ds, "discord_request",
+                        lambda m, p, b=None: [{"author": {"username": "jay"}, "content": "hi"}])
+    assert "jay: hi" in ds.fetch_messages(channel_id="123")  # home is allowed by default
+
+
+def test_configured_guild_is_allowed_without_an_explicit_allowlist(monkeypatch):
+    monkeypatch.setenv("IRIS_DISCORD_GUILD_ID", "g1")
+    monkeypatch.delenv("IRIS_DISCORD_ALLOWED_GUILDS", raising=False)
+    monkeypatch.setattr(ds, "discord_request",
+                        lambda m, p, b=None: [{"name": "general", "id": "1", "type": 0}])
+    assert "#general" in ds.list_channels()  # the configured guild is allowed by default

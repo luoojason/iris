@@ -83,6 +83,10 @@ class Config:
     attachments_dir: str = "iris-attachments"
     # A directory of skill folders (each with SKILL.md) to make available to the brain.
     skills_dir: str = ""
+    # Staging area for Iris's proposed changes to her own skills. A proposal is
+    # never live until the owner runs `iris skills approve <id>`: self-modifying
+    # her own behavior is the highest-stakes action, so it is always owner-gated.
+    skill_proposals_file: str = "iris-skill-proposals.json"
     # Transcribe inbound voice messages locally (needs the [voice] extra). Off by
     # default: the first voice message downloads a whisper model and runs CPU
     # inference, which can be slow on small hosts.
@@ -107,7 +111,21 @@ class Config:
     job_timeout: float = 1800.0
     # Optional model/persona for job turns; empty falls back to the chat model.
     job_model: str = ""
+    # The model a job uses when the model flags it as genuinely hard (heavy=True):
+    # everyday tasks run on the cheaper base model, hard ones escalate to this.
+    job_model_heavy: str = "claude-opus-4-8"
     job_persona: str = ""
+    # Verification gate: before a finished job reports "done", an independent
+    # cheap model rules whether its report actually satisfies the instructions
+    # (it can only annotate, never suppress; a failed check flags the report).
+    # Off by default. Empty job_verify_model falls back to goal_judge_model.
+    job_verify_enabled: bool = False
+    job_verify_model: str = ""
+    # Pause-and-ask: a job that hits a fork it can't resolve may end a turn with a
+    # 'QUESTION:' line; the runner pauses it (state needs_input) and pings instead
+    # of guessing. The owner answers via resume_job(answer=...) and it resumes the
+    # same session. This caps how many times one job may pause, so it can't loop.
+    job_max_questions: int = 5
     # The browser job grant: how to launch the Playwright MCP server, and the
     # isolated profile directory it gets (never the owner's real browser
     # profile). Only used when a job is granted 'browser'.
@@ -135,6 +153,32 @@ class Config:
     resume_state_file: str = "iris-resume.state.json"
     resume_poll_secs: float = 20.0
 
+    # Proactive reviews (iris/proactive.py): assist (find work) and maintain
+    # (self-housekeeping) run on a cron. Off by default. Gated on the REAL weekly
+    # plan usage (the OAuth usage endpoint): a review runs only while seven-day
+    # utilization is under proactive_usage_max, with the credit-guard park as a
+    # hard backstop. creds path empty -> ~/.claude/.credentials.json at runtime.
+    proactive_enabled: bool = False
+    proactive_usage_max: float = 80.0
+    proactive_usage_cache: str = "iris-usage-weekly.json"
+    proactive_creds_path: str = ""
+
+    # The goal loop (iris/goals.py): a standing objective the clock advances one
+    # step at a time until it is done or needs the owner. Off by default; gated on
+    # the SAME real-weekly-usage leash as the proactive reviews (proactive_usage_*),
+    # so a goal step never crowds out Jason's own work. goals_max_steps is the
+    # default per-goal step budget; a goal may set its own. The judge model is a
+    # cheap, independent second model that rules on each step's reported progress.
+    goals_enabled: bool = False
+    goals_file: str = "iris-goals.json"
+    goals_max_steps: int = 20
+    goal_judge_model: str = "claude-haiku-4-5"
+    # When the judge rules a goal "done", an independent verifier turn (read-only)
+    # checks the actual work before it's accepted; an unconfirmed/erroring verify
+    # asks the owner instead of silently completing. Fires ONLY on a done verdict,
+    # so it adds at most one cheap call per goal completion, not per step.
+    goals_verify_done: bool = True
+
     # Scheduled jobs: the one place the clock may start work, and only work
     # the owner pre-recorded verbatim (see iris/schedules.py). Off by default,
     # gated separately from IRIS_JOBS. schedule_monthly_cap is the default
@@ -146,12 +190,37 @@ class Config:
     # The owner's wiki vault (Obsidian-style). Empty disables the wiki tools.
     wiki_dir: str = ""
 
+    # YouTube channel view-counts tool (channel_views): reads public view counts
+    # via yt-dlp, no browser. Empty channel disables it. yt_dlp_bin is the path to
+    # yt-dlp (the MCP server runs with a minimal PATH, so a full path is safest).
+    youtube_channel_id: str = ""
+    yt_dlp_bin: str = "yt-dlp"
+
     # Event wakes: owner-authored rules the reminders tick evaluates cheaply
     # (no model call, ever). The state file is tick-owned bookkeeping.
     wakes_file: str = "iris-wakes.json"
     wakes_state: str = "iris-wakes.state.json"
     # Per-fetch timeout for url / url_pattern wake kinds (the change watcher).
     wake_http_timeout: float = 15.0
+
+    # Webhook wakes: a small inbound HTTP listener that turns an authorized POST
+    # into a wake (a Discord ping + a fold-back inbox note), never a model call.
+    # Off by default. Bound to localhost by default; a mandatory shared token is
+    # required (the server refuses to run without one). The payload only ever
+    # becomes text in a note, never code and never a model prompt.
+    webhook_enabled: bool = False
+    webhook_bind: str = "127.0.0.1"
+    webhook_port: int = 8787
+    webhook_token: str = ""
+    webhook_channel: str = ""
+
+    # Quiet heartbeat: an owner-authored checklist of "should be true" conditions
+    # (disk free, a file is fresh, a URL is up) the reminders tick evaluates with
+    # no model call. Silent when healthy; one consolidated ping only when the set
+    # of failing checks changes. Inert until the checks file exists.
+    heartbeat_file: str = "iris-heartbeat.json"
+    heartbeat_state: str = "iris-heartbeat.state.json"
+    heartbeat_http_timeout: float = 15.0
 
     # Credit guard: the usage ledger always records; the budget (USD-estimate
     # per month, 0 = off) turns on threshold pings, job parking at park_at%,
@@ -169,10 +238,23 @@ class Config:
     memory_file: str = "iris-memory.json"
     memory_digest_bytes: int = 2400
 
+    # The active-jobs digest: a tier-0 view of background jobs in flight (and just
+    # finished), injected into the system prompt every turn so any session (chat,
+    # proactive, post-compaction) sees what is already running and never launches a
+    # duplicate. Read fresh from the job store each turn. 0 disables it.
+    jobs_digest_bytes: int = 600
+    jobs_digest_recent_secs: int = 3600
+
     session_store_path: str = "iris-sessions.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
     metrics_file: str = ""
+    # Trace ledger: append one structured record per claude -p invocation across
+    # every path (chat, job, proactive, goal, compaction) to this file. Opt-in.
+    # Content (prompt/reply/raw error) is captured only when trace_capture_content
+    # is true; by default only metadata + an error category are stored.
+    trace_file: str = ""
+    trace_capture_content: bool = False
 
     # Proactive notifications (iris watch). notify_channel is the Discord channel
     # or DM to ping; watch_min_seconds is the success-ping threshold so quick
@@ -205,6 +287,9 @@ class Config:
     # Backstop trigger: also compact after this many turns on one session, in
     # case usage tokens are ever unavailable. 0 disables it.
     compact_every: int = 60
+    # Recent (user, reply) pairs carried into a compaction summary. The summary
+    # runs on a fresh session seeded with these, off the conversation lock.
+    compact_seed_turns: int = 16
 
     @classmethod
     def from_env(cls, *, dotenv: str | os.PathLike[str] = ".env") -> "Config":
@@ -214,8 +299,8 @@ class Config:
             telegram_token=os.environ.get("IRIS_TELEGRAM_TOKEN", ""),
             allowed_user_ids=_split(os.environ.get("IRIS_ALLOWED_USER_IDS")),
             allowed_channel_ids=_split(os.environ.get("IRIS_ALLOWED_CHANNEL_IDS")),
-            respond_without_mention=_truthy(os.environ.get("IRIS_RESPOND_WITHOUT_MENTION")),
-            auto_thread=_truthy(os.environ.get("IRIS_AUTO_THREAD")),
+            respond_without_mention=_flag(os.environ.get("IRIS_RESPOND_WITHOUT_MENTION"), False),
+            auto_thread=_flag(os.environ.get("IRIS_AUTO_THREAD"), False),
             claude_bin=os.environ.get("IRIS_CLAUDE_BIN", "claude"),
             model=os.environ.get("IRIS_MODEL") or None,
             light_model=os.environ.get("IRIS_MODEL_LIGHT", ""),
@@ -231,7 +316,8 @@ class Config:
             add_dirs=_split(os.environ.get("IRIS_ADD_DIRS")),
             attachments_dir=os.environ.get("IRIS_ATTACHMENTS_DIR", "iris-attachments"),
             skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
-            voice_enabled=_truthy(os.environ.get("IRIS_VOICE")),
+            skill_proposals_file=os.environ.get("IRIS_SKILL_PROPOSALS_FILE", "iris-skill-proposals.json"),
+            voice_enabled=_flag(os.environ.get("IRIS_VOICE"), False),
             voice_model=os.environ.get("IRIS_VOICE_MODEL", "base"),
             workspaces_file=os.environ.get("IRIS_WORKSPACES_FILE", "iris-workspaces.json"),
             jobs_enabled=_flag(os.environ.get("IRIS_JOBS"), False),
@@ -241,7 +327,11 @@ class Config:
             jobs_keep=int(os.environ.get("IRIS_JOBS_KEEP", "50")),
             job_timeout=float(os.environ.get("IRIS_JOB_TIMEOUT", "1800")),
             job_model=os.environ.get("IRIS_JOB_MODEL", ""),
+            job_model_heavy=os.environ.get("IRIS_JOB_MODEL_HEAVY", "claude-opus-4-8"),
             job_persona=os.environ.get("IRIS_JOB_PERSONA", ""),
+            job_verify_enabled=_flag(os.environ.get("IRIS_JOB_VERIFY"), False),
+            job_verify_model=os.environ.get("IRIS_JOB_VERIFY_MODEL", ""),
+            job_max_questions=int(os.environ.get("IRIS_JOB_MAX_QUESTIONS", "5")),
             browser_mcp_cmd=os.environ.get(
                 "IRIS_BROWSER_MCP_CMD", "npx @playwright/mcp@latest --headless"),
             browser_profile_dir=os.environ.get(
@@ -257,13 +347,32 @@ class Config:
             resume_queue_file=os.environ.get("IRIS_RESUME_QUEUE_FILE", "iris-resume.json"),
             resume_state_file=os.environ.get("IRIS_RESUME_STATE", "iris-resume.state.json"),
             resume_poll_secs=float(os.environ.get("IRIS_RESUME_POLL_SECS", "20")),
+            proactive_enabled=_flag(os.environ.get("IRIS_PROACTIVE"), False),
+            proactive_usage_max=float(os.environ.get("IRIS_PROACTIVE_USAGE_MAX", "80")),
+            proactive_usage_cache=os.environ.get("IRIS_PROACTIVE_USAGE_CACHE", "iris-usage-weekly.json"),
+            proactive_creds_path=os.environ.get("IRIS_PROACTIVE_CREDS", ""),
+            goals_enabled=_flag(os.environ.get("IRIS_GOALS"), False),
+            goals_file=os.environ.get("IRIS_GOALS_FILE", "iris-goals.json"),
+            goals_max_steps=int(os.environ.get("IRIS_GOALS_MAX_STEPS", "20")),
+            goal_judge_model=os.environ.get("IRIS_GOAL_JUDGE_MODEL", "claude-haiku-4-5"),
+            goals_verify_done=_flag(os.environ.get("IRIS_GOALS_VERIFY_DONE"), True),
             scheduled_jobs_enabled=_flag(os.environ.get("IRIS_SCHEDULED_JOBS"), False),
             schedules_file=os.environ.get("IRIS_SCHEDULES_FILE", "iris-schedules.json"),
             schedule_monthly_cap=int(os.environ.get("IRIS_SCHEDULE_MONTHLY_CAP", "62")),
             wiki_dir=os.environ.get("IRIS_WIKI_DIR", ""),
+            youtube_channel_id=os.environ.get("IRIS_YOUTUBE_CHANNEL", ""),
+            yt_dlp_bin=os.environ.get("IRIS_YT_DLP_BIN", "yt-dlp"),
             wakes_file=os.environ.get("IRIS_WAKES_FILE", "iris-wakes.json"),
             wakes_state=os.environ.get("IRIS_WAKES_STATE", "iris-wakes.state.json"),
             wake_http_timeout=float(os.environ.get("IRIS_WAKE_HTTP_TIMEOUT", "15")),
+            webhook_enabled=_flag(os.environ.get("IRIS_WEBHOOK"), False),
+            webhook_bind=os.environ.get("IRIS_WEBHOOK_BIND", "127.0.0.1"),
+            webhook_port=int(os.environ.get("IRIS_WEBHOOK_PORT", "8787")),
+            webhook_token=os.environ.get("IRIS_WEBHOOK_TOKEN", ""),
+            webhook_channel=os.environ.get("IRIS_WEBHOOK_CHANNEL", ""),
+            heartbeat_file=os.environ.get("IRIS_HEARTBEAT_FILE", "iris-heartbeat.json"),
+            heartbeat_state=os.environ.get("IRIS_HEARTBEAT_STATE", "iris-heartbeat.state.json"),
+            heartbeat_http_timeout=float(os.environ.get("IRIS_HEARTBEAT_HTTP_TIMEOUT", "15")),
             usage_file=os.environ.get("IRIS_USAGE_FILE", "iris-usage.json"),
             usage_budget_usd=float(os.environ.get("IRIS_USAGE_BUDGET_USD", "0")),
             usage_tighten_at=float(os.environ.get("IRIS_USAGE_TIGHTEN_AT", "80")),
@@ -272,23 +381,24 @@ class Config:
             tighten_factor=float(os.environ.get("IRIS_TIGHTEN_FACTOR", "3")),
             memory_file=os.environ.get("IRIS_MEMORY_FILE", "iris-memory.json"),
             memory_digest_bytes=int(os.environ.get("IRIS_MEMORY_DIGEST_BYTES", "2400")),
+            jobs_digest_bytes=int(os.environ.get("IRIS_JOBS_DIGEST_BYTES", "600")),
+            jobs_digest_recent_secs=int(os.environ.get("IRIS_JOBS_DIGEST_RECENT_SECS", "3600")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
+            trace_file=os.environ.get("IRIS_TRACE_FILE", ""),
+            trace_capture_content=_flag(os.environ.get("IRIS_TRACE_CAPTURE_CONTENT"), False),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
             max_retries=int(os.environ.get("IRIS_MAX_RETRIES", "2")),
             retry_base_delay=float(os.environ.get("IRIS_RETRY_BASE_DELAY", "2")),
             timeout_max_retries=int(os.environ.get("IRIS_TIMEOUT_RETRIES", "0")),
-            live_interrupt=_truthy(os.environ.get("IRIS_LIVE_INTERRUPT")),
+            live_interrupt=_flag(os.environ.get("IRIS_LIVE_INTERRUPT"), False),
             stream_idle_timeout=float(os.environ.get("IRIS_STREAM_IDLE_TIMEOUT", "300")),
             stream_total_timeout=float(os.environ.get("IRIS_STREAM_TOTAL_TIMEOUT", "1800")),
             ack_delay=float(os.environ.get("IRIS_ACK_DELAY", "4")),
             compact_at_tokens=int(os.environ.get("IRIS_COMPACT_AT_TOKENS", "150000")),
             compact_every=int(os.environ.get("IRIS_COMPACT_EVERY", "60")),
+            compact_seed_turns=int(os.environ.get("IRIS_COMPACT_SEED_TURNS", "16")),
             notify_channel=os.environ.get("IRIS_NOTIFY_CHANNEL", ""),
             watch_min_seconds=float(os.environ.get("IRIS_WATCH_MIN_SECONDS", "30")),
             notify_persona=os.environ.get("IRIS_NOTIFY_PERSONA") or None,
         )
-
-
-def _truthy(value: Optional[str]) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}

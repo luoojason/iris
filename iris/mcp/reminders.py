@@ -33,7 +33,10 @@ def _max_pending() -> int:
     from iris.config import load_dotenv
 
     load_dotenv()
-    return int(os.environ.get("IRIS_REMINDERS_MAX_PENDING", "25"))
+    try:
+        return int(os.environ.get("IRIS_REMINDERS_MAX_PENDING", "25"))
+    except ValueError:
+        return 25  # a non-numeric override must not break the tool
 
 mcp = FastMCP("iris-reminders")
 

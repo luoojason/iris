@@ -19,21 +19,20 @@ Wire into Claude via an mcp config file (see examples/mcp.example.json):
 
 from __future__ import annotations
 
-import json
 import os
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 import time as _time
 
-from iris.memory import DEFAULT_IMPORTANCE, normalize, rank
+from iris.memory import DEFAULT_IMPORTANCE, normalize, note_in_scope, rank
+from iris.statefile import JsonListStore
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+
+def _current_conversation() -> Optional[str]:
+    """The thread this turn belongs to, passed by the driver after the IRIS_* strip.
+    None outside a Discord conversation (CLI, etc.), which means 'global'."""
+    return os.environ.get("IRIS_ORIGIN_CHANNEL") or None
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -50,38 +49,23 @@ MEMORY_FILE = Path(os.environ.get("IRIS_MEMORY_FILE", "iris-memory.json"))
 mcp = FastMCP("iris-memory")
 
 
-@contextmanager
+def _store() -> JsonListStore:
+    # Built per call from the module global so tests that monkeypatch MEMORY_FILE
+    # still hit the right path; a JsonListStore is a cheap stateless wrapper.
+    return JsonListStore(MEMORY_FILE, "memory")
+
+
 def _locked():
     """Hold an exclusive cross-process lock for a load-modify-save."""
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if fcntl is None:
-        yield
-        return
-    lock_path = MEMORY_FILE.with_suffix(MEMORY_FILE.suffix + ".lock")
-    with open(lock_path, "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+    return _store().locked()
 
 
 def _load() -> list[dict]:
-    if not MEMORY_FILE.exists():
-        return []
-    try:
-        data = json.loads(MEMORY_FILE.read_text("utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
+    return _store().load()
 
 
 def _save(items: list[dict]) -> None:
-    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=MEMORY_FILE.parent or ".", suffix=".tmp")
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(items, handle, indent=2, ensure_ascii=False)
-    os.replace(tmp, MEMORY_FILE)
+    _store().save(items)
 
 
 def _fmt(entry: dict) -> str:
@@ -101,7 +85,7 @@ def _fmt(entry: dict) -> str:
 
 @mcp.tool()
 def remember(text: str, tags: Optional[str] = None, importance: int = DEFAULT_IMPORTANCE,
-             pinned: bool = False) -> str:
+             pinned: bool = False, scope: str = "conversation") -> str:
     """Save a durable note. Use for facts, preferences, and context worth keeping.
 
     Args:
@@ -109,7 +93,12 @@ def remember(text: str, tags: Optional[str] = None, importance: int = DEFAULT_IM
         tags: Optional comma-separated tags to make recall easier.
         importance: 1-5, how much this should outrank other notes (default 3).
         pinned: Pin a note so it always surfaces near the top of recall.
+        scope: "conversation" (default) ties the note to THIS thread, so topic or
+            project state does not bleed into unrelated conversations. Use "global"
+            only for facts that are true everywhere (who Jason is, lasting
+            preferences) — those load in every thread.
     """
+    cid = None if scope == "global" else _current_conversation()
     with _locked():
         items = _load()
         next_id = max((int(i.get("id", 0)) for i in items), default=0) + 1
@@ -122,14 +111,16 @@ def remember(text: str, tags: Optional[str] = None, importance: int = DEFAULT_IM
             "pinned": bool(pinned),
             "use_count": 0,
             "last_used": None,
+            "conversation_id": cid,
         }
         items.append(entry)
         _save(items)
-    return f"Saved note #{next_id}."
+    where = "globally" if cid is None else "for this conversation"
+    return f"Saved note #{next_id} ({where})."
 
 
 @mcp.tool()
-def recall(query: Optional[str] = None, limit: int = 20) -> str:
+def recall(query: Optional[str] = None, limit: int = 20, scope: str = "conversation") -> str:
     """Recall saved notes, ranked by relevance, importance, recency, and pinning.
 
     Read-only: recall never changes a note's standing. When a recalled note
@@ -139,10 +130,19 @@ def recall(query: Optional[str] = None, limit: int = 20) -> str:
     Args:
         query: Optional words or tags to search for; omit to browse top notes.
         limit: Maximum number of notes to return.
+        scope: "conversation" (default) returns global notes plus this thread's
+            own, so an unrelated topic cannot surface here. Use "all" to search
+            across every conversation on purpose (e.g. "what do I know about X
+            anywhere").
     """
     items = _load()
     if not items:
         return "No notes saved yet."
+    if scope != "all":
+        cid = _current_conversation()
+        items = [i for i in items if note_in_scope(normalize(i), cid)]
+        if not items:
+            return "No matching notes."
     now = _time.time()
     ranked = rank(items, query, now, limit)
     if not ranked:

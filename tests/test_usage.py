@@ -237,7 +237,7 @@ def test_agent_records_chat_turns(tmp_path, monkeypatch):
     class FakeDriver:
         model = None
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             return result(cost=0.3)
 
     freeze_usage_clock(monkeypatch)
@@ -257,7 +257,7 @@ def test_agent_tightened_routing_uses_the_light_model(tmp_path):
     class FakeDriver:
         model = "strong"
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             calls.append(model)
             return result(cost=0.0)
 
@@ -281,7 +281,7 @@ def test_run_job_records_job_turns(tmp_path, monkeypatch):
     guard = CreditGuard.from_config(config)
 
     class FakeDriver:
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             return result(cost=0.7)
 
     from iris.inbox import Inbox
@@ -330,7 +330,7 @@ def test_watch_records_notify_turns(tmp_path, monkeypatch):
     )
 
     class FakeDriver:
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             return result(cost=0.1)
 
     sent = []

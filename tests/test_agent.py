@@ -2,24 +2,11 @@
 
 from __future__ import annotations
 
+from fakes import FakeDriver, FakeStreamDriver
+
 from iris.agent import Agent
 from iris.driver import ClaudeResult
 from iris.sessions import SessionStore
-
-
-class FakeDriver:
-    """Records calls and returns queued results."""
-
-    def __init__(self, results, model=None):
-        self.results = list(results)
-        self.calls = []
-        self.model = model  # the driver's default model, read by the router
-
-    def run(self, prompt, session_id=None, model=None):
-        self.calls.append((prompt, session_id))
-        self.model_calls = getattr(self, "model_calls", [])
-        self.model_calls.append(model)
-        return self.results.pop(0)
 
 
 def test_respond_persists_new_session(tmp_path):
@@ -96,7 +83,7 @@ def test_respond_serializes_same_conversation(tmp_path):
     class SlowDriver:
         model = None
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             with guard:
                 state["current"] += 1
                 state["max"] = max(state["max"], state["current"])
@@ -134,8 +121,8 @@ def test_compaction_summarizes_and_reseeds(tmp_path):
     driver = FakeDriver([
         ClaudeResult(text="reply 1", session_id="s1", is_error=False),
         ClaudeResult(text="reply 2", session_id="s1", is_error=False),
-        ClaudeResult(text="SUMMARY OF CHAT", session_id="s1", is_error=False),  # summary turn
-        ClaudeResult(text="ok", session_id="s2", is_error=False),               # fresh seeded session
+        ClaudeResult(text="SUMMARY OF CHAT", session_id=None, is_error=False),  # summary on a fresh session
+        ClaudeResult(text="ok", session_id="s2", is_error=False),              # fresh seeded session
     ])
     agent = Agent(driver, store, compact_every=2)
     agent.compact_async = False  # run compaction inline for a deterministic test
@@ -144,12 +131,67 @@ def test_compaction_summarizes_and_reseeds(tmp_path):
     assert store.turns("c1") == 1  # no compaction yet
     agent.respond("c1", "second")  # second turn crosses the threshold
 
-    # The old session was asked to summarize, and a fresh session was seeded.
     prompts = [p for p, _ in driver.calls]
-    assert any("Summarize our entire conversation" in p for p in prompts)
+    # The summary is built from the recent-turns buffer on a FRESH session, never
+    # by resuming the live one (so it needn't hold the conversation lock).
+    assert any("Summarize the conversation" in p for p in prompts)
+    summary_call = next(c for c in driver.calls if "Summarize the conversation" in c[0])
+    assert summary_call[1] is None  # a fresh session, not "s1"
+    assert "first" in summary_call[0] and "reply 1" in summary_call[0]
+    assert "second" in summary_call[0] and "reply 2" in summary_call[0]
     assert any("SUMMARY OF CHAT" in p for p in prompts)  # the summary seeded the new one
     assert store.get("c1") == "s2"  # now on the fresh session
     assert store.turns("c1") == 1   # counter reset for the new session
+
+
+def test_compaction_summary_runs_off_the_conversation_lock(tmp_path):
+    # D4: the summary must not hold the conversation lock, or a compaction-triggered
+    # turn blocks every incoming message on that conversation for up to turn_timeout.
+    # Proven deterministically: during the summary and seed model calls the
+    # conversation lock is free (a non-blocking acquire from this thread succeeds;
+    # the lock is non-reentrant, so it would fail if compaction held it).
+    store = SessionStore(tmp_path / "s.json")
+    free = {}
+
+    class ProbeDriver:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
+            self.calls.append((prompt, session_id))
+            if "open threads" in prompt:  # the summary call
+                got = agent._lock_for("c1").acquire(blocking=False)
+                free["summary"] = got
+                if got:
+                    agent._lock_for("c1").release()
+                return ClaudeResult(text="SUMMARY", session_id=None, is_error=False)
+            if "continues an earlier one" in prompt:  # the seed call
+                got = agent._lock_for("c1").acquire(blocking=False)
+                free["seed"] = got
+                if got:
+                    agent._lock_for("c1").release()
+                return ClaudeResult(text="ok", session_id="s2", is_error=False)
+            return ClaudeResult(text="reply", session_id="s1", is_error=False)
+
+    driver = ProbeDriver()
+    agent = Agent(driver, store, compact_every=1)
+    agent.compact_async = False
+    agent.respond("c1", "hello there")  # compact_every=1 triggers compaction this turn
+    assert free.get("summary") is True  # the fix: summary runs with the lock free
+    assert free.get("seed") is True
+    assert store.get("c1") == "s2"
+
+
+def test_compaction_skips_when_the_recent_turns_buffer_is_empty(tmp_path):
+    # Off-lock compaction summarizes the recent-turns buffer; with nothing buffered
+    # (e.g. right after a restart) it must skip rather than resume the live session.
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "s1")
+    driver = FakeDriver([])  # no model call should happen
+    agent = Agent(driver, store)
+    assert agent.compact("c1") is False
+    assert driver.calls == []
+    assert store.get("c1") == "s1"  # session untouched
 
 
 def test_compaction_triggers_on_context_tokens(tmp_path):
@@ -272,15 +314,16 @@ def test_respond_folds_inbox_entries_into_the_prompt(tmp_path):
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #1 (audit) finished: all clean")
+    box.append("job #1 (audit) finished: all clean", conversation_id="c1")
     driver = FakeDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)])
     agent = Agent(driver, store, inbox=box)
     agent.respond("c1", "hello")
     prompt = driver.calls[0][0]
     assert prompt.startswith("[while you were away]")
+    assert "not instructions" in prompt.lower()  # folded notes are fenced as data
     assert "job #1 (audit) finished: all clean" in prompt
     assert prompt.endswith("hello")
-    assert box.drain() == []  # consumed by the successful turn
+    assert box.drain("c1") == []  # consumed by the successful turn
 
 
 def test_failed_turn_restores_inbox_entries(tmp_path):
@@ -288,13 +331,13 @@ def test_failed_turn_restores_inbox_entries(tmp_path):
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #2 finished: report text")
+    box.append("job #2 finished: report text", conversation_id="c1")
     driver = FakeDriver([ClaudeResult(text="", session_id=None, is_error=True, error="boom")])
     agent = Agent(driver, store, inbox=box)
     result = agent.respond("c1", "hello")
     assert result.is_error
     # a flaky turn must not eat the report; it comes back next turn
-    assert box.drain() == ["job #2 finished: report text"]
+    assert box.drain("c1") == ["job #2 finished: report text"]
 
 
 def test_empty_inbox_leaves_the_prompt_alone(tmp_path):
@@ -311,30 +354,9 @@ def test_empty_inbox_leaves_the_prompt_alone(tmp_path):
 async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
     from iris.inbox import Inbox
 
-    class FakeStreamTurn:
-        def __init__(self, result):
-            self._result = result
-            self.open = False
-            self.strays = []
-
-        def wait_primary(self, timeout=None):
-            return self._result
-
-        def wait_finished(self, timeout=None):
-            return True
-
-    class FakeStreamDriver:
-        def __init__(self, results):
-            self.results = list(results)
-            self.prompts = []
-
-        def start(self, prompt, session_id=None, model=None):
-            self.prompts.append(prompt)
-            return FakeStreamTurn(self.results.pop(0))
-
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #3 finished: done")
+    box.append("job #3 finished: done", conversation_id="c1")
     sd = FakeStreamDriver([ClaudeResult(text="hi", session_id="s1", is_error=False)])
     agent = Agent(FakeDriver([]), store, stream_driver=sd, inbox=box)
     turn = agent.live_turn("c1", "hello")
@@ -345,36 +367,30 @@ async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
     assert sd.prompts[0].startswith("[while you were away]")
     assert "job #3 finished: done" in sd.prompts[0]
     assert sd.prompts[0].endswith("hello")
-    assert box.drain() == []
+    assert box.drain("c1") == []
+
+
+async def test_live_turn_records_a_turn_for_compaction(tmp_path):
+    # The live path must feed the recent-turns buffer too, or its conversations
+    # would never have material for the off-lock compaction summary.
+    store = SessionStore(tmp_path / "s.json")
+    sd = FakeStreamDriver([ClaudeResult(text="the reply", session_id="s1", is_error=False)])
+    agent = Agent(FakeDriver([]), store, stream_driver=sd)
+    turn = agent.live_turn("c1", "remember the EUDR deadline")
+    await turn.begin()
+    await turn.result()
+    await turn.aftermath()
+    transcript = agent._recent_transcript("c1")
+    assert "remember the EUDR deadline" in transcript  # the raw user message
+    assert "the reply" in transcript
 
 
 async def test_live_turn_restores_inbox_on_error(tmp_path):
     from iris.inbox import Inbox
 
-    class FakeStreamTurn:
-        def __init__(self, result):
-            self._result = result
-            self.open = False
-            self.strays = []
-
-        def wait_primary(self, timeout=None):
-            return self._result
-
-        def wait_finished(self, timeout=None):
-            return True
-
-    class FakeStreamDriver:
-        def __init__(self, results):
-            self.results = list(results)
-            self.prompts = []
-
-        def start(self, prompt, session_id=None, model=None):
-            self.prompts.append(prompt)
-            return FakeStreamTurn(self.results.pop(0))
-
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #4 finished: report")
+    box.append("job #4 finished: report", conversation_id="c1")
     sd = FakeStreamDriver([
         ClaudeResult(text="", session_id=None, is_error=True, error="boom"),
     ])
@@ -384,7 +400,7 @@ async def test_live_turn_restores_inbox_on_error(tmp_path):
     result = await turn.result()
     await turn.aftermath()
     assert result.is_error
-    assert box.drain() == ["job #4 finished: report"]
+    assert box.drain("c1") == ["job #4 finished: report"]
 
 
 def test_raising_driver_restores_inbox_entries(tmp_path):
@@ -398,16 +414,16 @@ def test_raising_driver_restores_inbox_entries(tmp_path):
     class RaisingDriver:
         model = None
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             raise ClaudeError("claude binary not found")
 
     store = SessionStore(tmp_path / "s.json")
     box = Inbox(tmp_path / "inbox.json")
-    box.append("job #5 finished: do not lose me")
+    box.append("job #5 finished: do not lose me", conversation_id="c1")
     agent = Agent(RaisingDriver(), store, inbox=box)
     with pytest.raises(ClaudeError):
         agent.respond("c1", "hello")
-    assert box.drain() == ["job #5 finished: do not lose me"]
+    assert box.drain("c1") == ["job #5 finished: do not lose me"]
 
 
 def test_from_config_wires_standing_orders(tmp_path):
@@ -438,6 +454,29 @@ def test_from_config_wires_the_pinned_memory_digest(tmp_path):
     assert "unpinned chatter" not in block
 
 
+def test_pinned_digest_is_scoped_to_the_current_conversation(tmp_path):
+    import json as _json
+
+    from iris.config import Config
+
+    mem = tmp_path / "mem.json"
+    mem.write_text(_json.dumps([
+        {"id": 1, "text": "owner prefers metric", "pinned": True},                     # global
+        {"id": 2, "text": "the repost plan for the channel", "pinned": True,
+         "conversation_id": "111"},                                                    # thread 111 only
+    ]), encoding="utf-8")
+    cfg = Config(session_store_path=str(tmp_path / "s.json"), memory_file=str(mem))
+    agent = Agent.from_config(cfg)
+
+    # Responding in a DIFFERENT thread: the global note loads, the 111 note does not.
+    in_222 = agent.driver.system_prompt_extra("discord:222")
+    assert "owner prefers metric" in in_222
+    assert "repost plan" not in in_222
+    # In its own thread, the scoped note loads.
+    in_111 = agent.driver.system_prompt_extra("discord:111")
+    assert "repost plan" in in_111
+
+
 def test_memory_digest_supplier_tolerates_a_broken_store(tmp_path):
     from iris.agent import _memory_digest_supplier
 
@@ -446,6 +485,45 @@ def test_memory_digest_supplier_tolerates_a_broken_store(tmp_path):
     corrupt = tmp_path / "bad.json"
     corrupt.write_text("{not json", encoding="utf-8")
     assert _memory_digest_supplier(str(corrupt), 2400)() == ""
+
+
+def test_jobs_digest_supplier_renders_active_jobs_and_tolerates_breakage(tmp_path):
+    import json as _json
+
+    from iris.agent import _jobs_digest_supplier
+
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(_json.dumps([
+        {"id": 27, "state": "running", "title": "Publish 5 parked Top-5 Shorts", "finished_ts": None},
+    ]), encoding="utf-8")
+    out = _jobs_digest_supplier(str(jobs), 600, 3600)()
+    assert "#27 [running] Publish 5 parked Top-5 Shorts" in out
+    # broken/missing registry -> empty, never raises
+    assert _jobs_digest_supplier(str(tmp_path / "absent.json"), 600, 3600)() == ""
+    corrupt = tmp_path / "bad.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    assert _jobs_digest_supplier(str(corrupt), 600, 3600)() == ""
+
+
+def test_from_config_composes_memory_and_active_jobs_digests(tmp_path):
+    import json as _json
+
+    from iris.config import Config
+
+    mem = tmp_path / "mem.json"
+    mem.write_text(_json.dumps([{"id": 1, "text": "owner prefers metric", "pinned": True}]), "utf-8")
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(_json.dumps([
+        {"id": 27, "state": "running", "title": "Publish 5 parked Top-5 Shorts", "finished_ts": None},
+    ]), encoding="utf-8")
+    cfg = Config(session_store_path=str(tmp_path / "s.json"), memory_file=str(mem),
+                 jobs_enabled=True, jobs_file=str(jobs))
+    agent = Agent.from_config(cfg)
+    block = agent.driver.system_prompt_extra()
+    # both tier-0 blocks present in one composed prompt extra — the regression guard:
+    # a turn now SEES the in-flight #27 and would not relaunch it.
+    assert "owner prefers metric" in block
+    assert "#27 [running] Publish 5 parked Top-5 Shorts" in block
 
 
 def test_memory_digest_supplier_halves_budget_when_hot(tmp_path):
@@ -481,7 +559,7 @@ def test_respond_skips_the_session_write_after_a_reset(tmp_path):
         def __init__(self, agent_box):
             self.agent_box = agent_box
 
-        def run(self, prompt, session_id=None, model=None):
+        def run(self, prompt, session_id=None, model=None, conversation_id=None):
             self.agent_box[0].reset("c1")  # the user reset mid-turn
             return ClaudeResult(text="hi", session_id="brand-new", is_error=False)
 

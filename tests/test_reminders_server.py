@@ -60,3 +60,9 @@ def test_pending_cap_reads_the_env_lazily(server, monkeypatch):
     out = srv.schedule_reminder("second", "+30m")
     assert "Cancel some" in out
     assert len(srv.STORE.all()) == 1
+
+
+def test_max_pending_survives_a_non_numeric_env(monkeypatch):
+    monkeypatch.setattr(srv, "MAX_PENDING", None)
+    monkeypatch.setenv("IRIS_REMINDERS_MAX_PENDING", "lots")  # garbage
+    assert srv._max_pending() == 25  # falls back to the default, does not raise

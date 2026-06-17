@@ -55,8 +55,13 @@ class _Spinner:
             sys.stdout.flush()
 
 
-def doctor(config: Config, probe: bool = True) -> int:
-    """Verify the claude binary is present and actually signed in."""
+def doctor(config: Config, probe: bool = True, fix: bool = False) -> int:
+    """Verify the claude binary is present and actually signed in.
+
+    With ``fix`` it also performs safe, mechanical repairs (no config changes):
+    flips crashed job runners to failed so they stop holding a slot, and prunes
+    old terminal jobs past IRIS_JOBS_KEEP.
+    """
     path = shutil.which(config.claude_bin)
     if not path:
         print(f"claude binary not found: {config.claude_bin!r}")
@@ -126,6 +131,12 @@ def doctor(config: Config, probe: bool = True) -> int:
             print(line)
     except Exception as exc:
         print(f"wakes: could not validate the rules file ({exc})")
+    try:
+        from .heartbeat import doctor_lines as heartbeat_doctor_lines
+        for line in heartbeat_doctor_lines(config):
+            print(line)
+    except Exception as exc:
+        print(f"heartbeat: could not validate the checks file ({exc})")
     if config.usage_budget_usd > 0:
         try:
             from .usage import UsageLedger, level_for, percent_used
@@ -167,6 +178,31 @@ def doctor(config: Config, probe: bool = True) -> int:
             print("WARNING: IRIS_AUTO_RESUME is on but IRIS_DISCORD_HOME_CHANNEL is")
             print("  empty, so a finished background task has nowhere to resume and")
             print("  auto-resume will silently do nothing. Set the home channel.")
+    if config.goals_enabled:
+        from .goals import GoalStore
+        active = len(GoalStore(config.goals_file).active())
+        print(f"goals: on ({active} active, judge {config.goal_judge_model}, "
+              f"gated on weekly usage < {config.proactive_usage_max:.0f}%)")
+        if not config.home_channel:
+            print("  NOTE: IRIS_DISCORD_HOME_CHANNEL is empty; a goal set outside a "
+                  "thread has nowhere to report.")
+    if config.job_verify_enabled and not config.jobs_enabled:
+        print("WARNING: IRIS_JOB_VERIFY is on but IRIS_JOBS is off, so no job ever runs")
+        print("  and the verification gate never fires. Enable IRIS_JOBS or turn it off.")
+    if (config.goals_enabled or config.proactive_enabled) and config.usage_budget_usd <= 0:
+        print("NOTE: self-started work is on (IRIS_GOALS/IRIS_PROACTIVE) but")
+        print("  IRIS_USAGE_BUDGET_USD is 0, so the credit-guard park backstop is")
+        print("  disarmed. The weekly-usage gate still bounds it; set a budget to arm park.")
+    if config.webhook_enabled:
+        if not config.webhook_token:
+            print("WARNING: IRIS_WEBHOOK is on but IRIS_WEBHOOK_TOKEN is empty; the")
+            print("  listener will refuse to start (an unauthenticated webhook is unsafe).")
+        elif config.webhook_bind in ("0.0.0.0", "::"):
+            print(f"WARNING: the webhook listener binds {config.webhook_bind} (all")
+            print("  interfaces). Bind 127.0.0.1 or a tailnet address unless you intend")
+            print("  to expose it; it is token-checked but still an inbound surface.")
+        else:
+            print(f"webhook: on ({config.webhook_bind}:{config.webhook_port}, token set)")
     if config.mcp_config and config.permission_mode == "default" and not config.allowed_tools:
         print("WARNING: an MCP config is set but IRIS_ALLOWED_TOOLS is empty under")
         print("  permission mode 'default'. The agent's tool calls will be SILENTLY")
@@ -176,6 +212,15 @@ def doctor(config: Config, probe: bool = True) -> int:
         print("WARNING: IRIS_ALLOWED_USER_IDS is empty, so a network transport will")
         print("  answer ANYONE who can reach it (any DM sender, any group member).")
         print("  A personal subscription is single-user only; set it to your own id.")
+    if fix:
+        if config.jobs_enabled:
+            from .jobs import JobStore, repair_dead_runners
+            store = JobStore(config.jobs_file, keep=config.jobs_keep)
+            repaired = repair_dead_runners(store)
+            pruned = store.prune(config.jobs_keep)
+            print(f"fix: repaired {repaired} dead job runner(s), pruned {pruned} old job(s).")
+        else:
+            print("fix: nothing to repair (background jobs are off).")
     print("Run 'python -m iris chat' to talk to it, or 'python -m iris' for Discord.")
     return 0
 
@@ -250,6 +295,17 @@ def reminders_tick(config: Config) -> int:
         print(tick_schedules(config))
     except Exception as exc:
         print(f"schedules tick failed: {exc}")
+    try:
+        from .heartbeat import tick_heartbeat
+        print(tick_heartbeat(config))
+    except Exception as exc:
+        print(f"heartbeat tick failed: {exc}")
+    if config.jobs_enabled:
+        try:
+            from .jobs import notify_dead_jobs
+            print(f"dead-jobs: {notify_dead_jobs(config)} notified")
+        except Exception as exc:
+            print(f"dead-jobs sweep failed: {exc}")
     return 0
 
 
@@ -258,6 +314,27 @@ def usage_cmd(config: Config) -> int:
     from .usage import summary_text
 
     print(summary_text(config))
+    return 0
+
+
+def trace_cmd(config: Config, *, days: int = 7, as_json: bool = False, now=None) -> int:
+    """Digest the trace ledger over a window: runs, errors by category, cost, latency.
+
+    Model-free, so a scheduled owner-authored job can render and deliver it through
+    the notify spine. ``now`` is injectable for tests.
+    """
+    import json as _json
+    import time as _time
+
+    from .trace import load_traces, render_digest, summarize_traces
+
+    if not config.trace_file:
+        print("No trace ledger configured (set IRIS_TRACE_FILE).")
+        return 0
+    now = _time.time() if now is None else now
+    since = now - days * 86400
+    summary = summarize_traces(load_traces(config.trace_file, since_ts=since))
+    print(_json.dumps(summary, indent=2) if as_json else render_digest(summary, days=days))
     return 0
 
 
@@ -335,6 +412,131 @@ def schedule_cmd(config: Config, args) -> int:
     return 0
 
 
+def heartbeat_cmd(config: Config) -> int:
+    """Show the current status of the health checklist (read-only; no ping, no model)."""
+    import time
+    from pathlib import Path
+
+    from .heartbeat import _evaluate, load_checks, validate_checks
+
+    path = Path(config.heartbeat_file)
+    if not path.exists():
+        print("No heartbeat checks. Author IRIS_HEARTBEAT_FILE with a JSON list of "
+              "checks (disk_free, file_fresh, url_ok) to get a silent-by-default "
+              "health watch.")
+        return 0
+    checks, problem = load_checks(path)
+    if problem:
+        print(f"heartbeat: {problem}")
+        return 1
+    now = time.time()
+    for check in checks:
+        name = check.get("name") if isinstance(check, dict) else "check"
+        problems = validate_checks([check])
+        if problems:
+            print(f"{name}: invalid ({problems[0]})")
+            continue
+        ok, detail = _evaluate(check, now=now, http_timeout=config.heartbeat_http_timeout)
+        print(f"{name}: ok" if ok else f"{name}: FAIL: {detail}")
+    return 0
+
+
+def goals_cmd(config: Config, args) -> int:
+    """Owner-side view and steering of the standing goals the tick advances."""
+    import time
+
+    from .goals import GoalStore
+
+    store = GoalStore(config.goals_file)
+    action = getattr(args, "goals_action", None) or "list"
+    if action == "cancel":
+        goal = store.get(args.goal_id)
+        if goal is None:
+            print(f"No goal #{args.goal_id}.")
+            return 1
+        store.transition(args.goal_id, "cancelled", time.time())
+        print(f"Cancelled goal #{args.goal_id}: {goal['text']}")
+        return 0
+    goals = store.all()
+    if not goals:
+        print("No goals set. Iris records them when you give her one to pursue.")
+        return 0
+    for g in goals:
+        if g.get("status") == "active":
+            print(f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}")
+        else:
+            print(f"#{g['id']} [{g.get('status')}]: {g['text']}")
+    if not config.goals_enabled:
+        print("(IRIS_GOALS is off: nothing advances.)")
+    return 0
+
+
+def skills_cmd(config: Config, args) -> int:
+    """Owner-side review and approval of Iris's proposed changes to her own skills.
+
+    A proposal is staged by the model (propose_skill / the maintain review) but
+    only becomes live behavior here, on an explicit approve: self-modification is
+    always owner-gated.
+    """
+    import time
+
+    from .skills import SkillProposalStore, apply_proposal
+
+    store = SkillProposalStore(config.skill_proposals_file)
+    action = getattr(args, "skills_action", None)
+
+    if action == "show":
+        p = store.get(args.proposal_id)
+        if p is None:
+            print(f"No skill proposal #{args.proposal_id}.")
+            return 1
+        print(f"Proposal #{p['id']} [{p.get('status')}] {p.get('kind')} '{p['name']}'")
+        print(f"rationale: {(p.get('rationale') or '').strip()}")
+        print("--- SKILL.md ---")
+        print(p.get("content", ""))
+        return 0
+
+    if action == "approve":
+        p = store.get(args.proposal_id)
+        if p is None:
+            print(f"No skill proposal #{args.proposal_id}.")
+            return 1
+        if p.get("status") != "pending":
+            print(f"Skill proposal #{p['id']} was already {p.get('status')}; "
+                  "nothing to approve.")
+            return 2
+        if not config.skills_dir:
+            print("Set IRIS_SKILLS_DIR first: that's the directory an approved skill "
+                  "is written into and linked from.")
+            return 2
+        try:
+            path = apply_proposal(p, config.skills_dir)
+        except ValueError as exc:
+            print(f"skills approve: {exc}")
+            return 2
+        store.transition(args.proposal_id, "approved", time.time())
+        print(f"Approved skill #{p['id']} ('{p['name']}') -> {path}. It is now live.")
+        return 0
+
+    if action == "reject":
+        if store.transition(args.proposal_id, "rejected", time.time()) is None:
+            print(f"No skill proposal #{args.proposal_id}.")
+            return 1
+        print(f"Rejected skill proposal #{args.proposal_id}.")
+        return 0
+
+    # "pending" (and any unrecognized action) -> list staged proposals
+    items = store.pending()
+    if not items:
+        print("No pending skill proposals. Iris stages them here when she proposes a "
+              "change to her own skills; review with 'iris skills show <id>'.")
+        return 0
+    for p in items:
+        print(f"#{p['id']} {p.get('kind')} '{p['name']}': {(p.get('rationale') or '').strip()[:140]}")
+    print("Approve with 'iris skills approve <id>' (or reject <id>); show <id> for the full text.")
+    return 0
+
+
 def skills(config: Config) -> int:
     """List the skills the agent can use (and link IRIS_SKILLS_DIR if set)."""
     from .skills import discover, link_skills
@@ -363,9 +565,28 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("chat", help="plain terminal REPL")
     doctor_parser = sub.add_parser("doctor", help="check that claude is installed and signed in")
     doctor_parser.add_argument("--no-probe", action="store_true", help="skip the metered sign-in test call")
-    sub.add_parser("skills", help="list the skills the agent can use")
+    doctor_parser.add_argument("--fix", action="store_true", help="also do safe mechanical repairs (dead job runners, prune old jobs)")
+    skills_parser = sub.add_parser("skills", help="list skills; review/approve Iris's proposed skill changes")
+    skills_sub = skills_parser.add_subparsers(dest="skills_action")
+    skills_sub.add_parser("pending", help="list staged skill proposals")
+    for act in ("show", "approve", "reject"):
+        p = skills_sub.add_parser(act, help=f"{act} a skill proposal by id")
+        p.add_argument("proposal_id", type=int)
     sub.add_parser("reminders-tick", help="deliver due reminders (run from cron/timer)")
+    pro_parser = sub.add_parser("proactive-tick", help="run a proactive review (assist|maintain) from cron; gated on weekly usage")
+    pro_parser.add_argument("kind", choices=["assist", "maintain"], help="which review to run")
+    sub.add_parser("goal-tick", help="advance one active goal a step (run from cron; gated on weekly usage)")
+    goals_parser = sub.add_parser("goals", help="see and steer your standing goals")
+    goals_sub = goals_parser.add_subparsers(dest="goals_action")
+    goals_sub.add_parser("list", help="list goals (default)")
+    g_cancel = goals_sub.add_parser("cancel", help="cancel a goal by id")
+    g_cancel.add_argument("goal_id", type=int)
     sub.add_parser("usage", help="show this month's credit draw and budget level")
+    trace_parser = sub.add_parser("trace", help="digest the trace ledger: runs, errors, cost over a window")
+    trace_parser.add_argument("--days", type=int, default=7, help="how many days back to summarize (default 7)")
+    trace_parser.add_argument("--json", action="store_true", help="emit the raw summary as JSON")
+    sub.add_parser("heartbeat", help="show the current status of your health checklist")
+    sub.add_parser("webhook", help="run the inbound webhook-wake listener (own process)")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
     job_run_parser.add_argument("job_id", type=int)
     jobs_parser = sub.add_parser("jobs", help="the terminal job console: see and steer background jobs")
@@ -449,15 +670,37 @@ def main(argv: list[str] | None = None) -> int:
         link_skills(config.skills_dir)
 
     if command == "doctor":
-        return doctor(config, probe=not getattr(args, "no_probe", False))
+        return doctor(config, probe=not getattr(args, "no_probe", False),
+                      fix=getattr(args, "fix", False))
     if command == "chat":
         return chat(config)
     if command == "skills":
+        if getattr(args, "skills_action", None):
+            return skills_cmd(config, args)
         return skills(config)
     if command == "reminders-tick":
         return reminders_tick(config)
+    if command == "proactive-tick":
+        import time as _time
+        from .proactive import run_proactive_tick
+        print(f"proactive-tick {args.kind}: {run_proactive_tick(config, args.kind, now=_time.time())}")
+        return 0
+    if command == "goal-tick":
+        import time as _time
+        from .goals import run_goal_tick
+        print(f"goal-tick: {run_goal_tick(config, now=_time.time())}")
+        return 0
+    if command == "goals":
+        return goals_cmd(config, args)
     if command == "usage":
         return usage_cmd(config)
+    if command == "trace":
+        return trace_cmd(config, days=args.days, as_json=args.json)
+    if command == "heartbeat":
+        return heartbeat_cmd(config)
+    if command == "webhook":
+        from .webhooks import run_webhook_server
+        return run_webhook_server(config)
     if command == "schedule":
         return schedule_cmd(config, args)
     if command == "workspaces":

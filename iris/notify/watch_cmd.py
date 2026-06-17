@@ -136,7 +136,9 @@ def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
             note += " Last output: " + (tail or "").strip()[-400:]
         try:
             from ..inbox import Inbox
-            Inbox(config.inbox_file).append(note)
+            home = getattr(config, "home_channel", "")
+            Inbox(config.inbox_file).append(
+                note, conversation_id=(f"discord:{home}" if home else None))
         except Exception:
             pass
     if resume and getattr(config, "auto_resume", False) and getattr(config, "home_channel", ""):

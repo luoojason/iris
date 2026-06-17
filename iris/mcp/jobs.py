@@ -20,6 +20,7 @@ from iris.config import Config
 from iris.jobs import (
     JobStore,
     clamp_grants,
+    launch_ready_dependents,
     parse_grants,
     repair_dead_runners,
     spawn_runner,
@@ -61,7 +62,8 @@ def _kill_runner(pid) -> bool:
 
 
 @mcp.tool()
-def start_job(title: str, instructions: str, grants: str = "", workspace: str = "") -> str:
+def start_job(title: str, instructions: str, grants: str = "", workspace: str = "",
+              heavy: bool = False, after: int = 0, force: bool = False) -> str:
     """Start a background job: one deep claude run, detached from this chat.
 
     Use it for work that takes minutes (audits, refactors, research). The job
@@ -76,6 +78,15 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
             caps what is actually given.
         workspace: A registered workspace name the job may work in. Ask the
             owner to register one (iris workspaces add) if none fits.
+        heavy: Set True ONLY for genuinely hard jobs (deep reasoning, tricky
+            multi-step work) to run them on the stronger model. Everyday jobs
+            leave this False and run on the cheaper default model.
+        after: Chain this job to run only after job #<after> finishes
+            successfully. It waits until then (and is cancelled if that job
+            fails). Use it to sequence dependent work.
+        force: Launch even if a near-identical job is already active or just
+            finished. Leave False; only set it when you truly mean to run the
+            same work again.
     """
     config = _config()
     if not config.jobs_enabled:
@@ -87,7 +98,21 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     except ValueError as exc:
         return str(exc)
     granted, clamped = clamp_grants(requested, config.job_grants)
+    import os
+    # Report back to the thread this job was started from (set by the driver),
+    # falling back to the home channel for non-Discord or unknown origins.
+    origin = os.environ.get("IRIS_ORIGIN_CHANNEL") or config.home_channel
     store = _store()
+    # Soft de-dup: a near-identical job already running (or just finished) on this
+    # channel is almost always an accidental re-launch (see the #27/#28 double
+    # upload). Advisory, force-overridable — never a hard block on a real re-run.
+    if not force:
+        from iris.jobs import find_duplicate_job
+        dup = find_duplicate_job(store, title, origin)
+        if dup is not None:
+            return (f"A near-identical job #{dup['id']} ({dup.get('title')}) is already "
+                    f"{dup['state']}. Not launching a duplicate. Check it with job_status"
+                    f"({dup['id']}), or pass force=true if you really mean to run it again.")
     if workspace:
         if _workspaces().resolve(workspace) is None:
             names = ", ".join(_workspaces().list()) or "none registered"
@@ -95,12 +120,35 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
                 f"No workspace named {workspace!r} (registered: {names}). "
                 "The owner registers one with: iris workspaces add <name> <path>."
             )
+
+    if after:
+        if store.get(after) is None:
+            return f"No job #{after} to chain after."
+        job = store.add(title.strip(), instructions, granted, workspace, origin,
+                        state="waiting", heavy=heavy, after=after)
+        # Resolve immediately: if the prerequisite already finished, this launches
+        # the dependent now; otherwise it stays waiting until that job completes.
+        launch_ready_dependents(store, config, spawn=SPAWN)
+        state_now = (store.get(job["id"]) or {}).get("state")
+        lines = []
+        if state_now == "waiting":
+            lines.append(f"Job #{job['id']} ({job['title']}) queued to run after "
+                         f"job #{after} finishes.")
+        elif state_now == "pending":
+            lines.append(f"Job #{job['id']} ({job['title']}) started: prerequisite "
+                         f"job #{after} was already done.")
+        else:
+            lines.append(f"Job #{job['id']} ({job['title']}) is {state_now}.")
+        if clamped:
+            lines.append(f"Refused grants (over IRIS_JOB_GRANTS): {', '.join(clamped)}.")
+        return "\n".join(lines)
+
     from iris.usage import CreditGuard
 
     lines = []
     if CreditGuard.from_config(config).should_park():
         job = store.add(title.strip(), instructions, granted, workspace,
-                        config.home_channel, state="parked")
+                        origin, state="parked", heavy=heavy)
         lines.append(
             f"Job #{job['id']} ({job['title']}) was PARKED, not started: the credit "
             f"guard says the month's budget is nearly spent. The owner can launch "
@@ -108,10 +156,11 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
         )
     else:
         repair_dead_runners(store)
+        launch_ready_dependents(store, config, spawn=SPAWN)  # progress any ready chains
         # The admission check runs inside the store's lock with the insert,
         # so two simultaneous start_job calls cannot both slip under the cap.
         job = store.add(title.strip(), instructions, granted, workspace,
-                        config.home_channel, admit_below=config.jobs_max)
+                        origin, admit_below=config.jobs_max, heavy=heavy)
         if not job["admitted"]:
             lines.append(
                 f"Job #{job['id']} ({job['title']}) recorded but queued: "
@@ -153,6 +202,12 @@ def job_status(job_id: int) -> str:
         lines.append(f"error: {job['error']}")
     if job.get("artifacts"):
         lines.append("artifacts: " + ", ".join(job["artifacts"]))
+    if job.get("verified") is False:
+        reason = (job.get("verify_reason") or "").strip()
+        lines.append("verification: an independent check flagged this result as "
+                     "possibly not satisfying the task." + (f" ({reason})" if reason else ""))
+    elif job.get("verified") is True:
+        lines.append("verification: independently checked, looks good.")
     report = (job.get("report") or "").strip()
     if report:
         lines.append("report:")
@@ -188,20 +243,22 @@ def cancel_job(job_id: int) -> str:
 
 
 @mcp.tool()
-def resume_job(job_id: int) -> str:
-    """Launch a parked or queued job now (an explicit owner decision)."""
+def resume_job(job_id: int, answer: str = "") -> str:
+    """Launch a parked/queued job, or answer a job that paused to ask you.
+
+    For a job waiting on your input (state needs_input), pass ``answer`` with your
+    decision; the job resumes the same session with full context. For a parked or
+    queued job, call it with no answer to launch it now.
+    """
     config = _config()
     if not config.jobs_enabled:
         return "Background jobs are disabled. The owner can set IRIS_JOBS=true."
-    store = _store()
-    job = store.get(job_id)
-    if job is None:
-        return f"No job #{job_id}."
-    if job["state"] not in ("pending", "parked"):
-        return f"Job #{job_id} is {job['state']}; only parked or queued jobs can be resumed."
-    store.transition(job_id, ("parked",), "pending")
-    SPAWN(job_id, store=store)
-    return f"Resumed job #{job_id} ({job['title']})."
+    from iris.jobs import resume_job as resume_core
+    reply = resume_core(_store(), job_id, answer=answer, spawn=SPAWN)
+    # The chat tool nudges the owner toward the answer= form for a paused job.
+    if reply.startswith(f"Job #{job_id} is waiting for your answer"):
+        reply += f"\nCall resume_job({job_id}, answer=...) with your decision."
+    return reply
 
 
 _SCHEDULES_DISABLED = ("Scheduled jobs are disabled. The owner can set "

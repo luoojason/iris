@@ -53,6 +53,20 @@ def test_start_job_records_and_spawns(env):
     assert job["grants"] == ["subagents"]
 
 
+def test_start_job_records_origin_channel_when_set(env, monkeypatch):
+    # The driver sets IRIS_ORIGIN_CHANNEL to the thread the turn ran in, so the
+    # job reports back to THAT thread instead of always the home channel.
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-42")
+    srv.start_job("audit", "look at things")
+    assert env["store"].get(1)["channel_id"] == "thread-42"
+
+
+def test_start_job_falls_back_to_home_channel_without_origin(env, monkeypatch):
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
+    srv.start_job("audit", "look at things")
+    assert env["store"].get(1)["channel_id"] == "home-1"
+
+
 def test_start_job_clamps_grants_to_the_ceiling(env):
     reply = srv.start_job("t", "i", grants="shell, files")
     assert "Refused grants" in reply and "shell" in reply
@@ -132,6 +146,74 @@ def test_resume_refuses_terminal_states(env):
     srv.start_job("a", "one")
     env["store"].transition(1, ("pending",), "done")
     assert "only parked or queued" in srv.resume_job(1)
+
+
+def test_resume_pending_with_a_live_runner_does_not_double_spawn(env):
+    import os
+
+    srv.start_job("a", "one")  # job 1, pending
+    env["store"].update(1, pid=os.getpid())  # pretend its runner is alive
+    before = len(env["spawned"])
+    reply = srv.resume_job(1)
+    assert "already" in reply.lower()
+    assert len(env["spawned"]) == before  # no second runner spawned
+
+
+def test_start_job_soft_dedup_blocks_near_identical_relaunch(env, monkeypatch):
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
+    srv.start_job("Upload the 5 parked shorts", "do it")
+    assert len(env["store"].all()) == 1
+    # a near-identical relaunch on the same channel is refused (advisory)
+    reply = srv.start_job("upload the 5 PARKED shorts now", "again")
+    assert "near-identical" in reply.lower() and "#1" in reply
+    assert len(env["store"].all()) == 1  # the duplicate was not recorded
+    # force=true is the deliberate override
+    srv.start_job("upload the 5 parked shorts", "again", force=True)
+    assert len(env["store"].all()) == 2
+
+
+def test_start_job_chained_after_another_waits(env):
+    srv.start_job("A", "first")  # job 1, spawned
+    reply = srv.start_job("B", "second", after=1)
+    assert "#2" in reply and "after" in reply.lower()
+    job2 = env["store"].get(2)
+    assert job2["state"] == "waiting" and job2["after"] == 1
+    assert env["spawned"] == [1]  # the dependent is not launched yet
+
+
+def test_start_job_after_unknown_prereq_is_rejected(env):
+    reply = srv.start_job("B", "x", after=9)
+    assert "no job #9" in reply.lower()
+    assert env["store"].all() == []  # nothing recorded
+
+
+def test_start_job_after_a_finished_prereq_launches_now(env):
+    srv.start_job("A", "first")
+    env["store"].transition(1, ("pending",), "done")
+    srv.start_job("B", "second", after=1)
+    assert env["store"].get(2)["state"] == "pending"  # prereq already done -> resolved
+    assert env["spawned"][-1] == 2
+
+
+def test_resume_a_waiting_job_with_an_answer(env):
+    srv.start_job("a", "one")
+    env["store"].transition(1, ("pending",), "needs_input", question="prod or staging?")
+    reply = srv.resume_job(1, answer="use staging")
+    assert "#1" in reply
+    job = env["store"].get(1)
+    assert job["state"] == "pending"  # re-queued to resume
+    assert job["pending_answer"] == "use staging"  # the answer is recorded for the runner
+    assert env["spawned"][-1] == 1
+
+
+def test_resume_a_waiting_job_needs_an_answer(env):
+    srv.start_job("a", "one")
+    env["store"].transition(1, ("pending",), "needs_input", question="prod or staging?")
+    before = len(env["spawned"])
+    reply = srv.resume_job(1)  # no answer
+    assert "answer" in reply.lower()
+    assert env["store"].get(1)["state"] == "needs_input"  # still waiting
+    assert len(env["spawned"]) == before  # not re-launched
 
 
 def test_job_status_and_list(env):

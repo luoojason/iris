@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -39,13 +40,8 @@ from typing import Optional
 from .config import Config
 from .driver import DANGEROUS_BUILTINS, ClaudeDriver
 from .inbox import Inbox
-from .statefile import quarantine_corrupt
+from .statefile import JsonListStore
 from .workspaces import WorkspaceStore, collect_artifacts
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None
 
 log = logging.getLogger("iris.jobs")
 
@@ -68,6 +64,113 @@ DISCORD_MESSAGE_LIMIT = 2000
 
 _ACTIVE_STATES = ("pending", "running")
 _TERMINAL_STATES = ("done", "failed", "cancelled")
+# needs_input is a paused, non-terminal state: the job asked the owner a question
+# and is waiting for an answer. It holds no runner and no jobs_max slot.
+
+_QUESTION_MARKER = "QUESTION:"
+
+# Injected into every job's system prompt so any job can pause to ask rather than
+# guess. Small, fixed cost; the runner watches for the marker.
+JOB_QUESTION_PROTOCOL = (
+    "If you genuinely cannot finish without a decision only the owner can make (a "
+    "choice between real options, a credential, missing information), stop and end "
+    "your reply with a single final line:\n"
+    "QUESTION: <your specific question>\n"
+    "The owner will answer and you will resume this exact session with full context. "
+    "Use this sparingly: only when you truly cannot proceed. Otherwise make a sound "
+    "decision, note the assumption, and finish."
+)
+
+
+def extract_question(report: str) -> Optional[str]:
+    """The owner-directed question a job ended with, or None.
+
+    Returns everything from the first line that starts with ``QUESTION:`` to the
+    end of the report (so a multi-line question survives), stripped. A job that
+    did not ask returns None and is delivered as a normal completion.
+    """
+    lines = (report or "").splitlines()
+    for i, line in enumerate(lines):
+        if line.strip().upper().startswith(_QUESTION_MARKER):
+            first = line.strip()[len(_QUESTION_MARKER):].strip()
+            rest = "\n".join(lines[i + 1:]).strip()
+            return (first + ("\n" + rest if rest else "")).strip() or None
+    return None
+
+
+_NONTERMINAL_STATES = ("pending", "running", "waiting", "parked", "needs_input")
+
+
+def jobs_digest(jobs: list[dict], now_ts: float, max_bytes: int = 600,
+                recent_secs: int = 3600) -> str:
+    """Render in-flight (and just-finished) jobs into a compact system-prompt block.
+
+    This is the tier-0 job awareness: injected every turn so any session (chat,
+    proactive, post-compaction) sees what is already running and does not launch a
+    duplicate. Includes non-terminal jobs plus terminal jobs finished within
+    ``recent_secs`` (so a job that just finished is still visible to a turn racing
+    behind it). Whole lines only, byte-budgeted like the pinned-memory digest;
+    returns "" when nothing qualifies or the budget is zero.
+    """
+    if max_bytes <= 0:
+        return ""
+    shown = []
+    for j in jobs:
+        if not isinstance(j, dict):
+            continue
+        state = j.get("state")
+        if state in _NONTERMINAL_STATES:
+            shown.append(j)
+        elif state in _TERMINAL_STATES:
+            fin = j.get("finished_ts")
+            if isinstance(fin, (int, float)) and (now_ts - fin) <= recent_secs:
+                shown.append(j)
+    if not shown:
+        return ""
+    # Active first, then most-recent id; so the live work is at the top.
+    shown.sort(key=lambda j: (j.get("state") in _TERMINAL_STATES, -int(j.get("id", 0))))
+    header = ("Background jobs (live state). Before you start a job, check this list "
+              "and do NOT launch one that duplicates a job already active or just finished:")
+    lines = [header]
+    used = len(header.encode("utf-8"))
+    for j in shown:
+        title = " ".join(str(j.get("title") or "").split())
+        line = f"- #{j.get('id')} [{j.get('state')}] {title}"
+        cost = len(line.encode("utf-8")) + 1
+        if used + cost > max_bytes:
+            continue
+        lines.append(line)
+        used += cost
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _normalize_title(title: str) -> set:
+    """Lowercase alphanumeric word set of a job title, for soft de-dup matching."""
+    return {w for w in re.findall(r"[a-z0-9]+", (title or "").lower()) if len(w) > 2}
+
+
+def find_duplicate_job(store: "JobStore", title: str, channel_id: str, *,
+                       recent_secs: int = 3600, now: Optional[float] = None) -> Optional[dict]:
+    """An active (or just-finished) job on the same channel whose title strongly
+    overlaps ``title``, or None. Soft signal for start_job de-dup; never a hard gate."""
+    now = time.time() if now is None else now
+    want = _normalize_title(title)
+    if not want:
+        return None
+    for j in store.all():
+        if j.get("channel_id") != channel_id:
+            continue
+        state = j.get("state")
+        if state in _TERMINAL_STATES:
+            fin = j.get("finished_ts")
+            if not (isinstance(fin, (int, float)) and (now - fin) <= recent_secs):
+                continue
+        elif state not in _NONTERMINAL_STATES:
+            continue
+        other = _normalize_title(j.get("title", ""))
+        if other and len(want & other) / len(want | other) >= 0.6:
+            return j
+    return None
 
 
 def parse_grants(spec: str) -> list[str]:
@@ -136,45 +239,27 @@ class JobStore:
     """The job registry: a JSON list with a cross-process lock, like reminders."""
 
     def __init__(self, path: str | os.PathLike[str], keep: Optional[int] = None):
-        self.path = Path(path)
+        self._store = JsonListStore(path, "job registry")
+        self.path = self._store.path
         # When set, add() auto-prunes terminal jobs past this many. None means
         # no auto-prune (the default; tests and ad-hoc readers opt out).
         self.keep = keep
 
     @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if fcntl is None:
+        with self._store.locked():
             yield
-            return
-        lock = self.path.with_suffix(self.path.suffix + ".lock")
-        with open(lock, "w") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _load(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text("utf-8"))
-            return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError):
-            quarantine_corrupt(self.path, "job registry")
-            return []
+        return self._store.load()
 
     def _save(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent or ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(items, handle, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.path)
+        self._store.save(items)
 
     def add(self, title: str, instructions: str, grants: list[str],
             workspace: str, channel_id: str, state: str = "pending",
-            admit_below: Optional[int] = None) -> dict:
+            admit_below: Optional[int] = None, heavy: bool = False,
+            after: Optional[int] = None) -> dict:
         """Record a job. With ``admit_below``, the active-jobs admission check
         happens under the same lock as the insert (no TOCTOU between counting
         and adding); the returned dict carries an ephemeral ``admitted`` flag
@@ -199,6 +284,8 @@ class JobStore:
                 "artifacts": [],
                 "report_delivered": False,
                 "channel_id": channel_id,
+                "heavy": heavy,
+                "after": after,
             }
             items.append(job)
             returned = dict(job)
@@ -285,8 +372,10 @@ def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
     if job is None:
         return f"No job #{job_id}."
     # Transition-first: the store's guard decides who wins a race with the
-    # runner, so a cancel is never claimed unless it actually stuck.
-    if store.transition(job_id, ("pending", "parked"), "cancelled", finished_ts=time.time()):
+    # runner, so a cancel is never claimed unless it actually stuck. A
+    # needs_input job has no live runner, so it cancels straight away too.
+    if store.transition(job_id, ("pending", "parked", "needs_input", "waiting"), "cancelled",
+                        finished_ts=time.time()):
         return f"Cancelled job #{job_id} before it started."
     job = store.get(job_id)
     if job and job["state"] == "running":
@@ -302,6 +391,44 @@ def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
             return f"Cancelled job #{job_id}.{suffix}"
         job = store.get(job_id)
     return f"Job #{job_id} is already {job['state'] if job else 'gone'}."
+
+
+def resume_job(store: JobStore, job_id: int, *, answer: str = "", spawn=None) -> str:
+    """Launch a parked/queued job, or answer a job paused on a question. Returns a
+    short owner-facing status. Shared by the jobs MCP tool and the terminal UI so
+    the concurrency-careful logic (spawn only on a won transition; never a second
+    runner for a job already starting) lives in exactly one place.
+    """
+    spawn = spawn or spawn_runner
+    job = store.get(job_id)
+    if job is None:
+        return f"No job #{job_id}."
+    state = job["state"]
+    if state == "needs_input":
+        if not (answer or "").strip():
+            return (f"Job #{job_id} is waiting for your answer to: {job.get('question', '')}")
+        if store.transition(job_id, ("needs_input",), "pending", pending_answer=answer):
+            spawn(job_id, store=store)
+            return f"Answered job #{job_id} ({job['title']}); resuming it now."
+        return f"Job #{job_id} was already resumed by a concurrent answer."
+    if state == "parked":
+        if store.transition(job_id, ("parked",), "pending"):
+            spawn(job_id, store=store)
+            return f"Resumed job #{job_id} ({job['title']})."
+        return f"Job #{job_id} was already resumed."
+    if state == "pending":
+        # A queued job: launch it, but never spawn a second runner for one already
+        # starting (a pending job with a live pid is mid-spawn, not idle-queued).
+        repair_dead_runners(store)
+        fresh = store.get(job_id)
+        if fresh is None or fresh["state"] != "pending":
+            return f"Job #{job_id} is {fresh['state'] if fresh else 'gone'}."
+        pid = fresh.get("pid")
+        if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
+            return f"Job #{job_id} is already starting."
+        spawn(job_id, store=store)
+        return f"Resumed job #{job_id} ({job['title']})."
+    return f"Job #{job_id} is {state}; only parked or queued jobs can be resumed."
 
 
 def _apply_prune(items: list[dict], keep: int) -> tuple[list[dict], int]:
@@ -353,10 +480,99 @@ def repair_dead_runners(store: JobStore) -> int:
             continue
         error = ("the job runner died" if state == "running"
                  else "the job runner died before starting")
+        # death_notified=False marks this as a SILENT death (the runner never got
+        # to deliver its own failure ping); notify_dead_jobs surfaces it once.
         if store.transition(job["id"], (state,), "failed",
-                            error=error, finished_ts=time.time()):
+                            error=error, finished_ts=time.time(), death_notified=False):
             repaired += 1
     return repaired
+
+
+def notify_dead_jobs(config: Config, *, send=None, inbox: Optional[Inbox] = None) -> int:
+    """Surface jobs whose runner died silently. Returns how many were notified.
+
+    A job that fails inside its runner (timeout, error, crash) delivers its own
+    failure ping. But a runner that is killed outright (OOM, an external kill, a
+    crash before delivery) leaves the job stuck until ``repair_dead_runners`` flips
+    it to ``failed`` with no ping at all, so the owner is left guessing. This sweep
+    (run on the reminders tick) repairs those, then pings the originating thread
+    and folds an inbox note for each newly-dead job exactly once. No model call.
+    """
+    store = JobStore(config.jobs_file, keep=config.jobs_keep)
+    repair_dead_runners(store)  # flip any newly-dead runners, marking death_notified=False
+    if send is None:
+        from .reminders import send_discord_message as send
+    inbox = inbox or Inbox(config.inbox_file)
+    notified = 0
+    for job in store.all():
+        if job.get("state") != "failed" or job.get("death_notified") is not False:
+            continue
+        channel = job.get("channel_id") or config.home_channel
+        message = (f"job #{job['id']} ({job.get('title') or ''}) failed: "
+                   f"{job.get('error') or 'the runner died'}")
+        inbox.append(message, conversation_id=(f"discord:{channel}" if channel else None))
+        delivered = True
+        if channel and config.discord_token:
+            delivered = bool(send(channel, message, config.discord_token))
+        if delivered:
+            store.update(job["id"], death_notified=True)
+            notified += 1
+    return notified
+
+
+def launch_ready_dependents(store: JobStore, config: Config, *, spawn=None,
+                            guard=None, notify=None) -> int:
+    """Resolve jobs chained with ``after=<id>``: launch the ones whose prerequisite
+    finished, cancel the ones whose prerequisite failed.
+
+    No poller — this runs on the same touches as ``repair_dead_runners`` (a job
+    completing, the owner starting more work), the established no-idle pattern. A
+    waiting job launches only when its prerequisite is ``done`` (and the credit
+    guard is unparked, else it parks); it is cancelled if the prerequisite failed
+    or was cancelled, and left waiting while the prerequisite is still in flight or
+    has been pruned away. Returns how many dependents were launched.
+    """
+    spawn = spawn or spawn_runner
+    if guard is None:
+        from .usage import CreditGuard
+        guard = CreditGuard.from_config(config)
+    if notify is None:
+        from .reminders import send_discord_message
+
+        def notify(dep: dict, msg: str) -> None:
+            channel = dep.get("channel_id") or config.home_channel
+            if channel and config.discord_token:
+                send_discord_message(channel, msg, config.discord_token)
+
+    launched = 0
+    for dep in store.all():
+        if dep.get("state") != "waiting":
+            continue
+        prereq_id = dep.get("after")
+        prereq = store.get(prereq_id) if prereq_id is not None else None
+        if prereq is None:
+            continue  # prerequisite still unknown or pruned: leave it waiting
+        state = prereq.get("state")
+        if state in ("failed", "cancelled"):
+            if store.transition(dep["id"], ("waiting",), "cancelled",
+                                error=f"prerequisite job #{prereq_id} did not succeed",
+                                finished_ts=time.time()):
+                notify(dep, f"job #{dep['id']} ({dep['title']}) cancelled: "
+                            f"its prerequisite job #{prereq_id} {state}.")
+            continue
+        if state != "done":
+            continue  # still pending / running / waiting / needs_input / parked
+        if guard.should_park():
+            if store.transition(dep["id"], ("waiting",), "parked"):
+                notify(dep, f"job #{dep['id']} ({dep['title']}) is parked (credit "
+                            f"guard); resume_job({dep['id']}) to launch it.")
+            continue
+        if store.transition(dep["id"], ("waiting",), "pending"):
+            spawn(dep["id"], store=store)
+            launched += 1
+            notify(dep, f"job #{dep['id']} ({dep['title']}) started: its "
+                        f"prerequisite job #{prereq_id} finished.")
+    return launched
 
 
 def _pid_alive(pid: int) -> bool:
@@ -393,8 +609,14 @@ def write_browser_mcp_config(config: Config) -> str:
         }
     }
     fd, path = tempfile.mkstemp(prefix="iris-job-mcp-", suffix=".json")
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(spec, handle, indent=2)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(spec, handle, indent=2)
+    except Exception:
+        # A write fault (e.g. a full disk) must not leave a half-written stub in
+        # /tmp; the caller registers this path for cleanup only after we return.
+        _remove_temp_paths([path])
+        raise
     return path
 
 
@@ -413,12 +635,32 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
       workspace instead, or a throwaway scratch dir when there is none.
     """
     grants = list(job.get("grants") or ["subagents"])
-    cwd = workspace_path or tempfile.mkdtemp(prefix="iris-job-")
+    # Throwaway resources this driver owns and run_job must clean up afterwards.
+    # A workspace is the owner's and is never listed here.
+    temp_paths: list[str] = []
+    try:
+        return _build_job_driver(config, job, workspace_path, child_pid_callback, grants, temp_paths)
+    except Exception:
+        # Construction failed after allocating scratch/mcp temp files but before
+        # they were attached to the driver for run_job's finally to clean. Remove
+        # them here so a failed launch never leaks into /tmp.
+        _remove_temp_paths(temp_paths)
+        raise
+
+
+def _build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
+                      child_pid_callback, grants: list, temp_paths: list[str]) -> ClaudeDriver:
+    if workspace_path:
+        cwd = workspace_path
+    else:
+        cwd = tempfile.mkdtemp(prefix="iris-job-")
+        temp_paths.append(cwd)
     allowed = job_allowed_builtins(grants)
     disallowed = job_disallowed(grants)
     mcp_config = None
     if "browser" in grants:
         mcp_config = write_browser_mcp_config(config)
+        temp_paths.append(mcp_config)
         # The bare server name pre-approves every tool the server exposes;
         # --strict-mcp-config (set by the driver whenever mcp_config is given)
         # keeps the job from seeing any other server on the host. The
@@ -428,9 +670,12 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         disallowed = disallowed + tuple(
             f"mcp__playwright__{tool}" for tool in config.browser_deny_tools
         )
-    return ClaudeDriver(
+    # Heavy jobs escalate to the stronger model; everyday jobs run on the base.
+    model = config.job_model_heavy if job.get("heavy") else (config.job_model or config.model)
+    driver = ClaudeDriver(
         claude_bin=config.claude_bin,
-        model=config.job_model or config.model,
+        model=model,
+        append_system_prompt=JOB_QUESTION_PROTOCOL,
         append_system_prompt_file=config.job_persona or None,
         mcp_config=mcp_config,
         permission_mode=config.permission_mode,
@@ -445,7 +690,40 @@ def build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
         max_retries=config.max_retries,
         retry_base_delay=config.retry_base_delay,
         timeout_max_retries=0,
+        trace_file=config.trace_file,
+        trace_kind="job",
+        trace_capture_content=config.trace_capture_content,
     )
+    driver._job_temp_paths = temp_paths
+    return driver
+
+
+def _remove_temp_paths(paths) -> None:
+    """Best-effort removal of throwaway scratch dirs / mcp config files. Non-raising."""
+    for path in paths or ():
+        try:
+            target = Path(path)
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                target.unlink(missing_ok=True)
+        except OSError:
+            log.warning("could not clean job sandbox path %s", path)
+
+
+def _cleanup_job_sandbox(driver) -> None:
+    """Remove the throwaway scratch cwd and browser mcp config a job driver owns.
+
+    Best-effort and non-raising: the job's report and delivery have already
+    happened, so a cleanup hiccup must never turn a finished job into a failure.
+    Only paths build_job_driver created are listed, so a registered workspace
+    (the owner's directory) is never touched. Without this a daily-scheduled-job
+    deployment accumulates iris-job-* dirs and iris-job-mcp-*.json files in /tmp
+    without bound.
+    """
+    if driver is None:
+        return
+    _remove_temp_paths(getattr(driver, "_job_temp_paths", ()))
 
 
 def spawn_runner(job_id: int, *, store: Optional[JobStore] = None, popen=None) -> int:
@@ -488,6 +766,8 @@ def run_job(
     send_message=None,
     send_file=None,
     guard=None,
+    verify=None,
+    spawn=spawn_runner,
 ) -> int:
     """Run one recorded job to completion. This IS the detached runner.
 
@@ -501,6 +781,12 @@ def run_job(
     if guard is None:
         from .usage import CreditGuard
         guard = CreditGuard.from_config(config)
+    # Independent verification of the result, when enabled. The park decision is
+    # deferred to the call site (after the job turn records its own spend), so a
+    # job that itself crosses the park threshold doesn't then pay for a reviewer.
+    if verify is None and getattr(config, "job_verify_enabled", False):
+        from .verify import verify_result
+        verify = lambda instructions, report: verify_result(config, instructions, report)
     if send_message is None:
         from .reminders import send_discord_message as send_message
     send_file = send_file or send_discord_file
@@ -510,6 +796,17 @@ def run_job(
     if job is None:
         log.warning("job %s is not pending; refusing to run it", job_id)
         return 1
+
+    # Resume path: a job the owner answered carries a pending_answer and the
+    # session_id it paused on, so it continues the same claude conversation with
+    # the answer instead of re-running its original instructions. Consume the
+    # answer so a later rerun can't replay it.
+    resume_answer = job.get("pending_answer")
+    if resume_answer:
+        prompt, resume_session = resume_answer, job.get("session_id")
+        store.update(job_id, pending_answer=None)
+    else:
+        prompt, resume_session = job["instructions"], None
 
     channel = job.get("channel_id") or config.home_channel
     token = config.discord_token
@@ -531,7 +828,9 @@ def run_job(
         note = _head(text)
         for problem in problems:
             note += "\n" + str(problem)
-        inbox.append(note)
+        # Tag the note with the channel this job reports to, so it folds into
+        # that conversation only and never bleeds into an unrelated thread.
+        inbox.append(note, conversation_id=(f"discord:{channel}" if channel else None))
         return delivered
 
     workspace_path: Optional[str] = None
@@ -549,61 +848,114 @@ def run_job(
         # (driver hardening), so killing the runner alone would orphan it.
         store.update(job_id, claude_pid=pid)
 
+    driver = None
     try:
-        driver = driver_factory(config, job, workspace_path, record_child)
-        result = driver.run(job["instructions"])
-    except Exception as exc:
-        # ClaudeError (binary missing) or anything else: the job must never
-        # be left 'running' with no ping — the owner is never left guessing.
-        log.exception("job %s crashed while launching claude", job_id)
-        store.transition(job_id, ("running",), "failed",
-                         error=f"the job turn crashed: {exc}", finished_ts=time.time())
-        deliver(f"job #{job_id} ({job['title']}) failed: the job turn crashed: {exc}")
-        return 1
-    guard.record("job", result)
+        try:
+            driver = driver_factory(config, job, workspace_path, record_child)
+            result = driver.run(prompt, session_id=resume_session)
+        except Exception as exc:
+            # ClaudeError (binary missing) or anything else: the job must never
+            # be left 'running' with no ping — the owner is never left guessing.
+            log.exception("job %s crashed while launching claude", job_id)
+            store.transition(job_id, ("running",), "failed",
+                             error=f"the job turn crashed: {exc}", finished_ts=time.time())
+            deliver(f"job #{job_id} ({job['title']}) failed: the job turn crashed: {exc}")
+            return 1
+        guard.record("job", result)
 
-    if result.is_error:
-        error = result.error or "the job turn failed"
-        store.transition(job_id, ("running",), "failed",
-                         error=error, finished_ts=time.time())
-        deliver(f"job #{job_id} ({job['title']}) failed: {error}")
-        return 1
+        if result.is_error:
+            error = result.error or "the job turn failed"
+            store.transition(job_id, ("running",), "failed",
+                             error=error, finished_ts=time.time())
+            deliver(f"job #{job_id} ({job['title']}) failed: {error}")
+            return 1
 
-    report = result.text or ""
-    try:
-        files, problems = collect_artifacts(report, workspace_path)
-        artifact_names = [str(Path(f).relative_to(Path(workspace_path).resolve())) if workspace_path else f
-                          for f in files]
-    except Exception as exc:
-        # The turn is already paid for; its report must survive the crash.
-        log.exception("job %s finished but artifact handling crashed", job_id)
-        store.transition(job_id, ("running",), "failed",
-                         error=f"finished, but artifact handling crashed: {exc}",
-                         report=report, finished_ts=time.time())
-        deliver(f"job #{job_id} ({job['title']}) finished, but artifact handling crashed: {exc}")
-        return 1
+        report = result.text or ""
 
-    final = store.transition(job_id, ("running",), "done",
-                             report=report, artifacts=artifact_names,
-                             finished_ts=time.time())
-    if final is None:
-        # The job left 'running' under us (an owner cancel won the race).
-        # Don't follow a cancel with a confusing 'finished' ping.
-        log.info("job %s was cancelled mid-run; skipping delivery", job_id)
+        # Pause-and-ask: if the job ended with a QUESTION: and it has not used up its
+        # question budget, pause it (needs_input) and ping the owner instead of
+        # finishing. The session_id is stored so resume_job(answer=...) can continue
+        # the same conversation. At the cap, the question rides along in a normal
+        # completion (delivered, not paused) so the job can never loop on the clock.
+        question = extract_question(report)
+        rounds = int(job.get("question_rounds", 0))
+        if question and rounds < int(getattr(config, "job_max_questions", 5)):
+            paused = store.transition(job_id, ("running",), "needs_input",
+                                      report=report, question=question,
+                                      session_id=result.session_id,
+                                      question_rounds=rounds + 1)
+            if paused is None:
+                log.info("job %s left running during its question; skipping the ask", job_id)
+                return 0
+            deliver(f"job #{job_id} ({job['title']}) needs your input: {question}\n"
+                    f"Answer with resume_job({job_id}, answer=...).")
+            return 0
+
+        try:
+            files, problems = collect_artifacts(report, workspace_path)
+            artifact_names = [str(Path(f).relative_to(Path(workspace_path).resolve())) if workspace_path else f
+                              for f in files]
+        except Exception as exc:
+            # The turn is already paid for; its report must survive the crash.
+            log.exception("job %s finished but artifact handling crashed", job_id)
+            store.transition(job_id, ("running",), "failed",
+                             error=f"finished, but artifact handling crashed: {exc}",
+                             report=report, finished_ts=time.time())
+            deliver(f"job #{job_id} ({job['title']}) finished, but artifact handling crashed: {exc}")
+            return 1
+
+        # Independent check that the report actually satisfies the ask. It only
+        # annotates (the result is always delivered) and never raises: a crashing or
+        # unreadable reviewer fails open to "couldn't verify" rather than blocking.
+        verified: Optional[bool] = None
+        verify_reason = ""
+        if verify is not None and not guard.should_park():
+            # Re-checked here, not at setup: the job's own turn may have just pushed
+            # usage into park, and a parked guard means no extra reviewer spend.
+            try:
+                verdict = verify(job["instructions"], report)
+            except Exception:
+                log.exception("job %s verification crashed; delivering unverified", job_id)
+                verdict = {"ok": None, "reason": "verification crashed"}
+            verified = verdict.get("ok")
+            verify_reason = verdict.get("reason", "") or ""
+
+        final = store.transition(job_id, ("running",), "done",
+                                 report=report, artifacts=artifact_names,
+                                 verified=verified, verify_reason=verify_reason,
+                                 session_id=result.session_id, finished_ts=time.time())
+        if final is None:
+            # The job left 'running' under us (an owner cancel won the race).
+            # Don't follow a cancel with a confusing 'finished' ping.
+            log.info("job %s was cancelled mid-run; skipping delivery", job_id)
+            return 0
+
+        banner = ""
+        if verified is False:
+            banner = (f"[verification flag] an independent check thinks this may not fully "
+                      f"satisfy the task: {verify_reason}\n")
+        if deliver(f"{banner}job #{job_id} ({job['title']}) finished: {report}", problems):
+            store.update(job_id, report_delivered=True)
+
+        try:
+            for path in files:
+                if channel and token:
+                    res = send_file(channel, path, f"job #{job_id} artifact", token)
+                    if isinstance(res, dict) and res.get("error"):
+                        inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}",
+                                     conversation_id=(f"discord:{channel}" if channel else None))
+        except Exception:
+            log.exception("job %s artifact upload crashed after completion", job_id)
+
+        # This job succeeded; launch any job chained to run after it. Best-effort and
+        # isolated so a chaining hiccup never taints the completed job's own outcome.
+        try:
+            launch_ready_dependents(store, config, spawn=spawn, guard=guard)
+        except Exception:
+            log.exception("job %s: launching chained dependents failed", job_id)
         return 0
-
-    if deliver(f"job #{job_id} ({job['title']}) finished: {report}", problems):
-        store.update(job_id, report_delivered=True)
-
-    try:
-        for path in files:
-            if channel and token:
-                res = send_file(channel, path, f"job #{job_id} artifact", token)
-                if isinstance(res, dict) and res.get("error"):
-                    inbox.append(f"job #{job_id}: artifact {Path(path).name} failed to upload: {res['error']}")
-    except Exception:
-        log.exception("job %s artifact upload crashed after completion", job_id)
-    return 0
+    finally:
+        _cleanup_job_sandbox(driver)
 
 
 def _header_safe(filename: str) -> str:

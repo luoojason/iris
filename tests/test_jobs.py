@@ -125,9 +125,11 @@ class FakeJobDriver:
     def __init__(self, result):
         self.result = result
         self.prompts = []
+        self.calls = []  # (prompt, session_id) so resume can be asserted
 
-    def run(self, prompt, session_id=None, model=None):
+    def run(self, prompt, session_id=None, model=None, conversation_id=None):
         self.prompts.append(prompt)
+        self.calls.append((prompt, session_id))
         return self.result
 
 
@@ -169,6 +171,7 @@ def run_with(env):
         store=env["store"], workspace_store=env["ws_store"], inbox=env["inbox"],
         driver_factory=env["driver_factory"],
         send_message=env["send_message"], send_file=env["send_file"],
+        verify=env.get("verify"),
     )
 
 
@@ -184,8 +187,314 @@ def test_run_job_happy_path(tmp_path):
     channel, text = env["pings"][0]
     assert channel == "chan-9"
     assert "job #1" in text and "finished" in text and "all done" in text
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert len(folded) == 1 and "job #1" in folded[0] and "all done" in folded[0]
+
+
+def test_run_job_verification_pass_delivers_clean(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="wrote report.md", session_id="s", is_error=False))
+    env["verify"] = lambda instructions, report: {"ok": True, "reason": "file present"}
+    assert run_with(env) == 0
+    assert env["store"].get(1)["verified"] is True
+    text = env["pings"][0][1]
+    assert "verification flag" not in text  # a pass adds no warning
+    assert "wrote report.md" in text
+
+
+def test_run_job_verification_fail_flags_but_still_delivers(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="I think it's basically done", session_id="s", is_error=False))
+    env["verify"] = lambda instructions, report: {"ok": False, "reason": "no file was produced"}
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["verified"] is False
+    assert job["state"] == "done"  # the work still completed; verification only annotates
+    text = env["pings"][0][1]
+    assert "verification flag" in text and "no file was produced" in text
+    assert "I think it's basically done" in text  # the full report is still delivered
+    assert job["verify_reason"] == "no file was produced"  # reason persisted for later
+    # the fold-back note carries the warning too
+    assert any("verification flag" in n for n in env["inbox"].drain("discord:chan-9"))
+
+
+def test_extract_question_finds_the_marker():
+    from iris.jobs import extract_question
+
+    assert extract_question("did some setup\nQUESTION: prod or staging?") == "prod or staging?"
+    assert extract_question("QUESTION: which DB?\nthe two options are A and B") == \
+        "which DB?\nthe two options are A and B"
+    assert extract_question("all finished, no question here") is None
+    assert extract_question("") is None
+
+
+def test_run_job_pauses_to_ask_when_the_report_has_a_question(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="I set things up.\nQUESTION: deploy to prod or staging?",
+        session_id="sess-1", is_error=False))
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["state"] == "needs_input"
+    assert "prod or staging" in job["question"]
+    assert job["session_id"] == "sess-1"  # stored so the answer can resume it
+    assert job["question_rounds"] == 1
+    assert job.get("finished_ts") is None  # it is paused, not finished
+    ping = env["pings"][0][1]
+    assert "needs your input" in ping.lower() and "prod or staging" in ping
+    assert "finished" not in ping.lower()
+
+
+def test_run_job_resumes_the_session_with_the_owner_answer(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="done, used staging", session_id="sess-2", is_error=False))
+    # the job is waiting; resume_job recorded the answer and set it pending again
+    env["store"].update(1, pending_answer="use staging", session_id="sess-1", question_rounds=1)
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["state"] == "done"
+    assert env["driver"].calls[0] == ("use staging", "sess-1")  # resumed, not re-instructed
+    assert not job.get("pending_answer")  # consumed
+
+
+def test_run_job_stops_asking_after_the_question_round_cap(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="QUESTION: yet another fork?", session_id="s", is_error=False))
+    env["config"].job_max_questions = 1
+    env["store"].update(1, question_rounds=1)  # already at the cap
+    assert run_with(env) == 0
+    job = env["store"].get(1)
+    assert job["state"] == "done"  # no more pausing
+    assert "yet another fork?" in job["report"]  # the question rides along in the report
+
+
+def test_cancel_handles_a_waiting_job(tmp_path):
+    from iris.jobs import cancel
+
+    store = make_store(tmp_path)
+    store.add("j", "i", ["subagents"], "", "h")
+    store.transition(1, ("pending",), "needs_input", question="q?")
+    out = cancel(store, 1)
+    assert "ancel" in out and store.get(1)["state"] == "cancelled"
+
+
+# -- active-jobs digest (tier-0 awareness so a turn can't duplicate work) -----
+
+def test_jobs_digest_lists_active_and_recently_finished():
+    from iris.jobs import jobs_digest
+    now = 1000.0
+    jobs = [
+        {"id": 27, "state": "running", "title": "Publish 5 parked Top-5 Shorts", "finished_ts": None},
+        {"id": 10, "state": "done", "title": "recent done", "finished_ts": now - 100},
+        {"id": 9, "state": "done", "title": "ancient done", "finished_ts": now - 99999},
+        {"id": 5, "state": "pending", "title": "queued one", "finished_ts": None},
+    ]
+    out = jobs_digest(jobs, now, max_bytes=600, recent_secs=3600)
+    assert "#27 [running] Publish 5 parked Top-5 Shorts" in out
+    assert "#5 [pending]" in out
+    assert "#10 [done] recent done" in out      # just-finished still visible
+    assert "ancient done" not in out            # old terminal omitted
+    assert "duplicate" in out.lower()           # the steering header is present
+
+
+def test_jobs_digest_empty_when_nothing_active_or_recent():
+    from iris.jobs import jobs_digest
+    assert jobs_digest([], 1000.0) == ""
+    # a long-finished terminal job alone -> nothing to show
+    assert jobs_digest([{"id": 1, "state": "done", "title": "x", "finished_ts": 0.0}], 1e9) == ""
+
+
+def test_jobs_digest_byte_budget_skips_long_lines():
+    from iris.jobs import jobs_digest
+    now = 1000.0
+    jobs = [{"id": 1, "state": "running", "title": "x" * 2000, "finished_ts": None},
+            {"id": 2, "state": "running", "title": "short one", "finished_ts": None}]
+    out = jobs_digest(jobs, now, max_bytes=220)
+    assert "short one" in out and "xxxx" not in out  # long line skipped, short kept
+    assert len(out.encode("utf-8")) <= 220
+
+
+def test_find_duplicate_job_matches_active_same_title_and_channel():
+    from iris.jobs import JobStore, find_duplicate_job
+
+    import os as _os
+    store = JobStore("/tmp/iris-dedup-test-%d.json" % _os.getpid())
+    store.add("Upload the 5 parked shorts", "i", ["subagents"], "", "chan-9", state="running")
+    store.add("totally different job", "i", ["subagents"], "", "chan-9", state="running")
+    # near-identical title on the same channel -> flagged
+    dup = find_duplicate_job(store, "upload the 5 PARKED shorts!", "chan-9")
+    assert dup is not None and dup["id"] == 1
+    # different channel -> not a duplicate
+    assert find_duplicate_job(store, "Upload the 5 parked shorts", "other-ch") is None
+    # unrelated title -> not a duplicate
+    assert find_duplicate_job(store, "build a new short", "chan-9") is None
+    _os.unlink(store.path)
+
+
+# -- silent job-death notification ------------------------------------------
+
+def _death_cfg(tmp_path, **kw):
+    base = dict(jobs_enabled=True, discord_token="tok", home_channel="home-1",
+                jobs_file=str(tmp_path / "jobs.json"),
+                inbox_file=str(tmp_path / "inbox.json"))
+    base.update(kw)
+    return Config(**base)
+
+
+def test_notify_dead_jobs_pings_once_for_a_runner_that_died(tmp_path):
+    from iris.jobs import notify_dead_jobs
+
+    cfg = _death_cfg(tmp_path)
+    store = JobStore(cfg.jobs_file)
+    store.add("browser pull", "i", ["subagents"], "", "chan-9", state="running")
+    store.update(1, pid=999999)  # a pid that is not alive: the runner died
+
+    sent = []
+    n = notify_dead_jobs(cfg, send=lambda c, t, k: sent.append((c, t)) or True)
+    assert n == 1
+    assert store.get(1)["state"] == "failed"
+    assert sent and sent[0][0] == "chan-9" and "failed" in sent[0][1].lower()
+    assert any("failed" in note.lower() for note in Inbox(cfg.inbox_file).drain("discord:chan-9"))
+
+    # a second sweep does not re-ping the same death
+    sent.clear()
+    assert notify_dead_jobs(cfg, send=lambda c, t, k: sent.append(1) or True) == 0
+    assert sent == []
+
+
+def test_notify_dead_jobs_leaves_clean_failures_and_healthy_jobs_alone(tmp_path):
+    import os
+
+    from iris.jobs import notify_dead_jobs
+
+    cfg = _death_cfg(tmp_path)
+    store = JobStore(cfg.jobs_file)
+    # a cleanly-failed job already delivered its own failure ping
+    store.add("clean fail", "i", ["subagents"], "", "h")
+    store.transition(1, ("pending",), "failed", error="boom")
+    # a healthy running job with a live pid
+    store.add("healthy", "i", ["subagents"], "", "h", state="running")
+    store.update(2, pid=os.getpid())
+
+    sent = []
+    n = notify_dead_jobs(cfg, send=lambda c, t, k: sent.append(1) or True)
+    assert n == 0 and sent == []
+    assert store.get(2)["state"] == "running"  # healthy job untouched
+
+
+class _ParkedGuard:
+    def should_park(self):
+        return True
+
+    def record(self, *a, **k):
+        pass
+
+
+class _OpenGuard:
+    def should_park(self):
+        return False
+
+    def record(self, *a, **k):
+        pass
+
+
+# -- after:<job_id> chaining -------------------------------------------------
+
+def test_launch_ready_dependents_launches_when_prereq_is_done(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="done")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    n = launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                                guard=_OpenGuard(), notify=lambda dep, m: None)
+    assert n == 1 and spawned == [b["id"]]
+    assert store.get(b["id"])["state"] == "pending"
+
+
+def test_launch_ready_dependents_cancels_when_prereq_failed(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="failed")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                            guard=_OpenGuard(), notify=lambda dep, m: None)
+    assert spawned == []
+    assert store.get(b["id"])["state"] == "cancelled"
+
+
+def test_launch_ready_dependents_waits_while_prereq_active(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="running")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    n = launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                                guard=_OpenGuard(), notify=lambda dep, m: None)
+    assert n == 0 and spawned == []
+    assert store.get(b["id"])["state"] == "waiting"
+
+
+def test_launch_ready_dependents_parks_when_the_guard_is_parked(tmp_path):
+    from iris.jobs import launch_ready_dependents
+
+    store = make_store(tmp_path)
+    a = store.add("A", "i", ["subagents"], "", "chan", state="done")
+    b = store.add("B", "i", ["subagents"], "", "chan", state="waiting", after=a["id"])
+    spawned = []
+    launch_ready_dependents(store, Config(), spawn=lambda jid, **k: spawned.append(jid),
+                            guard=_ParkedGuard(), notify=lambda dep, m: None)
+    assert spawned == []
+    assert store.get(b["id"])["state"] == "parked"
+
+
+def test_run_job_launches_a_chained_dependent_on_success(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+    dep = env["store"].add("B", "i", ["subagents"], "", "chan-9", state="waiting",
+                           after=env["job_id"])
+    spawned = []
+    run_job(env["job_id"], env["config"], store=env["store"], workspace_store=env["ws_store"],
+            inbox=env["inbox"], driver_factory=env["driver_factory"],
+            send_message=env["send_message"], send_file=env["send_file"],
+            spawn=lambda jid, **k: spawned.append(jid))
+    assert env["store"].get(env["job_id"])["state"] == "done"
+    assert spawned == [dep["id"]]  # the chained job launched when its prereq finished
+    assert env["store"].get(dep["id"])["state"] == "pending"
+
+
+def test_run_job_skips_verification_when_the_credit_guard_is_parked(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+    calls = []
+    run_job(env["job_id"], env["config"], store=env["store"], workspace_store=env["ws_store"],
+            inbox=env["inbox"], driver_factory=env["driver_factory"],
+            send_message=env["send_message"], send_file=env["send_file"],
+            verify=lambda i, r: calls.append((i, r)) or {"ok": False, "reason": "x"},
+            guard=_ParkedGuard())
+    assert calls == []  # parked: no extra reviewer spend
+    assert env["store"].get(1)["verified"] is None
+
+
+def test_run_job_verification_fails_open_when_the_reviewer_crashes(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+
+    def boom(instructions, report):
+        raise RuntimeError("reviewer model unreachable")
+
+    env["verify"] = boom
+    assert run_with(env) == 0  # the report is delivered regardless
+    job = env["store"].get(1)
+    assert job["verified"] is None  # unverified, not failed
+    assert "verification flag" not in env["pings"][0][1]  # no false alarm
+
+
+def test_run_job_without_verification_is_unchanged(tmp_path):
+    # No verify seam (the default): no verified field is forced true/false, and
+    # the report delivers exactly as before.
+    env = runner_env(tmp_path, result=ClaudeResult(text="all done", session_id="s", is_error=False))
+    assert run_with(env) == 0
+    assert env["store"].get(1)["verified"] is None
+    assert "verification flag" not in env["pings"][0][1]
 
 
 def test_run_job_failure_path(tmp_path):
@@ -195,7 +504,7 @@ def test_run_job_failure_path(tmp_path):
     assert job["state"] == "failed"
     assert job["error"] == "boom"
     assert "failed" in env["pings"][0][1]
-    assert any("failed" in note for note in env["inbox"].drain())
+    assert any("failed" in note for note in env["inbox"].drain("discord:chan-9"))
 
 
 def test_run_job_refuses_a_non_pending_job(tmp_path):
@@ -240,7 +549,7 @@ def test_run_job_delivers_artifacts(tmp_path):
     assert job["artifacts"] == ["out.md"]
     assert env["files"] == [("chan-9", str((ws / "out.md").resolve()))]
     # the unresolvable artifact is named in the fold-back, never silent
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert any("missing.bin" in note for note in folded)
 
 
@@ -265,6 +574,16 @@ def test_default_driver_factory_adds_workspace_dir():
     driver = build_job_driver(config, {"grants": ["subagents"], "workspace": "ws"}, "/some/dir")
     assert driver.add_dirs == ["/some/dir"]
     assert driver.model == "m-light"  # IRIS_JOB_MODEL overrides the chat model
+
+
+def test_heavy_job_escalates_to_the_strong_model():
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_model="m-light", job_model_heavy="m-strong")
+    light = build_job_driver(config, {"grants": ["subagents"], "heavy": False}, None)
+    heavy = build_job_driver(config, {"grants": ["subagents"], "heavy": True}, None)
+    assert light.model == "m-light"     # everyday job stays on the cheap model
+    assert heavy.model == "m-strong"    # hard job escalates
 
 
 # -- config knobs --------------------------------------------------------------
@@ -380,7 +699,7 @@ def test_run_job_records_the_claude_child_pid(tmp_path):
 
     def factory_with_callback(config, job, workspace_path, child_pid_callback=None):
         class D:
-            def run(self, prompt, session_id=None, model=None):
+            def run(self, prompt, session_id=None, model=None, conversation_id=None):
                 child_pid_callback(7777)  # what ClaudeDriver does on spawn
                 return ClaudeResult(text="ok", session_id=None, is_error=False)
         return D()
@@ -397,7 +716,7 @@ def test_run_job_survives_a_raising_driver(tmp_path):
 
     def exploding_factory(config, job, workspace_path, child_pid_callback=None):
         class D:
-            def run(self, prompt, session_id=None, model=None):
+            def run(self, prompt, session_id=None, model=None, conversation_id=None):
                 raise ClaudeError("claude binary not found on PATH")
         return D()
 
@@ -407,7 +726,7 @@ def test_run_job_survives_a_raising_driver(tmp_path):
     assert job["state"] == "failed"
     assert "crashed" in job["error"]
     assert len(env["pings"]) == 1 and "failed" in env["pings"][0][1]
-    assert env["inbox"].drain()  # the owner is never left guessing
+    assert env["inbox"].drain("discord:chan-9")  # the owner is never left guessing
 
 
 def test_run_job_keeps_the_paid_report_when_artifact_handling_crashes(tmp_path, monkeypatch):
@@ -436,7 +755,7 @@ def test_run_job_skips_delivery_when_cancelled_mid_run(tmp_path):
 
     def cancelling_factory(config, job, workspace_path, child_pid_callback=None):
         class D:
-            def run(self, prompt, session_id=None, model=None):
+            def run(self, prompt, session_id=None, model=None, conversation_id=None):
                 store.transition(1, ("running",), "cancelled")  # owner cancelled mid-turn
                 return ClaudeResult(text="too late", session_id=None, is_error=False)
         return D()
@@ -445,7 +764,7 @@ def test_run_job_skips_delivery_when_cancelled_mid_run(tmp_path):
     assert run_with(env) == 0
     assert store.get(1)["state"] == "cancelled"
     assert env["pings"] == []  # no confusing 'finished' after a cancel
-    assert env["inbox"].drain() == []
+    assert env["inbox"].drain("discord:chan-9") == []
 
 
 def test_artifact_problems_survive_a_long_report(tmp_path):
@@ -459,7 +778,7 @@ def test_artifact_problems_survive_a_long_report(tmp_path):
     discord = " ".join(t for _, t in env["pings"])
     assert "missing.bin" in discord
     # and it survives in the capped fold-back too, after the truncated report
-    folded = env["inbox"].drain()[0]
+    folded = env["inbox"].drain("discord:chan-9")[0]
     assert "missing.bin" in folded and "truncated" in folded
 
 
@@ -569,7 +888,7 @@ def test_artifact_upload_failure_is_reported_not_silent(tmp_path):
                                          session_id=None, is_error=False))
     env["send_file"] = lambda channel, path, text, token: {"error": "HTTP 413"}
     assert run_with(env) == 0  # the job still completes
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert any("failed to upload" in note and "HTTP 413" in note for note in folded)
 
 
@@ -769,6 +1088,154 @@ def test_browser_deny_list_empty_denies_no_mcp_tools(tmp_path):
         assert tool in driver.disallowed_tools
 
 
+def test_job_driver_inherits_the_trace_config(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, trace_file=str(tmp_path / "trace.jsonl"),
+                    trace_capture_content=True)
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    assert driver.trace_file == str(tmp_path / "trace.jsonl")
+    assert driver.trace_kind == "job"  # so the ledger can tell jobs from chat
+    assert driver.trace_capture_content is True
+
+
+# -- sandbox cleanup (D3): no /tmp leak across scheduled runs ----------------
+
+
+def test_write_browser_mcp_config_unlinks_on_write_failure(tmp_path, monkeypatch):
+    import os
+
+    import iris.jobs as jobs
+
+    created = {}
+    real_mkstemp = jobs.tempfile.mkstemp
+
+    def record(*a, **k):
+        fd, path = real_mkstemp(*a, **k)
+        created["path"] = path
+        return fd, path
+
+    monkeypatch.setattr(jobs.tempfile, "mkstemp", record)
+    monkeypatch.setattr(jobs.json, "dump", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    config = Config(jobs_enabled=True, browser_profile_dir=str(tmp_path / "p"))
+    with pytest.raises(OSError):
+        jobs.write_browser_mcp_config(config)
+    assert not os.path.exists(created["path"])  # the half-written stub is removed
+
+
+def test_build_job_driver_cleans_scratch_when_construction_fails(tmp_path, monkeypatch):
+    import os
+
+    import iris.jobs as jobs
+
+    created = {}
+    real_mkdtemp = jobs.tempfile.mkdtemp
+
+    def record(*a, **k):
+        d = real_mkdtemp(*a, **k)
+        created["dir"] = d
+        return d
+
+    monkeypatch.setattr(jobs.tempfile, "mkdtemp", record)
+    monkeypatch.setattr(jobs, "write_browser_mcp_config",
+                        lambda c: (_ for _ in ()).throw(ValueError("bad browser cmd")))
+    config = Config(jobs_enabled=True, browser_profile_dir=str(tmp_path / "p"))
+    with pytest.raises(ValueError):
+        jobs.build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    # the scratch dir allocated before the failure must not leak
+    assert not os.path.exists(created["dir"])
+
+
+def test_build_job_driver_tracks_scratch_cwd_for_cleanup(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True)
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    # A no-workspace job runs in a throwaway scratch dir that build owns.
+    assert os.path.isdir(driver.cwd)
+    assert driver.cwd in driver._job_temp_paths
+
+
+def test_build_job_driver_does_not_track_a_workspace_dir(tmp_path):
+    from iris.jobs import build_job_driver
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    driver = build_job_driver(Config(jobs_enabled=True),
+                              {"grants": ["subagents"], "workspace": "ws"}, str(ws))
+    # The workspace is the owner's; build must never list it for deletion.
+    assert driver.cwd == str(ws)
+    assert str(ws) not in driver._job_temp_paths
+    assert driver._job_temp_paths == []
+
+
+def test_build_job_driver_tracks_browser_mcp_config_for_cleanup(tmp_path):
+    from iris.jobs import build_job_driver
+
+    config = Config(jobs_enabled=True, job_grants=["browser"],
+                    browser_profile_dir=str(tmp_path / "p"))
+    driver = build_job_driver(config, {"grants": ["browser"], "workspace": ""}, None)
+    assert os.path.exists(driver.mcp_config)
+    assert driver.mcp_config in driver._job_temp_paths
+    assert driver.cwd in driver._job_temp_paths  # scratch dir tracked too
+
+
+def test_run_job_cleans_the_scratch_sandbox_on_completion(tmp_path):
+    import tempfile
+
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False))
+    scratch = tempfile.mkdtemp(prefix="iris-job-test-")
+    fd, cfg = tempfile.mkstemp(prefix="iris-job-mcp-test-", suffix=".json")
+    os.close(fd)
+    base = env["driver_factory"]
+
+    def factory(config, job, workspace_path, child_pid_callback=None):
+        drv = base(config, job, workspace_path, child_pid_callback)
+        drv._job_temp_paths = [cfg, scratch]
+        return drv
+
+    env["driver_factory"] = factory
+    assert run_with(env) == 0
+    assert not os.path.exists(scratch)
+    assert not os.path.exists(cfg)
+
+
+def test_run_job_cleans_the_sandbox_even_when_the_turn_errors(tmp_path):
+    import tempfile
+
+    env = runner_env(tmp_path, result=ClaudeResult(text="", session_id="s", is_error=True, error="boom"))
+    scratch = tempfile.mkdtemp(prefix="iris-job-test-")
+    base = env["driver_factory"]
+
+    def factory(config, job, workspace_path, child_pid_callback=None):
+        drv = base(config, job, workspace_path, child_pid_callback)
+        drv._job_temp_paths = [scratch]
+        return drv
+
+    env["driver_factory"] = factory
+    assert run_with(env) == 1  # the turn failed
+    assert not os.path.exists(scratch)  # ...but the sandbox is still cleaned
+
+
+def test_run_job_does_not_delete_a_workspace_backed_dir(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "keep.txt").write_text("artifact", encoding="utf-8")
+    env = runner_env(tmp_path, result=ClaudeResult(text="done", session_id="s", is_error=False),
+                     workspace=ws)
+    # A workspace-backed driver owns no scratch, so _job_temp_paths is empty.
+    base = env["driver_factory"]
+
+    def factory(config, job, workspace_path, child_pid_callback=None):
+        drv = base(config, job, workspace_path, child_pid_callback)
+        drv._job_temp_paths = []
+        return drv
+
+    env["driver_factory"] = factory
+    assert run_with(env) == 0
+    assert ws.exists() and (ws / "keep.txt").exists()
+
+
 def test_run_job_delivers_a_long_report_in_full_across_messages(tmp_path):
     # The Discord ping must carry the WHOLE report (split across messages),
     # never cut; only the fold-back into the next chat turn stays capped.
@@ -779,5 +1246,5 @@ def test_run_job_delivers_a_long_report_in_full_across_messages(tmp_path):
     assert "line0" in joined and "line699" in joined          # head AND tail both delivered
     assert len(env["pings"]) >= 2                              # split into multiple messages
     assert all(len(t) <= 2000 for _, t in env["pings"])       # each under the Discord limit
-    folded = env["inbox"].drain()
+    folded = env["inbox"].drain("discord:chan-9")
     assert len(folded) == 1 and len(folded[0]) <= 1600         # fold-back stays capped

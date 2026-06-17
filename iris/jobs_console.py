@@ -23,6 +23,7 @@ from .jobs import (
     clamp_grants,
     parse_grants,
     repair_dead_runners,
+    resume_job,
     send_discord_file,
     spawn_runner,
 )
@@ -235,12 +236,10 @@ def _cmd_resume(config: Config, store: JobStore, job: dict, spawn) -> int:
     if not config.jobs_enabled:
         print(_DISABLED)
         return 1
-    if job["state"] not in ("pending", "parked"):
-        print(f"Job #{job['id']} is {job['state']}; only parked or queued jobs can be resumed.")
-        return 1
-    store.transition(job["id"], ("parked",), "pending")
-    spawn(job["id"], store=store)
-    print(f"Resumed job #{job['id']} ({job.get('title','')}).")
+    # Delegate to the single source of truth so the console shares jobs.resume_job's
+    # liveness guard: a pending job already mid-spawn (a live runner pid) must not
+    # get a second runner, and dead runners are repaired before any relaunch.
+    print(resume_job(store, job["id"], spawn=spawn))
     return 0
 
 

@@ -267,6 +267,244 @@ def test_schedule_cmd_rejects_bad_rules(tmp_path, capsys):
     assert rc == 2
 
 
+def test_heartbeat_cmd_shows_current_status(tmp_path, monkeypatch, capsys):
+    import json
+
+    from iris.cli import heartbeat_cmd
+    from iris.config import Config
+
+    (tmp_path / "hb.json").write_text(json.dumps([
+        {"name": "site", "kind": "url_ok", "url": "https://e.com"}]), "utf-8")
+    monkeypatch.setattr("iris.heartbeat.http_status", lambda url, timeout: 200)
+    rc = heartbeat_cmd(Config(heartbeat_file=str(tmp_path / "hb.json")))
+    out = capsys.readouterr().out
+    assert rc == 0 and "site" in out and "ok" in out.lower()
+
+
+def test_heartbeat_cmd_without_a_file(tmp_path, capsys):
+    from iris.cli import heartbeat_cmd
+    from iris.config import Config
+
+    rc = heartbeat_cmd(Config(heartbeat_file=str(tmp_path / "nope.json")))
+    assert rc == 0
+    assert "IRIS_HEARTBEAT_FILE" in capsys.readouterr().out
+
+
+def test_doctor_warns_job_verify_without_jobs(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, job_verify_enabled=True, jobs_enabled=False), probe=False)
+    out = capsys.readouterr().out
+    assert "verif" in out.lower() and "IRIS_JOBS" in out
+
+
+def test_doctor_warns_self_started_work_without_a_budget(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, goals_enabled=True, usage_budget_usd=0.0,
+                  goals_file=str(tmp_path / "g.json")), probe=False)
+    out = capsys.readouterr().out
+    assert "IRIS_USAGE_BUDGET_USD" in out and "park" in out.lower()
+
+
+def test_doctor_fix_repairs_dead_job_runners(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.jobs import JobStore
+
+    fake = _fake_claude(tmp_path)
+    store = JobStore(tmp_path / "jobs.json", keep=10)
+    store.add("dead", "i", ["subagents"], "", "h", state="running")
+    store.update(1, pid=999999)  # a pid that is not alive
+    doctor(Config(claude_bin=fake, jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"),
+                  jobs_keep=10), probe=False, fix=True)
+    out = capsys.readouterr().out
+    assert "repair" in out.lower()
+    assert JobStore(tmp_path / "jobs.json").get(1)["state"] == "failed"
+
+
+def test_doctor_fix_prunes_old_terminal_jobs(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.jobs import JobStore
+
+    fake = _fake_claude(tmp_path)
+    store = JobStore(tmp_path / "jobs.json", keep=1)
+    for i in range(3):
+        j = store.add(f"old{i}", "i", ["subagents"], "", "h")
+        store.transition(j["id"], ("pending",), "done")
+    doctor(Config(claude_bin=fake, jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json"),
+                  jobs_keep=1), probe=False, fix=True)
+    assert "prune" in capsys.readouterr().out.lower()
+    assert len(JobStore(tmp_path / "jobs.json").all()) <= 2  # keep=1 (+ id anchor)
+
+
+def test_doctor_without_fix_does_not_repair(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.jobs import JobStore
+
+    fake = _fake_claude(tmp_path)
+    store = JobStore(tmp_path / "jobs.json", keep=10)
+    store.add("dead", "i", ["subagents"], "", "h", state="running")
+    store.update(1, pid=999999)
+    doctor(Config(claude_bin=fake, jobs_enabled=True, jobs_file=str(tmp_path / "jobs.json")),
+           probe=False)  # no fix
+    # untouched: doctor without --fix never mutates state
+    assert JobStore(tmp_path / "jobs.json").get(1)["state"] == "running"
+
+
+def test_doctor_warns_webhook_without_a_token(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, webhook_enabled=True, webhook_token=""), probe=False)
+    out = capsys.readouterr().out
+    assert "IRIS_WEBHOOK_TOKEN" in out and "refuse" in out.lower()
+
+
+def test_doctor_warns_webhook_bound_to_all_interfaces(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, webhook_enabled=True, webhook_token="s",
+                  webhook_bind="0.0.0.0"), probe=False)
+    out = capsys.readouterr().out
+    assert "all" in out.lower() and "interface" in out.lower()
+
+
+def test_doctor_quiet_about_budget_when_one_is_set(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, goals_enabled=True, usage_budget_usd=200.0,
+                  goals_file=str(tmp_path / "g.json")), probe=False)
+    out = capsys.readouterr().out
+    assert "park backstop" not in out.lower()
+
+
+def test_skills_cmd_pending_approve_reject(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from iris.cli import skills_cmd
+    from iris.config import Config
+    from iris.skills import SkillProposalStore, discover
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # don't touch the real ~/.claude
+    skills_dir = tmp_path / "myskills"
+    pfile = tmp_path / "p.json"
+    content = "---\nname: summarize\ndescription: Summarize docs into bullets\n---\nBody."
+    SkillProposalStore(pfile).add("summarize", content, "often asked", kind="new", now=1.0)
+    config = Config(skills_dir=str(skills_dir), skill_proposals_file=str(pfile))
+
+    def ns(**kw):
+        return argparse.Namespace(**kw)
+
+    assert skills_cmd(config, ns(skills_action="pending")) == 0
+    assert "summarize" in capsys.readouterr().out
+
+    assert skills_cmd(config, ns(skills_action="approve", proposal_id=1)) == 0
+    assert SkillProposalStore(pfile).get(1)["status"] == "approved"
+    assert (skills_dir / "summarize" / "SKILL.md").read_text("utf-8") == content
+    # the approved skill is now discoverable to claude
+    assert "summarize" in dict(discover(str(tmp_path / "home")))
+
+    assert skills_cmd(config, ns(skills_action="reject", proposal_id=99)) == 1  # no such id
+
+
+def test_skills_cmd_approve_refuses_an_already_decided_proposal(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from iris.cli import skills_cmd
+    from iris.config import Config
+    from iris.skills import SkillProposalStore
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    pfile = tmp_path / "p.json"
+    content = "---\nname: s\ndescription: d\n---\nbody"
+    store = SkillProposalStore(pfile)
+    store.add("s", content, "r", kind="new", now=1.0)
+    store.transition(1, "rejected", now=2.0)
+    config = Config(skills_dir=str(tmp_path / "myskills"), skill_proposals_file=str(pfile))
+    rc = skills_cmd(config, argparse.Namespace(skills_action="approve", proposal_id=1))
+    assert rc == 2  # a rejected proposal cannot be resurrected by approve
+    assert "rejected" in capsys.readouterr().out.lower()
+    assert SkillProposalStore(pfile).get(1)["status"] == "rejected"  # unchanged
+
+
+def test_skills_cmd_approve_needs_a_skills_dir(tmp_path, capsys):
+    import argparse
+
+    from iris.cli import skills_cmd
+    from iris.config import Config
+    from iris.skills import SkillProposalStore
+
+    pfile = tmp_path / "p.json"
+    content = "---\nname: s\ndescription: d\n---\nbody"
+    SkillProposalStore(pfile).add("s", content, "r", kind="new", now=1.0)
+    config = Config(skills_dir="", skill_proposals_file=str(pfile))
+    rc = skills_cmd(config, argparse.Namespace(skills_action="approve", proposal_id=1))
+    assert rc == 2
+    assert "IRIS_SKILLS_DIR" in capsys.readouterr().out
+
+
+def test_doctor_reports_goals_when_enabled(tmp_path, capsys):
+    from iris.cli import doctor
+    from iris.config import Config
+    from iris.goals import GoalStore
+
+    GoalStore(tmp_path / "g.json").add("a standing goal", now=1.0)
+    fake = _fake_claude(tmp_path)
+    doctor(Config(claude_bin=fake, goals_enabled=True,
+                  goals_file=str(tmp_path / "g.json")), probe=False)
+    out = capsys.readouterr().out
+    assert "goal" in out.lower()
+
+
+def test_goal_tick_disabled_makes_no_model_call(tmp_path, monkeypatch, capsys):
+    # With IRIS_GOALS off the tick short-circuits before any usage fetch or model
+    # call, so it's safe to run through the real parser with no stubs.
+    from iris.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    for key in list(__import__("os").environ):
+        if key.startswith("IRIS_"):
+            monkeypatch.delenv(key, raising=False)
+    rc = main(["goal-tick"])
+    assert rc == 0
+    assert "disabled" in capsys.readouterr().out
+
+
+def test_goals_cmd_list_and_cancel(tmp_path, capsys):
+    import argparse
+
+    from iris.cli import goals_cmd
+    from iris.config import Config
+    from iris.goals import GoalStore
+
+    config = Config(goals_file=str(tmp_path / "g.json"))
+    store = GoalStore(tmp_path / "g.json")
+    store.add("a standing goal", now=1.0)
+
+    rc = goals_cmd(config, argparse.Namespace(goals_action="list"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "a standing goal" in out and "#1" in out
+
+    rc = goals_cmd(config, argparse.Namespace(goals_action="cancel", goal_id=1))
+    assert rc == 0
+    assert GoalStore(tmp_path / "g.json").get(1)["status"] == "cancelled"
+
+    rc = goals_cmd(config, argparse.Namespace(goals_action="cancel", goal_id=99))
+    assert rc == 1  # no such goal
+
+
 def test_doctor_warns_when_browser_grant_lacks_npx(tmp_path, capsys, monkeypatch):
     import iris.cli as cli_mod
     from iris.config import Config
@@ -343,3 +581,31 @@ def test_reminders_tick_runs_subticks_without_a_discord_token(tmp_path, monkeypa
     assert rc == 0
     assert "schedules: 1 due, 1 launched" in out
     assert calls  # the script rule actually spawned despite no token
+
+
+def test_trace_cmd_digests_the_ledger(tmp_path, capsys):
+    import json
+
+    from iris.cli import trace_cmd
+    from iris.config import Config
+
+    ledger = tmp_path / "trace.jsonl"
+    ledger.write_text(
+        json.dumps({"ts": 1000.0, "kind": "chat", "is_error": False, "cost_usd": 0.2,
+                    "num_turns": 2, "duration_ms": 1000}) + "\n"
+        + json.dumps({"ts": 1001.0, "kind": "job", "is_error": True,
+                      "error_category": "timeout"}) + "\n",
+        encoding="utf-8",
+    )
+    rc = trace_cmd(Config(trace_file=str(ledger)), days=7, now=1000.0 + 86400)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2 runs" in out and "timeout" in out
+
+
+def test_trace_cmd_without_a_ledger_is_friendly(tmp_path, capsys):
+    from iris.cli import trace_cmd
+    from iris.config import Config
+
+    assert trace_cmd(Config(trace_file=""), days=7) == 0
+    assert "IRIS_TRACE_FILE" in capsys.readouterr().out

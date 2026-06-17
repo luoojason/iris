@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from iris.memory import normalize, rank, relevance, score
+from iris.memory import note_in_scope, normalize, pinned_digest, rank, relevance, score
 
 NOW = datetime(2026, 6, 7, tzinfo=timezone.utc).timestamp()
 
@@ -13,6 +13,39 @@ def _note(id, text, tags=None, **extra):
     e = {"id": id, "text": text, "tags": tags or [], "created_at": "2026-06-01T00:00:00Z"}
     e.update(extra)
     return e
+
+
+def test_normalize_defaults_conversation_id_to_none():
+    # A legacy note (no conversation_id) is global: it applies in every thread.
+    assert normalize({"id": 1, "text": "hi"})["conversation_id"] is None
+    assert normalize({"id": 2, "text": "hi", "conversation_id": "c-123"})["conversation_id"] == "c-123"
+
+
+def test_note_in_scope_global_vs_conversation():
+    glob = normalize({"id": 1, "text": "Jason prefers metric units"})            # global
+    here = normalize({"id": 2, "text": "the repost plan", "conversation_id": "A"})  # thread A
+    # A global note is in scope everywhere, including an unknown/None context.
+    assert note_in_scope(glob, "A") and note_in_scope(glob, "B") and note_in_scope(glob, None)
+    # A thread-scoped note is in scope only in its own thread.
+    assert note_in_scope(here, "A") is True
+    assert note_in_scope(here, "B") is False
+    assert note_in_scope(here, None) is False
+
+
+def test_pinned_digest_excludes_other_threads_topic_notes():
+    now = NOW
+    notes = [
+        normalize({"id": 1, "text": "Jason's video workflow: delete and repost",
+                   "pinned": True, "conversation_id": "thread-repost"}),
+        normalize({"id": 2, "text": "Jason prefers terse replies", "pinned": True}),  # global
+    ]
+    # In a DIFFERENT thread, the repost note must NOT load; the global one must.
+    digest = pinned_digest(notes, now, 2400, conversation_id="thread-5unposted")
+    assert "delete and repost" not in digest      # the bleed is gone
+    assert "prefers terse replies" in digest       # universal facts still load
+    # In its own thread, the scoped note loads.
+    own = pinned_digest(notes, now, 2400, conversation_id="thread-repost")
+    assert "delete and repost" in own
 
 
 def test_normalize_fills_legacy_note():
@@ -101,6 +134,38 @@ def test_rank_respects_limit_and_is_deterministic():
 def test_score_returns_none_for_dropped_note():
     assert score(_note(1, "blue"), ["finance"], NOW) is None
     assert score(_note(1, "blue"), [], NOW) is not None  # no query, kept
+
+
+# -- BM25 refinement (rarity / density / length, within a hit tier) -----------
+
+def test_bm25_prefers_the_rarer_matching_term():
+    # Both candidates match exactly ONE query term, so they share a hit tier; the
+    # note matching the rarer term (high IDF) should win the tier.
+    rare = _note(1, "kubernetes deployment")   # 'kubernetes' is rare in the corpus
+    common = _note(2, "weekly report")         # 'report' is common in the corpus
+    fillers = [_note(10 + i, "report status update") for i in range(6)]
+    ranked = rank([rare, common, *fillers], "kubernetes report", NOW)
+    ids = [n["id"] for n in ranked]
+    assert ids.index(1) < ids.index(2)  # rare-term match outranks common-term match
+
+
+def test_bm25_prefers_the_more_focused_note():
+    # Same single term, same tf; the shorter note (term not buried) wins via
+    # BM25 length normalization.
+    focused = _note(1, "finance")
+    buried = _note(2, "finance " + "filler " * 40)
+    ranked = rank([focused, buried], "finance", NOW)
+    assert ranked[0]["id"] == 1
+
+
+def test_bm25_refinement_never_flips_a_hit_count_tier():
+    # A note matching MORE distinct query terms must always beat one matching
+    # fewer, no matter how rare/dense/short the lesser match is.
+    one_rare = _note(1, "zebra")                 # one very rare term
+    two_common = _note(2, "finance markets")     # two terms
+    fillers = [_note(10 + i, "zebra zebra zebra") for i in range(3)]
+    ranked = rank([one_rare, two_common, *fillers], "finance markets zebra", NOW)
+    assert ranked[0]["id"] == 2  # two distinct hits beat one, refinement notwithstanding
 
 
 # -- pinned digest (the always-loaded tier) -----------------------------------

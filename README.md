@@ -47,9 +47,11 @@ Discord message ──> Iris ──> claude -p "<message>" --resume <session>
 
 It is **event-driven on purpose.** Iris only calls the model when a message
 arrives, so it burns no idle inference. That is what keeps it inside your monthly
-agent credit rather than draining it in the background. Two opt-in, off-by-default
-exceptions relax this on a tight leash — scheduled jobs and autonomous resume,
-both described below — and neither can ever start a conversation from nothing.
+agent credit rather than draining it in the background. Four opt-in, off-by-default
+exceptions relax this on a tight leash — scheduled jobs, autonomous resume,
+proactive reviews, and the goal loop, all described below. None can start a
+conversation from nothing; the two clock-started ones (reviews and goals) gate on
+your real weekly plan usage so they never crowd out your own work.
 
 ## Quickstart
 
@@ -68,9 +70,18 @@ python -m iris tui          # full-screen terminal UI (needs: pip install -e ".[
 python -m iris chat         # or a plain REPL, no extra dependency
 ```
 
-The `tui` is a full-screen terminal app with a scrolling conversation, a live
-thinking indicator, and proper line editing. The `chat` REPL is the no-frills
-version (now with history and a thinking spinner).
+The `tui` is a full-screen terminal app: a scrolling conversation with a live
+thinking indicator and proper line editing on the left, and a **live sidebar** on
+the right that shows Iris's state at a glance, active jobs, goals and their step
+progress, this month's usage, and pending reminders, refreshed on a timer so you
+never have to leave the chat to see what she's doing. Ctrl+N starts a new chat,
+Ctrl+R refreshes the sidebar, Ctrl+C quits. **Ctrl+O (or Tab) opens the
+inspector** — a drill-in over the active jobs and goals where you select one to
+see its full detail and act on it: `c` cancel, `s` resume a parked/queued job,
+`a` answer a job paused on a question, `esc` to close. The inspector routes every
+action through the same shared functions the CLI and chat tools use, so it adds no
+behavior and makes no model call. The `chat` REPL is the no-frills version
+(history and a thinking spinner).
 
 To run it on Discord, create a bot at the [Discord Developer
 Portal](https://discord.com/developers/applications), enable the **Message
@@ -131,6 +142,8 @@ it costs zero inference and works even mid-turn:
 | --- | --- |
 | `!usage` | This month's spend and projected month-end pace. |
 | `!jobs` | Recent background jobs and their states. |
+| `!goals` | Standing goals and their step progress. |
+| `!heartbeat` | Last-known health-check status (no fresh probe). |
 | `!schedules` | Recorded scheduled jobs (when enabled). |
 | `!status` | Whether a reply is in flight here, queue depth, active jobs. |
 | `!stop` | Stop the reply being written in this conversation. |
@@ -180,14 +193,34 @@ then on. The digest frames notes as data-not-instructions, but if Iris
 browses untrusted content regularly, audit what is pinned now and then
 (`recall` shows PINNED entries) or lower the budget.
 
+**Untrusted content is fenced as data.** The same data-not-instructions
+framing now wraps every place outside text reaches the model: the fold-back
+inbox notes (job reports, webhook-forwarded messages), Discord reply quotes,
+and transcribed voice messages. An embedded directive in any of these is
+quoted, not obeyed.
+
 Iris also ships a scoped **Discord server-actions** tool
 (`iris/mcp/discord_server.py`): `create_thread`, `fetch_messages`,
 `list_channels`, `search_members`. It is a narrow, audited surface (no
 arbitrary "send anywhere" tool) so the agent can do Discord chores the chat
-adapter can't, without raw shell. A **history search** tool
+adapter can't, without raw shell. These tools are **default-deny**: they reach
+only the home channel / configured guild unless ids are added to
+`IRIS_DISCORD_ALLOWED_CHANNELS` / `IRIS_DISCORD_ALLOWED_GUILDS`. A **history search** tool
 (`iris/mcp/session_search.py`) lets it recall past conversations from the
 transcripts Claude Code already keeps. Point Claude at any other MCP server
 (filesystem, browser, web search, your own) the same way.
+
+### Trace ledger
+
+Set `IRIS_TRACE_FILE` and every `claude -p` invocation — chat, jobs, proactive
+reviews, the goal loop, compaction — appends one structured record at the single
+choke point they all pass through: kind, model, outcome, an error category,
+timings, model turns, context tokens, and cost. It is how you tell, over time,
+whether Iris is getting better or worse. `iris trace --days 7` digests it (runs,
+errors by category, total cost, average latency); the digest is model-free, so an
+owner-authored scheduled job can deliver it through the notify spine. Content
+(the prompt and reply) is captured only with `IRIS_TRACE_CAPTURE_CONTENT=true`,
+off by default for privacy.
 
 ### Background jobs
 
@@ -251,6 +284,25 @@ with a `jobs` server entry in your MCP config
   model call), and the report folds into your next chat turn via the inbox
   (`IRIS_INBOX_FILE`), so the agent knows the outcome without polling.
   Parked and queued jobs launch only when you say so (`resume_job`).
+- **Chaining.** A job can be started with `after=<job_id>` so it waits until that
+  job finishes and then launches automatically (and is cancelled if the
+  prerequisite fails). Chains resolve with no poller — on the prerequisite's
+  completion and on the next time jobs are touched — so a sequence of dependent
+  work runs itself in order without holding slots while it waits.
+- **Pause and ask.** A job that hits a fork it genuinely can't resolve (a choice
+  between real options, a missing credential) can end its turn with a single
+  `QUESTION: ...` line instead of guessing. The runner pauses it (state
+  `needs_input`), pings you, and waits — no slot held, no clock polling. You
+  answer with `resume_job(<id>, answer=...)` and it resumes the *same* claude
+  session with full context. Capped per job (`IRIS_JOB_MAX_QUESTIONS`) so it can
+  never loop; `!status` shows when a job is waiting on you.
+- **Verification gate** (`IRIS_JOB_VERIFY=true`, off by default). Before a
+  finished job reports "done", an independent cheap model
+  (`IRIS_JOB_VERIFY_MODEL`, defaults to the goal judge model) rules whether the
+  report actually satisfies the instructions — the worker can't wave its own work
+  through. It only **annotates**: the result is always delivered, a failed check
+  prepends a clear flag (and shows in `job` status), an unreachable reviewer fails
+  open to "couldn't verify", and it's skipped when the credit guard is parked.
 
 ### Job console
 
@@ -333,6 +385,50 @@ bounded HTTP GET per rule (`IRIS_WAKE_HTTP_TIMEOUT`), still with no model call.
 `cooldown_secs` absorbs flapping; `"once": true` disarms a rule after its
 first fire. `iris doctor` validates the rules file and names every problem.
 
+### Quiet heartbeat
+
+A wake fires on an *event*; the heartbeat asks a steady *level* question: are the
+things that should be true right now actually true? Declare a checklist in
+`IRIS_HEARTBEAT_FILE` (a JSON list you author; the model can't touch it) and the
+same `reminders-tick` evaluates it with cheap, model-free checks. It is **silent
+by default**: a healthy system says nothing, a new failure sends ONE consolidated
+ping for the whole checklist, a steady failure is not repeated, and a recovery is
+announced once. Run `iris heartbeat` any time to see the current status.
+
+```json
+[
+  {"name": "disk", "kind": "disk_free", "path": "/", "min_percent": 10},
+  {"name": "nightly-backup", "kind": "file_fresh", "path": "/var/backups/db.sql", "max_age_secs": 90000},
+  {"name": "site", "kind": "url_ok", "url": "https://example.com", "expect_status": 200}
+]
+```
+
+Kinds: `disk_free` (free space above a floor), `file_fresh` (a file changed within
+`max_age_secs` — proof a backup or cron actually ran), and `url_ok` (a URL returns
+the expected status). `iris doctor` validates the file and names every problem.
+
+### Webhook wakes
+
+Event wakes and the heartbeat *poll*; a webhook wake lets an external system
+**push**. Run a small inbound listener (`python -m iris webhook`, its own process)
+and an authorized POST becomes a Discord ping plus a fold-back inbox note — never
+a model call, exactly like any other wake.
+
+```bash
+# in .env: IRIS_WEBHOOK=true and a token (required), then run the listener:
+IRIS_WEBHOOK_TOKEN=$(openssl rand -hex 16)
+python -m iris webhook
+# from anywhere allowed to reach it:
+curl -X POST -H "X-Iris-Token: $IRIS_WEBHOOK_TOKEN" -d "build passed" http://127.0.0.1:8787/ci
+```
+
+It is an inbound surface, so it is deliberately tight: **off by default**, bound to
+`127.0.0.1` unless you widen it (e.g. a tailnet address — never `0.0.0.0`
+casually), and a **token is mandatory** — the server refuses to start without
+`IRIS_WEBHOOK_TOKEN` and checks every request with a constant-time compare. The
+body is capped and only ever becomes note text — it is never executed or fed to
+the model. `iris doctor` flags a missing token or an all-interfaces bind.
+
 ### Reminders
 
 The `reminders` tool (`iris/mcp/reminders.py`: `schedule_reminder`,
@@ -393,6 +489,78 @@ poll loop (`IRIS_RESUME_POLL_SECS`, default 20s) and runs the turn through the
 same per-conversation runner as a typed message, so the resume can never race the
 live `claude` session. When a resume is dropped, the ordinary completion note
 still folds into your next message — nothing is lost.
+
+### Proactive reviews
+
+`IRIS_PROACTIVE=true` (off by default) is the third relaxation, and the first
+where the **clock** — not something you launched — starts the work. On a cron,
+Iris reviews her own state and acts: **assist** (twice a day, outward) finds the
+single highest-value thing she could do for you and either does it (if small and
+reversible) or asks (if big or outward-facing); **maintain** (every ~3 days,
+inward) tidies the wiki, consolidates memory, and proposes — never silently makes
+— changes to her own skills. Because the clock starts it, the leash is your *real
+account usage*, not a count: a review runs only while the account's seven-day
+plan utilization (the same number `/usage` shows, read from the OAuth usage
+endpoint and cached so the rate-limited endpoint is not polled tightly) is under
+`IRIS_PROACTIVE_USAGE_MAX` (default 80%), with the credit-guard park as a hard
+backstop and an unknown number failing safe to "do not run". Your Mac and Iris
+share one Max account, so gating at 80% keeps the top fifth for your own work.
+Enable with two cron entries:
+
+```bash
+# in .env: IRIS_PROACTIVE=true   (and set IRIS_USAGE_BUDGET_USD so park is meaningful)
+*/0 9,21 * * *  cd /path/to/iris && python -m iris proactive-tick assist
+0 10 */3 * *    cd /path/to/iris && python -m iris proactive-tick maintain
+```
+
+### Goals
+
+`IRIS_GOALS=true` (off by default) is the fourth relaxation: a **standing goal**
+you set in chat that the clock advances on its own until it is done or needs you.
+You say "your goal is to ..." and Iris records it (`set_goal`, scoped to the
+thread you set it in); a cron tick then runs **one work step per fire** on the
+goal's own continuous session, and an **independent cheap-model judge** rules each
+step done / blocked / continue — the worker model cannot declare its own goal
+finished. And when the judge does rule "done", an **independent verifier** turn
+re-checks the actual work (reads the wiki page / memory / page the worker claims)
+before the goal is accepted; if it can't confirm, the goal asks you instead of
+completing blind (`IRIS_GOALS_VERIFY_DONE`, on by default, fires only on a done
+verdict so it costs at most one extra cheap call per completion). When it is done
+or stuck, Iris pings the thread you set it in. The line
+it keeps is the same as the others: *a goal exists only because you set it.* It
+rides the proactive weekly-usage leash and the credit-guard park (a step runs only
+with real headroom) and is bounded further — a per-goal step budget
+(`IRIS_GOALS_MAX_STEPS`, default 20) stops a goal that never converges and asks
+you, a cap on active goals (`IRIS_GOALS_MAX_ACTIVE`) stops runaway goal setting,
+one goal advances per tick (least-recently-worked first, so many goals share the
+clock fairly), and a judge that errors makes the tick **ask you** rather than loop
+or claim success. See and steer goals with `iris goals` (list) and
+`iris goals cancel <id>`, or in chat with `list_goals` / `cancel_goal`. Enable
+with one cron entry:
+
+```bash
+# in .env: IRIS_GOALS=true
+0 */4 * * *  cd /path/to/iris && python -m iris goal-tick
+```
+
+### Self-improving skills
+
+Iris can refine her own skills, but never silently — rewriting a skill is the
+highest-stakes self-modification there is (a skill is an instruction she follows),
+so it is always owner-gated. When she learns something durable about how she should
+work (often during a maintain review), she calls `propose_skill`, which **stages** a
+full `SKILL.md` for your review without changing her behavior. You then:
+
+```bash
+iris skills pending            # list staged proposals
+iris skills show <id>          # read the full proposed SKILL.md and rationale
+iris skills approve <id>       # write it into IRIS_SKILLS_DIR and link it live
+iris skills reject <id>        # discard it
+```
+
+Approval is the only path from proposal to live behavior. Proposals are capped
+(`IRIS_SKILL_PROPOSALS_MAX`), validated (safe slug name, real frontmatter), and
+confined to the skills directory.
 
 ### Voice messages
 

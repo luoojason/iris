@@ -109,3 +109,13 @@ def test_requeue_preserves_identity_as_one_shot(tmp_path):
     assert requeued[0]["origin"] == "model"
     # the firing goes back one-shot; its next occurrence is already queued
     assert int(requeued[0].get("repeat_secs", 0) or 0) == 0
+
+
+def test_corrupt_reminders_file_is_quarantined(tmp_path):
+    # Migration to the shared store fixed a drift: a corrupt file used to be
+    # silently discarded (next save overwrote it). Now it is preserved.
+    p = tmp_path / "r.json"
+    p.write_text("{not json", encoding="utf-8")
+    store = ReminderStore(p)
+    assert store.all() == []
+    assert (tmp_path / "r.json.corrupt").exists()  # owner data kept, not overwritten

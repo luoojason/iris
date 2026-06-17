@@ -113,6 +113,17 @@ def _child_env(disable_auto_memory: bool = False) -> dict:
     return env
 
 
+def _origin_channel(conversation_id: Optional[str]) -> Optional[str]:
+    """The Discord channel/thread id behind a conversation id, or None.
+
+    Only Discord conversations (``discord:<id>``) yield a routable channel; a CLI
+    or other transport returns None so jobs fall back to the home channel.
+    """
+    if conversation_id and conversation_id.startswith("discord:"):
+        return conversation_id.split(":", 1)[1] or None
+    return None
+
+
 def _default_runner(cmd: Sequence[str], timeout: float, prompt: str):
     """Sentinel default runner. Real runs go through ClaudeDriver._subprocess_run;
     this identity is what the driver checks to know it owns the subprocess."""
@@ -151,7 +162,7 @@ class ClaudeDriver:
     # Called on every command build for an extra system-prompt block (the agent
     # wires the pinned-memory digest here). Must be cheap; a raising supplier is
     # logged and skipped so it can never break a turn.
-    system_prompt_extra: Optional[Callable[[], Optional[str]]] = None
+    system_prompt_extra: Optional[Callable[[Optional[str]], Optional[str]]] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: Optional[Sequence[str]] = None
@@ -179,10 +190,26 @@ class ClaudeDriver:
     timeout_max_retries: int = 0
     runner: Runner = _default_runner
     sleep: Callable[[float], None] = time.sleep
+    # Trace ledger: when trace_file is set, every invocation appends one record
+    # (kind, model, outcome, error category, timings, turns, tokens, cost) at this
+    # single choke point. Content (prompt/reply/raw error) is kept only when
+    # trace_capture_content is true. Off by default; fail-soft.
+    trace_file: str = ""
+    trace_kind: str = "chat"
+    trace_capture_content: bool = False
 
     @property
     def _owns_subprocess(self) -> bool:
         return self.runner is _default_runner
+
+    def _traced(self, result: "ClaudeResult", prompt: str,
+                session_id: Optional[str]) -> "ClaudeResult":
+        """Append a trace record for this invocation's final result, then return it."""
+        if self.trace_file:
+            from .trace import record_trace
+            record_trace(self.trace_file, self.trace_kind, result, prompt=prompt,
+                         session_id=session_id, capture_content=self.trace_capture_content)
+        return result
 
     def _effective_disallowed(self) -> Optional[Sequence[str]]:
         if self.disallowed_tools:
@@ -196,6 +223,7 @@ class ClaudeDriver:
         session_id: Optional[str] = None,
         model: Optional[str] = None,
         stream: bool = False,
+        conversation_id: Optional[str] = None,
     ) -> list[str]:
         """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin.
 
@@ -224,7 +252,7 @@ class ClaudeDriver:
         # both. When there is inline content (standing orders / the pinned
         # digest), fold the persona file into it and pass one inline flag;
         # otherwise keep the persona on the file flag (out of argv).
-        extra = self._append_system_prompt_value()
+        extra = self._append_system_prompt_value(conversation_id)
         if extra and self.append_system_prompt_file:
             persona = self._read_text(self.append_system_prompt_file)
             merged = "\n\n".join(p for p in (persona, extra) if p)
@@ -258,12 +286,14 @@ class ClaudeDriver:
             log.warning("system prompt file unreadable: %s", path)
             return ""
 
-    def _append_system_prompt_value(self) -> Optional[str]:
+    def _append_system_prompt_value(self, conversation_id: Optional[str] = None) -> Optional[str]:
         """The merged ``--append-system-prompt`` value: static text + standing orders.
 
         Merged into one flag value (the CLI takes the option once); the standing
         orders file is read fresh on every call so the owner can edit it live.
-        An unreadable file degrades to a warning, never a failed turn.
+        An unreadable file degrades to a warning, never a failed turn. The extra
+        supplier (the tier-0 digests) is passed the current conversation so the
+        pinned-memory block can be scoped to this thread.
         """
         parts = []
         if self.append_system_prompt:
@@ -274,7 +304,7 @@ class ClaudeDriver:
                 parts.append(text)
         if self.system_prompt_extra is not None:
             try:
-                extra = (self.system_prompt_extra() or "").strip()
+                extra = (self.system_prompt_extra(conversation_id) or "").strip()
             except Exception:
                 log.warning("system prompt extra supplier failed", exc_info=True)
                 extra = ""
@@ -282,11 +312,15 @@ class ClaudeDriver:
                 parts.append(extra)
         return "\n\n".join(parts) if parts else None
 
-    def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None) -> ClaudeResult:
+    def run(self, prompt: str, session_id: Optional[str] = None, model: Optional[str] = None,
+            conversation_id: Optional[str] = None) -> ClaudeResult:
         """Run one turn, retrying transient failures (rate limits, overload).
 
         ``model`` overrides the driver's default model for this turn only, which
         is how per-turn routing picks a lighter model for trivial messages.
+        ``conversation_id`` is the originating chat (e.g. a Discord thread); it is
+        passed to the child as IRIS_ORIGIN_CHANNEL so a job started in this turn
+        reports back to THIS thread instead of always the home channel.
         """
         if self._owns_subprocess and shutil.which(self.claude_bin) is None:
             raise ClaudeError(
@@ -294,7 +328,7 @@ class ClaudeDriver:
                 "Install Claude Code and sign in to your subscription first."
             )
 
-        cmd = self.build_command(session_id, model)
+        cmd = self.build_command(session_id, model, conversation_id=conversation_id)
         last_error: Optional[str] = None
         timeout_attempts = 0
         transient_attempts = 0
@@ -302,7 +336,7 @@ class ClaudeDriver:
         while True:
             try:
                 if self._owns_subprocess:
-                    proc = self._subprocess_run(cmd, self.timeout, prompt)
+                    proc = self._subprocess_run(cmd, self.timeout, prompt, conversation_id)
                 else:
                     proc = self.runner(cmd, self.timeout, prompt)
             except subprocess.TimeoutExpired:
@@ -322,7 +356,7 @@ class ClaudeDriver:
 
             result = self._parse(proc, session_id)
             if not result.is_error:
-                return result
+                return self._traced(result, prompt, session_id)
 
             last_error = result.error
             if transient_attempts < self.max_retries and self._is_retryable(result):
@@ -334,16 +368,20 @@ class ClaudeDriver:
                 )
                 self._backoff(transient_attempts - 1, rate_limited=rate_limited)
                 continue
-            return result
+            return self._traced(result, prompt, session_id)
 
-        return ClaudeResult(
-            text="", session_id=session_id, is_error=True,
-            error=last_error or "claude failed for an unknown reason",
+        return self._traced(
+            ClaudeResult(
+                text="", session_id=session_id, is_error=True,
+                error=last_error or "claude failed for an unknown reason",
+            ),
+            prompt, session_id,
         )
 
     # -- internals ---------------------------------------------------------
 
-    def _subprocess_run(self, cmd: Sequence[str], timeout: float, prompt: str):
+    def _subprocess_run(self, cmd: Sequence[str], timeout: float, prompt: str,
+                        conversation_id: Optional[str] = None):
         """Run claude in its own process group so a timeout kills the whole tree.
 
         ``subprocess.run`` would terminate only the direct child on timeout,
@@ -353,6 +391,12 @@ class ClaudeDriver:
         kwargs = {}
         if os.name == "posix":
             kwargs["start_new_session"] = True
+        env = _child_env(self.disable_auto_memory)
+        origin = _origin_channel(conversation_id)
+        if origin:
+            # Added AFTER the IRIS_* strip, so the job MCP server (which the child
+            # spawns) can route a job's report back to the originating thread.
+            env["IRIS_ORIGIN_CHANNEL"] = origin
         proc = subprocess.Popen(
             list(cmd),
             stdin=subprocess.PIPE,
@@ -361,7 +405,7 @@ class ClaudeDriver:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_child_env(self.disable_auto_memory),
+            env=env,
             cwd=self.cwd,
             **kwargs,
         )
