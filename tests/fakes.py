@@ -61,7 +61,7 @@ class FakeStreamDriver:
         self.results = list(results)
         self.prompts: list[str] = []
 
-    def start(self, prompt, session_id=None, model=None) -> FakeStreamTurn:
+    def start(self, prompt, session_id=None, model=None, conversation_id=None) -> FakeStreamTurn:
         self.prompts.append(prompt)
         return FakeStreamTurn(self.results.pop(0))
 

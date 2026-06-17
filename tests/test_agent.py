@@ -454,6 +454,29 @@ def test_from_config_wires_the_pinned_memory_digest(tmp_path):
     assert "unpinned chatter" not in block
 
 
+def test_pinned_digest_is_scoped_to_the_current_conversation(tmp_path):
+    import json as _json
+
+    from iris.config import Config
+
+    mem = tmp_path / "mem.json"
+    mem.write_text(_json.dumps([
+        {"id": 1, "text": "owner prefers metric", "pinned": True},                     # global
+        {"id": 2, "text": "the repost plan for the channel", "pinned": True,
+         "conversation_id": "111"},                                                    # thread 111 only
+    ]), encoding="utf-8")
+    cfg = Config(session_store_path=str(tmp_path / "s.json"), memory_file=str(mem))
+    agent = Agent.from_config(cfg)
+
+    # Responding in a DIFFERENT thread: the global note loads, the 111 note does not.
+    in_222 = agent.driver.system_prompt_extra("discord:222")
+    assert "owner prefers metric" in in_222
+    assert "repost plan" not in in_222
+    # In its own thread, the scoped note loads.
+    in_111 = agent.driver.system_prompt_extra("discord:111")
+    assert "repost plan" in in_111
+
+
 def test_memory_digest_supplier_tolerates_a_broken_store(tmp_path):
     from iris.agent import _memory_digest_supplier
 

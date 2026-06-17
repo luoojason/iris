@@ -53,7 +53,7 @@ def _digest_supplier(path: str, render, max_bytes: int, guard=None):
     import json
     from pathlib import Path
 
-    def supply() -> str:
+    def supply(conversation_id: Optional[str] = None) -> str:
         try:
             data = json.loads(Path(path).read_text("utf-8"))
         except (OSError, ValueError):
@@ -63,16 +63,24 @@ def _digest_supplier(path: str, render, max_bytes: int, guard=None):
         budget = max_bytes
         if guard is not None and guard.level() in ("tighten", "park"):
             budget = max_bytes // 2
-        return render(data, time.time(), budget)
+        return render(data, time.time(), budget, conversation_id)
 
     return supply
 
 
 def _memory_digest_supplier(path: str, max_bytes: int, guard=None):
-    """Tier-0 pinned-memory block (model pins/unpins through the MCP tool)."""
+    """Tier-0 pinned-memory block (model pins/unpins through the MCP tool).
+
+    Scoped to the current conversation: only global notes and this thread's own
+    pinned notes load, so a note about one topic stops priming another thread.
+    """
+    from .driver import _origin_channel
     from .memory import pinned_digest
     return _digest_supplier(
-        path, lambda data, now, budget: pinned_digest(data, now, budget), max_bytes, guard)
+        path,
+        lambda data, now, budget, cid: pinned_digest(
+            data, now, budget, conversation_id=_origin_channel(cid)),
+        max_bytes, guard)
 
 
 def _jobs_digest_supplier(path: str, max_bytes: int, recent_secs: int, guard=None):
@@ -80,7 +88,9 @@ def _jobs_digest_supplier(path: str, max_bytes: int, recent_secs: int, guard=Non
     launches a duplicate."""
     from .jobs import jobs_digest
     return _digest_supplier(
-        path, lambda data, now, budget: jobs_digest(data, now, budget, recent_secs), max_bytes, guard)
+        path,
+        lambda data, now, budget, cid: jobs_digest(data, now, budget, recent_secs),
+        max_bytes, guard)
 
 
 def _fold_prompt(entries: list[str], text: str) -> str:
@@ -457,8 +467,8 @@ class Agent:
                 config.jobs_file, config.jobs_digest_bytes,
                 config.jobs_digest_recent_secs, guard))
         if suppliers:
-            def _composite_extra() -> str:
-                parts = [s() for s in suppliers]
+            def _composite_extra(conversation_id: Optional[str] = None) -> str:
+                parts = [s(conversation_id) for s in suppliers]
                 return "\n\n".join(p for p in parts if p)
             driver.system_prompt_extra = _composite_extra
         return cls(
@@ -527,7 +537,8 @@ class LiveTurn:
                     self._prompt = _fold_prompt(self._folded, self._prompt)
             session_id = self._agent.store.get(self._cid)
             self._turn = await asyncio.to_thread(
-                self._agent.stream_driver.start, self._prompt, session_id, self._model
+                self._agent.stream_driver.start, self._prompt, session_id, self._model,
+                self._cid,
             )
         except BaseException:
             self._restore_folded()
@@ -574,7 +585,7 @@ class LiveTurn:
             if _is_overflow(result):
                 log.warning("conversation %s overflowed its context; starting fresh", self._cid)
             self._agent.store.clear(self._cid)
-            turn = self._agent.stream_driver.start(self._prompt, None, self._model)
+            turn = self._agent.stream_driver.start(self._prompt, None, self._model, self._cid)
             self._turn = turn
             turn.wait_finished()
             result = turn.wait_primary()

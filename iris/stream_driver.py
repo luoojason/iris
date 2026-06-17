@@ -322,13 +322,15 @@ class StreamDriver:
         prompt: str,
         session_id: Optional[str] = None,
         model: Optional[str] = None,
+        conversation_id: Optional[str] = None,
     ) -> StreamTurn:
         if self.spawn is _default_spawn and shutil.which(self.driver.claude_bin) is None:
             raise ClaudeError(
                 f"claude binary not found on PATH: {self.driver.claude_bin!r}. "
                 "Install Claude Code and sign in to your subscription first."
             )
-        cmd = self.driver.build_command(session_id, model, stream=True)
+        cmd = self.driver.build_command(session_id, model, stream=True,
+                                        conversation_id=conversation_id)
         proc = self.spawn(cmd, _child_env(self.driver.disable_auto_memory))
         turn = StreamTurn(
             proc,

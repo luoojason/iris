@@ -420,7 +420,7 @@ def test_system_prompt_extra_is_merged_last(tmp_path):
     orders.write_text("rules first", encoding="utf-8")
     d = ClaudeDriver(
         standing_orders_file=str(orders),
-        system_prompt_extra=lambda: "digest last",
+        system_prompt_extra=lambda cid=None: "digest last",
         runner=make_runner([]),
     )
     cmd = d.build_command()
@@ -430,7 +430,7 @@ def test_system_prompt_extra_is_merged_last(tmp_path):
 
 
 def test_system_prompt_extra_failure_never_breaks_a_turn():
-    def boom():
+    def boom(cid=None):
         raise RuntimeError("store unreadable")
 
     d = ClaudeDriver(system_prompt_extra=boom, runner=make_runner([]))
@@ -468,7 +468,7 @@ def test_persona_and_standing_orders_merge_into_one_inline_flag(tmp_path):
 def test_persona_and_digest_merge_into_one_inline_flag(tmp_path):
     persona = tmp_path / "p.md"; persona.write_text("PERSONA", encoding="utf-8")
     d = ClaudeDriver(append_system_prompt_file=str(persona),
-                     system_prompt_extra=lambda: "DIGEST", runner=make_runner([]))
+                     system_prompt_extra=lambda cid=None: "DIGEST", runner=make_runner([]))
     cmd = d.build_command()
     assert _append_flags(cmd) == ["--append-system-prompt"]
     val = cmd[cmd.index("--append-system-prompt") + 1]
@@ -491,7 +491,7 @@ def test_orders_without_persona_use_only_the_inline_flag(tmp_path):
 def test_never_both_append_flags_across_combinations(tmp_path):
     persona = tmp_path / "p.md"; persona.write_text("P", encoding="utf-8")
     orders = tmp_path / "o.md"; orders.write_text("O", encoding="utf-8")
-    for so, extra in ((None, None), (str(orders), None), (None, lambda: "D"), (str(orders), lambda: "D")):
+    for so, extra in ((None, None), (str(orders), None), (None, lambda cid=None: "D"), (str(orders), lambda cid=None: "D")):
         d = ClaudeDriver(append_system_prompt_file=str(persona),
                          standing_orders_file=so, system_prompt_extra=extra, runner=make_runner([]))
         flags = _append_flags(d.build_command())

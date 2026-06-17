@@ -162,7 +162,7 @@ class ClaudeDriver:
     # Called on every command build for an extra system-prompt block (the agent
     # wires the pinned-memory digest here). Must be cheap; a raising supplier is
     # logged and skipped so it can never break a turn.
-    system_prompt_extra: Optional[Callable[[], Optional[str]]] = None
+    system_prompt_extra: Optional[Callable[[Optional[str]], Optional[str]]] = None
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: Optional[Sequence[str]] = None
@@ -223,6 +223,7 @@ class ClaudeDriver:
         session_id: Optional[str] = None,
         model: Optional[str] = None,
         stream: bool = False,
+        conversation_id: Optional[str] = None,
     ) -> list[str]:
         """Assemble the argv for one turn. The prompt is NOT here; it goes on stdin.
 
@@ -251,7 +252,7 @@ class ClaudeDriver:
         # both. When there is inline content (standing orders / the pinned
         # digest), fold the persona file into it and pass one inline flag;
         # otherwise keep the persona on the file flag (out of argv).
-        extra = self._append_system_prompt_value()
+        extra = self._append_system_prompt_value(conversation_id)
         if extra and self.append_system_prompt_file:
             persona = self._read_text(self.append_system_prompt_file)
             merged = "\n\n".join(p for p in (persona, extra) if p)
@@ -285,12 +286,14 @@ class ClaudeDriver:
             log.warning("system prompt file unreadable: %s", path)
             return ""
 
-    def _append_system_prompt_value(self) -> Optional[str]:
+    def _append_system_prompt_value(self, conversation_id: Optional[str] = None) -> Optional[str]:
         """The merged ``--append-system-prompt`` value: static text + standing orders.
 
         Merged into one flag value (the CLI takes the option once); the standing
         orders file is read fresh on every call so the owner can edit it live.
-        An unreadable file degrades to a warning, never a failed turn.
+        An unreadable file degrades to a warning, never a failed turn. The extra
+        supplier (the tier-0 digests) is passed the current conversation so the
+        pinned-memory block can be scoped to this thread.
         """
         parts = []
         if self.append_system_prompt:
@@ -301,7 +304,7 @@ class ClaudeDriver:
                 parts.append(text)
         if self.system_prompt_extra is not None:
             try:
-                extra = (self.system_prompt_extra() or "").strip()
+                extra = (self.system_prompt_extra(conversation_id) or "").strip()
             except Exception:
                 log.warning("system prompt extra supplier failed", exc_info=True)
                 extra = ""
@@ -325,7 +328,7 @@ class ClaudeDriver:
                 "Install Claude Code and sign in to your subscription first."
             )
 
-        cmd = self.build_command(session_id, model)
+        cmd = self.build_command(session_id, model, conversation_id=conversation_id)
         last_error: Optional[str] = None
         timeout_attempts = 0
         transient_attempts = 0
