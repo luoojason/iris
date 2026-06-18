@@ -161,6 +161,39 @@ def check_secrets_mode(config: Config, *, env_path: Optional[Path] = None,
     return findings
 
 
+def check_job_isolation(config: Config) -> list[Finding]:
+    """A job must not receive the iris MCP servers (it could otherwise spawn jobs
+    or widen its grants). Exercises the real builder so a regression is caught."""
+    from .jobs import _cleanup_job_sandbox, build_job_driver
+    try:
+        driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    except Exception:
+        return []  # a misconfig that fails to build is not an isolation finding
+    try:
+        leaked = [t for t in (driver.allowed_tools or [])
+                  if t.startswith("mcp__") and not t.startswith("mcp__playwright")]
+        if leaked:
+            return [Finding(
+                "high", "job-isolation", "a job can reach iris MCP tools",
+                f"the job driver exposes {sorted(leaked)}; a job could spawn jobs or widen grants",
+                "build_job_driver must not pass the chat mcp config to jobs")]
+        return []
+    finally:
+        _cleanup_job_sandbox(driver)
+
+
+def check_clock_gating(config: Config) -> list[Finding]:
+    """Clock-triggered contexts must not keep the self-starting-work tools."""
+    from .gating import SELF_STARTING_TOOLS, gate_self_starting
+    still = set(gate_self_starting(config).allowed_tools) & set(SELF_STARTING_TOOLS)
+    if still:
+        return [Finding(
+            "high", "clock-gating", "clock contexts can create self-starting work",
+            f"self-starting tools survive gating in the allowlist: {sorted(still)}",
+            "gate_self_starting must strip schedule_job/run_in_background/start_job/set_goal")]
+    return []
+
+
 _CHECKS = (
     check_secrets_mode,
     check_chat_sandbox,
@@ -168,6 +201,8 @@ _CHECKS = (
     check_usage_budget,
     check_trace_privacy,
     check_single_user,
+    check_job_isolation,
+    check_clock_gating,
 )
 
 

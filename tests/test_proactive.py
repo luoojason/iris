@@ -169,3 +169,27 @@ def test_tick_delivers_a_real_reply_to_the_home_channel(tmp_path):
     assert status == "delivered"
     assert agent.calls[0][0] == "proactive:maintain"   # dedicated session
     assert sent and sent[0][0] == "home-1" and "wiki" in sent[0][1]
+
+
+def test_proactive_tick_builds_a_clock_gated_agent(tmp_path, monkeypatch):
+    # The clock-triggered proactive review must not get the self-starting tools.
+    from iris import agent as agent_mod
+    from iris.config import Config
+    from iris.driver import ClaudeResult
+
+    captured = {}
+
+    class _FakeAgent:
+        def respond(self, conv, prompt, *a, **k):
+            return ClaudeResult(text="NOTHING", session_id="s", is_error=False)
+
+    def fake_from_config(config, *, clock_gated=False):
+        captured["clock_gated"] = clock_gated
+        return _FakeAgent()
+
+    monkeypatch.setattr(agent_mod.Agent, "from_config", staticmethod(fake_from_config))
+    from iris.proactive import run_proactive_tick
+    cfg = Config(proactive_enabled=True, usage_file=str(tmp_path / "u.json"),
+                 proactive_usage_cache=str(tmp_path / "c.json"))
+    run_proactive_tick(cfg, "assist", now=1000.0, fetch=lambda: 5.0)
+    assert captured.get("clock_gated") is True

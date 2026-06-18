@@ -157,3 +157,17 @@ def test_run_audit_aggregates_and_is_nonempty_on_a_loose_config(monkeypatch):
     codes = _codes(findings)
     assert "chat-sandbox" in codes and "publish-dir" in codes and "usage-budget" in codes
     assert worst_severity(findings) == "critical"
+
+
+def test_job_isolation_clean_for_a_normal_config(tmp_path, monkeypatch):
+    from iris.audit import check_job_isolation
+    monkeypatch.chdir(tmp_path)
+    # A normal job (subagents) gets only built-ins, no iris MCP tools -> no finding.
+    assert check_job_isolation(Config()) == []
+
+
+def test_clock_gating_clean_for_a_normal_config():
+    from iris.audit import check_clock_gating
+    cfg = Config(allowed_tools=["mcp__jobs__schedule_job", "mcp__memory__recall"])
+    # gate_self_starting strips the work-creators, so the check finds nothing.
+    assert check_clock_gating(cfg) == []

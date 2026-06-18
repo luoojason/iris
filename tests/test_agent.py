@@ -454,6 +454,22 @@ def test_from_config_wires_the_pinned_memory_digest(tmp_path):
     assert "unpinned chatter" not in block
 
 
+def test_from_config_clock_gated_strips_self_starting_tools(tmp_path):
+    from iris.config import Config
+
+    cfg = Config(session_store_path=str(tmp_path / "s.json"),
+                 allowed_tools=["mcp__jobs__schedule_job", "mcp__memory__recall",
+                                "mcp__goals__set_goal", "mcp__jobs__run_in_background"])
+    gated = Agent.from_config(cfg, clock_gated=True)
+    assert "mcp__memory__recall" in gated.driver.allowed_tools
+    for tool in ("mcp__jobs__schedule_job", "mcp__goals__set_goal", "mcp__jobs__run_in_background"):
+        assert tool not in (gated.driver.allowed_tools or [])
+        assert tool in gated.driver.disallowed_tools
+    # chat (ungated) keeps the full control plane
+    chat = Agent.from_config(cfg)
+    assert "mcp__jobs__schedule_job" in chat.driver.allowed_tools
+
+
 def test_pinned_digest_is_scoped_to_the_current_conversation(tmp_path):
     import json as _json
 
