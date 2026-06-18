@@ -222,6 +222,15 @@ owner-authored scheduled job can deliver it through the notify spine. Content
 (the prompt and reply) is captured only with `IRIS_TRACE_CAPTURE_CONTENT=true`,
 off by default for privacy.
 
+### Self-audit
+
+`iris audit` runs a model-free, read-only check of the security and compliance
+posture — the §0 invariants and the hardening findings codified as standing
+checks: secret-file modes, the chat sandbox (chat can never shell), grant
+clamping, the single-user gate, publish/usage/trace settings. It prints only
+actionable findings ranked by severity and exits non-zero on any critical/high,
+so it doubles as a cron/CI tripwire. `--json` for machine output.
+
 ### Background jobs
 
 Chat turns are short on purpose. For work that takes minutes to hours (audit

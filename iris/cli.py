@@ -338,6 +338,21 @@ def trace_cmd(config: Config, *, days: int = 7, as_json: bool = False, now=None)
     return 0
 
 
+def audit_cmd(config: Config, *, as_json: bool = False) -> int:
+    """Security/compliance self-audit. Exit 2 if any critical/high finding, else 0,
+    so it works as a cron/CI tripwire. Model-free and read-only."""
+    import json as _json
+
+    from .audit import render_audit, run_audit, worst_severity
+
+    findings = run_audit(config)
+    if as_json:
+        print(_json.dumps([f.__dict__ for f in findings], indent=2))
+    else:
+        print(render_audit(findings))
+    return 2 if worst_severity(findings) in ("critical", "high") else 0
+
+
 def workspaces_cmd(config: Config, action: str, name: str = "", path: str = "") -> int:
     """Owner-side registry of directories jobs may work in (names, not paths)."""
     from .workspaces import WorkspaceStore
@@ -585,6 +600,8 @@ def main(argv: list[str] | None = None) -> int:
     trace_parser = sub.add_parser("trace", help="digest the trace ledger: runs, errors, cost over a window")
     trace_parser.add_argument("--days", type=int, default=7, help="how many days back to summarize (default 7)")
     trace_parser.add_argument("--json", action="store_true", help="emit the raw summary as JSON")
+    audit_parser = sub.add_parser("audit", help="security/compliance self-audit (exit 2 on critical/high)")
+    audit_parser.add_argument("--json", action="store_true", help="emit findings as JSON")
     sub.add_parser("heartbeat", help="show the current status of your health checklist")
     sub.add_parser("webhook", help="run the inbound webhook-wake listener (own process)")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
@@ -696,6 +713,8 @@ def main(argv: list[str] | None = None) -> int:
         return usage_cmd(config)
     if command == "trace":
         return trace_cmd(config, days=args.days, as_json=args.json)
+    if command == "audit":
+        return audit_cmd(config, as_json=args.json)
     if command == "heartbeat":
         return heartbeat_cmd(config)
     if command == "webhook":
