@@ -216,7 +216,7 @@ def parse_verdict(text: str) -> dict:
 
 def _default_step(config):
     from .agent import Agent
-    agent = Agent.from_config(config)
+    agent = Agent.from_config(config, clock_gated=True)
 
     def step(goal: dict) -> str:
         prompt = STEP_PROMPT.format(
@@ -253,7 +253,7 @@ def parse_confirmation(text: str) -> dict:
 
 def _default_verify(config):
     from .agent import Agent
-    agent = Agent.from_config(config)
+    agent = Agent.from_config(config, clock_gated=True)
 
     def verify(goal: dict, step_text: str) -> dict:
         # A fresh, independent session on the cheap model with the chat toolset, so

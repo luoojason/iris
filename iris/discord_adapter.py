@@ -22,6 +22,7 @@ from .agent import Agent, LiveTurn
 from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
 from .conversation import ConversationRunner, LiveConversationRunner, Turn
+from .digest import build_digest
 from .driver import ClaudeError, ClaudeResult
 from .textutil import chunk_text
 from .transcribe import build_transcriber, transcribe_audio
@@ -380,6 +381,13 @@ def build_client(config: Config, agent: Agent):
         if config.auto_resume and not resume_started:
             resume_started.append(asyncio.create_task(_resume_loop()))
 
+    async def _handle_digest(message):
+        # Owner-invoked recap: ack, summarize the day off the event loop, post it.
+        await message.channel.send("Putting together today's recap…")
+        text = await asyncio.to_thread(build_digest, config, now=time.time())
+        for piece in chunk_text(text or "Nothing substantive to recap today.", DISCORD_LIMIT):
+            await message.channel.send(piece)
+
     @client.event
     async def on_message(message):
         if not should_handle(message, client.user, config):
@@ -387,6 +395,13 @@ def build_client(config: Config, agent: Agent):
 
         conversation_id = f"discord:{message.channel.id}"
         prompt = _clean_content(message)
+
+        # !digest is the one bang command that takes a model turn (an owner-invoked
+        # recap), so it is handled here, off the instant-command plane: acknowledge,
+        # summarize the day in the background, and post the recap when it lands.
+        if prompt.strip().lower() == "!digest":
+            await _handle_digest(message)
+            return
 
         # Bang commands (!usage, !jobs, !stop, ...) are a zero-inference control
         # plane: handled here, before the brain ever runs, and never submitted
@@ -456,6 +471,29 @@ def build_client(config: Config, agent: Agent):
 
         runner = _runner_for(conversation_id, channel)
         runner.submit(Turn(text=prompt, has_attachments=bool(attach_paths), receipt=receipt))
+
+    @client.event
+    async def on_interaction(interaction):
+        # Approve/Deny taps for just-in-time approvals. The approvals MCP server
+        # posted the buttons and is polling the shared store; record the owner's
+        # decision there so it can return allow/deny to claude.
+        try:
+            data = getattr(interaction, "data", None) or {}
+            custom_id = data.get("custom_id", "") if isinstance(data, dict) else getattr(data, "custom_id", "")
+            action, _, req_id = custom_id.partition(":")
+            if action not in ("approve", "deny") or not req_id:
+                return
+            uid = str(getattr(getattr(interaction, "user", None), "id", ""))
+            if config.allowed_user_ids and uid not in config.allowed_user_ids:
+                await interaction.response.send_message("That decision isn't yours to make.", ephemeral=True)
+                return
+            from .approvals import ApprovalStore
+            decision = "allow" if action == "approve" else "deny"
+            ApprovalStore(config.approvals_file).record(req_id, decision, by=uid, now=time.time())
+            verb = "Approved" if decision == "allow" else "Denied"
+            await interaction.response.edit_message(content=f"{verb} by you.", view=None)
+        except Exception:
+            log.warning("approval interaction failed", exc_info=True)
 
     return client
 

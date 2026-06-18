@@ -609,3 +609,35 @@ def test_trace_cmd_without_a_ledger_is_friendly(tmp_path, capsys):
 
     assert trace_cmd(Config(trace_file=""), days=7) == 0
     assert "IRIS_TRACE_FILE" in capsys.readouterr().out
+
+
+def test_audit_cmd_clean_config_exits_zero(tmp_path, monkeypatch, capsys):
+    from iris.cli import audit_cmd
+    from iris.config import Config
+
+    monkeypatch.chdir(tmp_path)  # no .env here -> no secrets-mode noise
+    rc = audit_cmd(Config(allowed_user_ids=["1"], usage_budget_usd=100.0), as_json=False)
+    out = capsys.readouterr().out
+    assert rc == 0 and "clean" in out
+
+
+def test_audit_cmd_exits_2_on_high_finding(tmp_path, monkeypatch, capsys):
+    from iris.cli import audit_cmd
+    from iris.config import Config
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("IRIS_PUBLISH_DIR", raising=False)
+    rc = audit_cmd(Config(allowed_user_ids=["1"], usage_budget_usd=100.0,
+                          allowed_tools=["mcp__publish__publish_video"]), as_json=False)
+    out = capsys.readouterr().out
+    assert rc == 2 and "publish-dir" in out
+
+
+def test_digest_cmd_empty_prints_nothing(tmp_path, monkeypatch, capsys):
+    from iris.cli import digest_cmd
+    from iris.config import Config
+
+    monkeypatch.setenv("IRIS_TRANSCRIPTS_DIR", str(tmp_path))  # empty -> no model call
+    rc = digest_cmd(Config(), days=1)
+    out = capsys.readouterr().out
+    assert rc == 0 and "Nothing substantive" in out

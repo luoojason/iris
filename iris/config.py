@@ -255,6 +255,12 @@ class Config:
     # is true; by default only metadata + an error category are stored.
     trace_file: str = ""
     trace_capture_content: bool = False
+    # Just-in-time approval (Discord Approve/Deny buttons via the native
+    # --permission-prompt-tool). Off by default. The approvals MCP server must be
+    # wired into mcp.json separately; this only turns the gate on.
+    approvals_enabled: bool = False
+    approval_timeout: float = 300.0
+    approvals_file: str = "iris-approvals.json"
 
     # Proactive notifications (iris watch). notify_channel is the Discord channel
     # or DM to ping; watch_min_seconds is the success-ping threshold so quick
@@ -387,6 +393,9 @@ class Config:
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             trace_file=os.environ.get("IRIS_TRACE_FILE", ""),
             trace_capture_content=_flag(os.environ.get("IRIS_TRACE_CAPTURE_CONTENT"), False),
+            approvals_enabled=_flag(os.environ.get("IRIS_APPROVALS"), False),
+            approval_timeout=float(os.environ.get("IRIS_APPROVAL_TIMEOUT", "300")),
+            approvals_file=os.environ.get("IRIS_APPROVALS_FILE", "iris-approvals.json"),
             turn_timeout=float(os.environ.get("IRIS_TURN_TIMEOUT", "300")),
             max_retries=int(os.environ.get("IRIS_MAX_RETRIES", "2")),
             retry_base_delay=float(os.environ.get("IRIS_RETRY_BASE_DELAY", "2")),

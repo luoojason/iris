@@ -497,3 +497,13 @@ def test_never_both_append_flags_across_combinations(tmp_path):
         flags = _append_flags(d.build_command())
         assert flags in (["--append-system-prompt"], ["--append-system-prompt-file"]), flags
         assert len(flags) == 1
+
+
+def test_permission_prompt_tool_flag_emitted_when_set():
+    d = ClaudeDriver(permission_prompt_tool="mcp__approvals__check", runner=make_runner([]))
+    cmd = d.build_command()
+    assert cmd[cmd.index("--permission-prompt-tool") + 1] == "mcp__approvals__check"
+
+
+def test_permission_prompt_tool_absent_by_default():
+    assert "--permission-prompt-tool" not in ClaudeDriver(runner=make_runner([])).build_command()

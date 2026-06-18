@@ -190,6 +190,9 @@ class ClaudeDriver:
     timeout_max_retries: int = 0
     runner: Runner = _default_runner
     sleep: Callable[[float], None] = time.sleep
+    # When set, claude routes every permission-needing tool use through this MCP
+    # tool (the approvals server) for a just-in-time allow/deny. Off by default.
+    permission_prompt_tool: Optional[str] = None
     # Trace ledger: when trace_file is set, every invocation appends one record
     # (kind, model, outcome, error category, timings, turns, tokens, cost) at this
     # single choke point. Content (prompt/reply/raw error) is kept only when
@@ -268,6 +271,8 @@ class ClaudeDriver:
             cmd += ["--mcp-config", self.mcp_config, "--strict-mcp-config"]
         if self.permission_mode:
             cmd += ["--permission-mode", self.permission_mode]
+        if self.permission_prompt_tool:
+            cmd += ["--permission-prompt-tool", self.permission_prompt_tool]
         if self.allowed_tools:
             cmd += ["--allowedTools", *self.allowed_tools]
         disallowed = self._effective_disallowed()

@@ -413,7 +413,13 @@ class Agent:
             return self._epochs.get(conversation_id, 0)
 
     @classmethod
-    def from_config(cls, config: Config) -> "Agent":
+    def from_config(cls, config: Config, *, clock_gated: bool = False) -> "Agent":
+        # Clock-triggered contexts (proactive reviews, goal ticks) are stripped of
+        # the tools that create new self-starting work, so the clock can't amplify
+        # itself off the timer. Chat passes clock_gated=False (full control plane).
+        if clock_gated:
+            from .gating import gate_self_starting
+            config = gate_self_starting(config)
         # The attachments dir must be reachable so the Read tool can open
         # downloaded images/files.
         add_dirs = list(config.add_dirs)
@@ -438,6 +444,8 @@ class Agent:
             trace_file=config.trace_file,
             trace_kind="chat",
             trace_capture_content=config.trace_capture_content,
+            permission_prompt_tool=("mcp__approvals__check"
+                                    if getattr(config, "approvals_enabled", False) else None),
         )
         store = SessionStore(config.session_store_path)
         stream_driver = None

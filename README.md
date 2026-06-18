@@ -222,6 +222,36 @@ owner-authored scheduled job can deliver it through the notify spine. Content
 (the prompt and reply) is captured only with `IRIS_TRACE_CAPTURE_CONTENT=true`,
 off by default for privacy.
 
+### Self-audit
+
+`iris audit` runs a model-free, read-only check of the security and compliance
+posture — the §0 invariants and the hardening findings codified as standing
+checks: secret-file modes, the chat sandbox (chat can never shell), grant
+clamping, the single-user gate, publish/usage/trace settings. It prints only
+actionable findings ranked by severity and exits non-zero on any critical/high,
+so it doubles as a cron/CI tripwire. `--json` for machine output.
+
+### Session digest
+
+`!digest` (in Discord) or `iris digest` recaps the day's conversations: it gathers
+today's session transcripts (the same ones `session_search` reads) and runs one
+`claude -p` turn to summarize what was discussed, decided, and left open. It is
+owner-invoked — the clock never starts it — and `--days N` widens the window. A
+cron rule could post an end-of-day recap through the notify spine.
+
+### Just-in-time approvals
+
+With `IRIS_APPROVALS=true`, risky tool uses ask before they run instead of being
+pre-granted. Iris points the chat driver at Claude Code's native
+`--permission-prompt-tool` → the `iris-approvals` MCP server, which posts an
+**Approve/Deny** message to your channel and blocks until you tap (owner-verified)
+or the window (`IRIS_APPROVAL_TIMEOUT`, default 300s) elapses — **failing closed**
+(deny) on timeout or if it can't reach you. The risk policy gates on *arguments*,
+not just tool names (e.g. `publish_video`, or a job launch requesting
+shell/files/browser or the heavy model); everything else auto-allows so it isn't
+nagware. Wire the `iris-approvals` server into your `mcp.json` alongside the
+others; iris adds the `--permission-prompt-tool` flag when the feature is on.
+
 ### Background jobs
 
 Chat turns are short on purpose. For work that takes minutes to hours (audit

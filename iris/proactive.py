@@ -194,7 +194,7 @@ def run_proactive_tick(config, kind: str, *, now: float,
 
     if agent is None:
         from .agent import Agent
-        agent = Agent.from_config(config)
+        agent = Agent.from_config(config, clock_gated=True)
     result = agent.respond(f"proactive:{kind}", PROMPTS[kind])
     text = (getattr(result, "text", "") or "").strip()
     if not text or text.upper().rstrip(".!") == SILENT:
