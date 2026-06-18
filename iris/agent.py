@@ -444,6 +444,8 @@ class Agent:
             trace_file=config.trace_file,
             trace_kind="chat",
             trace_capture_content=config.trace_capture_content,
+            permission_prompt_tool=("mcp__approvals__check"
+                                    if getattr(config, "approvals_enabled", False) else None),
         )
         store = SessionStore(config.session_store_path)
         stream_driver = None

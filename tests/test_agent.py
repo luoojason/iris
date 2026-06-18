@@ -584,3 +584,12 @@ def test_respond_skips_the_session_write_after_a_reset(tmp_path):
     box.append(agent)
     agent.respond("c1", "hello")
     assert store.get("c1") is None  # the reset stuck; no resurrection
+
+
+def test_from_config_wires_approvals_when_enabled(tmp_path):
+    from iris.config import Config
+
+    on = Agent.from_config(Config(session_store_path=str(tmp_path / "s.json"), approvals_enabled=True))
+    assert on.driver.permission_prompt_tool == "mcp__approvals__check"
+    off = Agent.from_config(Config(session_store_path=str(tmp_path / "s2.json")))
+    assert off.driver.permission_prompt_tool is None

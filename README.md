@@ -239,6 +239,19 @@ today's session transcripts (the same ones `session_search` reads) and runs one
 owner-invoked — the clock never starts it — and `--days N` widens the window. A
 cron rule could post an end-of-day recap through the notify spine.
 
+### Just-in-time approvals
+
+With `IRIS_APPROVALS=true`, risky tool uses ask before they run instead of being
+pre-granted. Iris points the chat driver at Claude Code's native
+`--permission-prompt-tool` → the `iris-approvals` MCP server, which posts an
+**Approve/Deny** message to your channel and blocks until you tap (owner-verified)
+or the window (`IRIS_APPROVAL_TIMEOUT`, default 300s) elapses — **failing closed**
+(deny) on timeout or if it can't reach you. The risk policy gates on *arguments*,
+not just tool names (e.g. `publish_video`, or a job launch requesting
+shell/files/browser or the heavy model); everything else auto-allows so it isn't
+nagware. Wire the `iris-approvals` server into your `mcp.json` alongside the
+others; iris adds the `--permission-prompt-tool` flag when the feature is on.
+
 ### Background jobs
 
 Chat turns are short on purpose. For work that takes minutes to hours (audit

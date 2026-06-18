@@ -472,6 +472,29 @@ def build_client(config: Config, agent: Agent):
         runner = _runner_for(conversation_id, channel)
         runner.submit(Turn(text=prompt, has_attachments=bool(attach_paths), receipt=receipt))
 
+    @client.event
+    async def on_interaction(interaction):
+        # Approve/Deny taps for just-in-time approvals. The approvals MCP server
+        # posted the buttons and is polling the shared store; record the owner's
+        # decision there so it can return allow/deny to claude.
+        try:
+            data = getattr(interaction, "data", None) or {}
+            custom_id = data.get("custom_id", "") if isinstance(data, dict) else getattr(data, "custom_id", "")
+            action, _, req_id = custom_id.partition(":")
+            if action not in ("approve", "deny") or not req_id:
+                return
+            uid = str(getattr(getattr(interaction, "user", None), "id", ""))
+            if config.allowed_user_ids and uid not in config.allowed_user_ids:
+                await interaction.response.send_message("That decision isn't yours to make.", ephemeral=True)
+                return
+            from .approvals import ApprovalStore
+            decision = "allow" if action == "approve" else "deny"
+            ApprovalStore(config.approvals_file).record(req_id, decision, by=uid, now=time.time())
+            verb = "Approved" if decision == "allow" else "Denied"
+            await interaction.response.edit_message(content=f"{verb} by you.", view=None)
+        except Exception:
+            log.warning("approval interaction failed", exc_info=True)
+
     return client
 
 
