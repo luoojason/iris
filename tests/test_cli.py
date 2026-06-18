@@ -631,3 +631,13 @@ def test_audit_cmd_exits_2_on_high_finding(tmp_path, monkeypatch, capsys):
                           allowed_tools=["mcp__publish__publish_video"]), as_json=False)
     out = capsys.readouterr().out
     assert rc == 2 and "publish-dir" in out
+
+
+def test_digest_cmd_empty_prints_nothing(tmp_path, monkeypatch, capsys):
+    from iris.cli import digest_cmd
+    from iris.config import Config
+
+    monkeypatch.setenv("IRIS_TRANSCRIPTS_DIR", str(tmp_path))  # empty -> no model call
+    rc = digest_cmd(Config(), days=1)
+    out = capsys.readouterr().out
+    assert rc == 0 and "Nothing substantive" in out

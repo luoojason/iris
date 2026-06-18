@@ -22,6 +22,7 @@ from .agent import Agent, LiveTurn
 from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
 from .conversation import ConversationRunner, LiveConversationRunner, Turn
+from .digest import build_digest
 from .driver import ClaudeError, ClaudeResult
 from .textutil import chunk_text
 from .transcribe import build_transcriber, transcribe_audio
@@ -380,6 +381,13 @@ def build_client(config: Config, agent: Agent):
         if config.auto_resume and not resume_started:
             resume_started.append(asyncio.create_task(_resume_loop()))
 
+    async def _handle_digest(message):
+        # Owner-invoked recap: ack, summarize the day off the event loop, post it.
+        await message.channel.send("Putting together today's recap…")
+        text = await asyncio.to_thread(build_digest, config, now=time.time())
+        for piece in chunk_text(text or "Nothing substantive to recap today.", DISCORD_LIMIT):
+            await message.channel.send(piece)
+
     @client.event
     async def on_message(message):
         if not should_handle(message, client.user, config):
@@ -387,6 +395,13 @@ def build_client(config: Config, agent: Agent):
 
         conversation_id = f"discord:{message.channel.id}"
         prompt = _clean_content(message)
+
+        # !digest is the one bang command that takes a model turn (an owner-invoked
+        # recap), so it is handled here, off the instant-command plane: acknowledge,
+        # summarize the day in the background, and post the recap when it lands.
+        if prompt.strip().lower() == "!digest":
+            await _handle_digest(message)
+            return
 
         # Bang commands (!usage, !jobs, !stop, ...) are a zero-inference control
         # plane: handled here, before the brain ever runs, and never submitted

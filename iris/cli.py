@@ -338,6 +338,18 @@ def trace_cmd(config: Config, *, days: int = 7, as_json: bool = False, now=None)
     return 0
 
 
+def digest_cmd(config: Config, *, days: int = 1, now=None) -> int:
+    """Print a recap of the last ``days`` of conversations (one summary turn)."""
+    import time as _time
+
+    from .digest import build_digest
+
+    now = _time.time() if now is None else now
+    text = build_digest(config, now=now, days=days)
+    print(text or "Nothing substantive to recap.")
+    return 0
+
+
 def audit_cmd(config: Config, *, as_json: bool = False) -> int:
     """Security/compliance self-audit. Exit 2 if any critical/high finding, else 0,
     so it works as a cron/CI tripwire. Model-free and read-only."""
@@ -602,6 +614,8 @@ def main(argv: list[str] | None = None) -> int:
     trace_parser.add_argument("--json", action="store_true", help="emit the raw summary as JSON")
     audit_parser = sub.add_parser("audit", help="security/compliance self-audit (exit 2 on critical/high)")
     audit_parser.add_argument("--json", action="store_true", help="emit findings as JSON")
+    digest_parser = sub.add_parser("digest", help="recap the last day's conversations (one summary turn)")
+    digest_parser.add_argument("--days", type=int, default=1, help="how many days back to recap (default 1)")
     sub.add_parser("heartbeat", help="show the current status of your health checklist")
     sub.add_parser("webhook", help="run the inbound webhook-wake listener (own process)")
     job_run_parser = sub.add_parser("job-run", help="run a recorded background job (internal; spawned by the jobs tool)")
@@ -715,6 +729,8 @@ def main(argv: list[str] | None = None) -> int:
         return trace_cmd(config, days=args.days, as_json=args.json)
     if command == "audit":
         return audit_cmd(config, as_json=args.json)
+    if command == "digest":
+        return digest_cmd(config, days=args.days)
     if command == "heartbeat":
         return heartbeat_cmd(config)
     if command == "webhook":

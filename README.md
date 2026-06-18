@@ -231,6 +231,14 @@ clamping, the single-user gate, publish/usage/trace settings. It prints only
 actionable findings ranked by severity and exits non-zero on any critical/high,
 so it doubles as a cron/CI tripwire. `--json` for machine output.
 
+### Session digest
+
+`!digest` (in Discord) or `iris digest` recaps the day's conversations: it gathers
+today's session transcripts (the same ones `session_search` reads) and runs one
+`claude -p` turn to summarize what was discussed, decided, and left open. It is
+owner-invoked — the clock never starts it — and `--days N` widens the window. A
+cron rule could post an end-of-day recap through the notify spine.
+
 ### Background jobs
 
 Chat turns are short on purpose. For work that takes minutes to hours (audit
