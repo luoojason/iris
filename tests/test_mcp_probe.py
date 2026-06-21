@@ -53,3 +53,10 @@ def test_probe_returns_tool_names():
 def test_probe_raises_on_empty():
     with pytest.raises(ProbeError):
         probe_tools("bad", [], {}, spawn=fake_spawn([""]))
+
+
+def test_probe_raises_on_json_rpc_error():
+    err = json.dumps({"jsonrpc": "2.0", "id": 1,
+                      "error": {"code": -32601, "message": "Method not found"}}) + "\n"
+    with pytest.raises(ProbeError, match="Method not found"):
+        probe_tools("server", [], {}, spawn=fake_spawn([err]))

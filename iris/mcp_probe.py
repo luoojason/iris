@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from typing import Callable, Optional
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -31,9 +33,23 @@ def _send(proc, obj: dict) -> None:
     proc.stdin.flush()
 
 
-def _read_result(proc) -> dict:
+def _read_line(proc, deadline: float) -> str:
+    """readline() bounded by a wall-clock deadline; raises ProbeError on timeout."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ProbeError("timed out waiting for server response")
+    box: list[str] = []
+    t = threading.Thread(target=lambda: box.append(proc.stdout.readline()), daemon=True)
+    t.start()
+    t.join(remaining)
+    if t.is_alive():
+        raise ProbeError("timed out waiting for server response")
+    return box[0] if box else ""
+
+
+def _read_result(proc, deadline: float) -> dict:
     while True:
-        line = proc.stdout.readline()
+        line = _read_line(proc, deadline)
         if not line:
             raise ProbeError("server closed the connection before responding")
         line = line.strip()
@@ -43,7 +59,7 @@ def _read_result(proc) -> dict:
             msg = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if "result" in msg or "error" in msg:
+        if "id" in msg and ("result" in msg or "error" in msg):
             if "error" in msg:
                 raise ProbeError(str(msg["error"]))
             return msg["result"]
@@ -55,16 +71,17 @@ def probe_tools(command: str, args, env, *, timeout: float = 10.0,
     spawn = spawn or _default_spawn
     child_env = {**os.environ, **(env or {})}
     proc = spawn([command, *list(args)], child_env)
+    deadline = time.monotonic() + timeout
     try:
         _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {}, "clientInfo": {"name": "iris-probe", "version": "1"},
         }})
-        _read_result(proc)
+        _read_result(proc, deadline)
         _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
         _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
-        result = _read_result(proc)
-        tools = result.get("tools", [])
+        result = _read_result(proc, deadline)
+        tools = (result or {}).get("tools", [])
         return [str(t.get("name", "")) for t in tools if t.get("name")]
     finally:
         try:
