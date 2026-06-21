@@ -10,6 +10,7 @@ from iris.buffer import (
     create_post,
     list_channels,
     load_token,
+    publish,
     resolve_channels,
     stable_media_host,
 )
@@ -178,3 +179,55 @@ def test_stable_media_host_returns_permanent_url(monkeypatch):
     assert url.endswith("clip.mp4")
     assert uploaded["args"][1] == "b"
     assert uploaded["args"][3] == {"ContentType": "video/mp4"}
+
+
+CHAN_RESP = FakeResp({"data": {"account": {"channels": [
+    {"id": "c1", "service": "twitter", "handle": "@me"},
+    {"id": "c2", "service": "linkedin", "handle": "me"},
+]}}})
+
+
+def _host_ok(path):
+    return "https://cdn.example.com/iris/v.mp4"
+
+
+def test_publish_all_channels_failsoft():
+    # 1 channels query + 2 create_post calls (one ok, one error)
+    http = FakeHttp(posts=[
+        CHAN_RESP,
+        FakeResp({"data": {"createPost": {"id": "p1"}}}),
+        FakeResp({"errors": [{"message": "boom"}]}),
+    ])
+    out = publish("/tmp/v.mp4", "cap", [], token="t", http=http, media_host=_host_ok)
+    assert out["twitter"] == {"id": "p1"}
+    assert "error" in out["linkedin"] and "boom" in out["linkedin"]["error"]
+
+
+def test_publish_subset():
+    http = FakeHttp(posts=[
+        CHAN_RESP,
+        FakeResp({"data": {"createPost": {"id": "p1"}}}),
+    ])
+    out = publish("/tmp/v.mp4", "cap", ["twitter"], token="t", http=http, media_host=_host_ok)
+    assert list(out.keys()) == ["twitter"]
+    assert out["twitter"] == {"id": "p1"}
+
+
+def test_publish_unknown_platform_reported():
+    http = FakeHttp(posts=[
+        CHAN_RESP,
+        FakeResp({"data": {"createPost": {"id": "p1"}}}),
+    ])
+    out = publish("/tmp/v.mp4", "cap", ["twitter", "tiktok"], token="t", http=http, media_host=_host_ok)
+    assert out["twitter"] == {"id": "p1"}
+    assert "error" in out["tiktok"]
+
+
+def test_publish_hosting_failure_stops_posts():
+    def bad_host(path):
+        raise BufferError("no media host")
+
+    http = FakeHttp(posts=[CHAN_RESP])  # only the channels query is consumed
+    out = publish("/tmp/v.mp4", "cap", ["twitter"], token="t", http=http, media_host=bad_host)
+    assert "error" in out["twitter"] and "no media host" in out["twitter"]["error"]
+    assert len(http.calls) == 1  # no create_post attempted

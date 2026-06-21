@@ -163,3 +163,42 @@ def stable_media_host(
         return f"{public_base.rstrip('/')}/{key}"
 
     return host
+
+
+def publish(
+    mp4_path: str,
+    caption: str,
+    platforms: list[str],
+    *,
+    scheduled_at: Optional[str] = None,
+    token: str,
+    http=None,
+    media_host: MediaHost,
+) -> dict[str, dict]:
+    """Publish one video to the named channels (or all). {service: {id|error}}."""
+    channels = list_channels(token=token, http=http)
+    by_id = {c["id"]: c for c in channels}
+    ids, unknown = resolve_channels(platforms, channels)
+
+    results: dict[str, dict] = {}
+    for name in unknown:
+        results[name] = {"error": f"no connected channel named {name!r}"}
+
+    if not ids:
+        return results
+
+    # Host once; reuse the one URL for every channel.
+    try:
+        video_url = media_host(mp4_path)
+    except Exception as exc:
+        for cid in ids:
+            label = by_id[cid]["service"] or cid
+            results[label] = {"error": f"could not host the video: {exc}"}
+        return results
+
+    for cid in ids:
+        label = by_id[cid]["service"] or cid
+        results[label] = create_post(
+            caption, cid, video_url=video_url, scheduled_at=scheduled_at, token=token, http=http,
+        )
+    return results
