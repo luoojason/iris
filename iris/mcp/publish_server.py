@@ -1,17 +1,17 @@
 """MCP server: publish a finished video to the owner's own social accounts.
 
-Exposes one tool, ``publish_video``, that posts to YouTube (Shorts) and Instagram
-(Reels) via their official APIs. TikTok is intentionally absent until its audit
-path is wired. Tokens load from IRIS_SOCIAL_TOKENS (a 600 JSON file on the box).
+Exposes one tool, ``publish_video``, that posts to all (or named) connected
+Buffer channels via Buffer's GraphQL API. Auth is a single personal token in
+IRIS_BUFFER_TOKEN; video is hosted at a permanent public URL (IRIS_MEDIA_*).
 Allowlist ``mcp__publish__publish_video`` and tell the persona it can publish.
 """
 
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
-from ..social import PublishError, SocialTokens, s3_media_host
-from ..social import publish_video as _publish_video
+from ..buffer import BufferError, load_token, publish, stable_media_host
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -36,38 +36,50 @@ def _within_publish_dir(path: str) -> bool:
 
 
 @mcp.tool()
-def publish_video(mp4_path: str, caption: str, platforms: str = "youtube,instagram", privacy: str = "unlisted") -> str:
-    """Publish a finished video to social platforms.
+def publish_video(mp4_path: str, caption: str, platforms: str = "", when: str = "now") -> str:
+    """Publish a finished video to social platforms via Buffer.
 
-    Defaults to ``unlisted`` so a video only goes fully public when the caller
-    asks for it. If ``IRIS_PUBLISH_DIR`` is set, only files inside it can be
-    published.
+    Posts to all connected channels by default. If ``IRIS_PUBLISH_DIR`` is set,
+    only files inside it can be published.
 
     Args:
         mp4_path: Absolute path to the .mp4 to publish.
         caption: Caption / title / description for the post.
-        platforms: Comma-separated: any of youtube, instagram.
-        privacy: public | unlisted | private (YouTube; Instagram is always public).
+        platforms: Comma-separated channel names (service or handle); empty = all.
+        when: "now" (or empty) to post immediately, or an ISO 8601 datetime
+            (e.g. 2026-07-01T15:00:00) to schedule.
     """
     if not os.path.isfile(mp4_path):
         return f"No such file: {mp4_path}"
     if not _within_publish_dir(mp4_path):
         return f"Refused: {mp4_path} is outside IRIS_PUBLISH_DIR."
-    tokens = SocialTokens.load()
-    wanted = [p.strip().lower() for p in platforms.split(",") if p.strip()]
-    host = None
-    if "instagram" in wanted:
+    token = load_token()
+    if not token:
+        return "IRIS_BUFFER_TOKEN is not set. See docs/PUBLISHING-SETUP.md."
+
+    scheduled_at = None
+    if when and when.strip().lower() != "now":
         try:
-            host = s3_media_host()
-        except PublishError:
-            host = None  # the dispatcher reports the missing-host error per-platform
-    results = _publish_video(mp4_path, caption, wanted, tokens=tokens, privacy=privacy, media_host=host)
+            datetime.fromisoformat(when.strip())
+        except ValueError:
+            return f"Could not parse `when` as a date/time: {when!r}. Use ISO 8601 or 'now'."
+        scheduled_at = when.strip()
+
+    try:
+        host = stable_media_host()
+    except BufferError as exc:
+        return f"Media hosting is not configured: {exc}"
+
+    names = [p.strip() for p in platforms.split(",") if p.strip()]
+    results = publish(
+        mp4_path, caption, names, scheduled_at=scheduled_at, token=token, http=None, media_host=host,
+    )
     lines = []
-    for platform, res in results.items():
+    for channel, res in results.items():
         if "error" in res:
-            lines.append(f"{platform}: FAILED — {res['error']}")
+            lines.append(f"{channel}: FAILED — {res['error']}")
         else:
-            lines.append(f"{platform}: published {res.get('url') or res.get('id')}")
+            lines.append(f"{channel}: published {res.get('id')}")
     return "\n".join(lines) or "Nothing published."
 
 
