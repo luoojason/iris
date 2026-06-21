@@ -583,7 +583,107 @@ def skills(config: Config) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parse_kv(pairs):
+    out = {}
+    for p in pairs or []:
+        if "=" not in p:
+            raise SystemExit(f"bad --env {p!r}: expected K=V")
+        k, _, v = p.partition("=")
+        out[k.strip()] = v
+    return out
+
+
+def mcp_command(args, config) -> int:
+    """Owner CLI for MCP connections. Returns a process exit code."""
+    from .connections import ConnectionStore
+
+    store = ConnectionStore(config.connections_file)
+    action = args.mcp_action
+
+    if action == "add":
+        allow = list(args.allow or [])
+        if args.allow_all:
+            allow.append(f"mcp__{args.name}")
+        try:
+            store.add(
+                args.name, args.command,
+                args=args.arg or [], env=_parse_kv(args.env),
+                allowed_tools=allow,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"added connection {args.name!r} (enabled). Allowed tools: {allow or '(none yet — add with --allow)'}")
+        return 0
+
+    if action == "list":
+        conns = store.list()
+        if args.json:
+            import json as _json
+            print(_json.dumps([
+                {"name": c.name, "command": c.command, "args": c.args,
+                 "enabled": c.enabled, "allowed_tools": c.allowed_tools,
+                 "env_keys": sorted(c.env)} for c in conns
+            ], indent=2))
+            return 0
+        if not conns:
+            print("no connections. Add one with: iris mcp add NAME --command CMD")
+            return 0
+        for c in conns:
+            state = "on " if c.enabled else "off"
+            tools = ", ".join(c.allowed_tools) or "(no tools allowed)"
+            print(f"[{state}] {c.name}: {c.command} {' '.join(c.args)}  ->  {tools}")
+        return 0
+
+    if action == "remove":
+        ok = store.remove(args.name)
+        print(f"removed {args.name!r}" if ok else f"no connection named {args.name!r}")
+        return 0 if ok else 1
+
+    if action in ("enable", "disable"):
+        try:
+            store.set_enabled(args.name, action == "enable")
+        except ValueError as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"{action}d {args.name!r}")
+        return 0
+
+    if action == "import":
+        import json as _json
+        try:
+            data = _json.loads(open(args.path, encoding="utf-8").read())
+        except (OSError, ValueError) as exc:
+            print(f"error: cannot read {args.path}: {exc}")
+            return 1
+        servers = (data or {}).get("mcpServers", {})
+        if not servers:
+            print("no mcpServers found in that file")
+            return 1
+        added = 0
+        for name, spec in servers.items():
+            if store.get(name) is not None:
+                print(f"skip {name!r}: already exists")
+                continue
+            try:
+                store.add(
+                    name, str(spec.get("command", "")),
+                    args=[str(a) for a in spec.get("args", [])],
+                    env={str(k): str(v) for k, v in (spec.get("env") or {}).items()},
+                    allowed_tools=[], enabled=False,
+                )
+                added += 1
+            except ValueError as exc:
+                print(f"skip {name!r}: {exc}")
+        print(f"imported {added} connection(s), disabled. Enable + allow tools, e.g.: iris mcp enable NAME")
+        return 0
+
+    print("unknown mcp action")
+    return 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the top-level iris argument parser."""
     parser = argparse.ArgumentParser(prog="iris", description="A chat agent on your Claude subscription.")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("discord", help="run the Discord bot (default)")
@@ -669,6 +769,32 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser.add_argument("--fold", action="store_true", help="also fold the completion into Iris's next turn")
     watch_parser.add_argument("--resume", action="store_true", help="enqueue a follow-up turn so Iris continues the chain (needs IRIS_AUTO_RESUME)")
     watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
+    mcp_p = sub.add_parser("mcp", help="connect your own MCP servers")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_action", required=True)
+
+    p_add = mcp_sub.add_parser("add", help="register an MCP server connection")
+    p_add.add_argument("name")
+    p_add.add_argument("--command", required=True)
+    p_add.add_argument("--arg", action="append", help="a command argument (repeatable)")
+    p_add.add_argument("--env", action="append", help="K=V env var (repeatable)")
+    p_add.add_argument("--allow", action="append", help="an allowed tool name (repeatable)")
+    p_add.add_argument("--allow-all", action="store_true", help="allow the whole server (mcp__NAME)")
+
+    p_list = mcp_sub.add_parser("list", help="list connections")
+    p_list.add_argument("--json", action="store_true")
+
+    for verb in ("remove", "enable", "disable"):
+        pv = mcp_sub.add_parser(verb, help=f"{verb} a connection")
+        pv.add_argument("name")
+
+    p_imp = mcp_sub.add_parser("import", help="import servers from an existing mcp.json")
+    p_imp.add_argument("path")
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     # Configure logging once here so every command (chat, tui, reminders-tick,
@@ -743,6 +869,8 @@ def main(argv: list[str] | None = None) -> int:
             config, args.ws_action,
             name=getattr(args, "name", ""), path=getattr(args, "path", ""),
         )
+    if command == "mcp":
+        return mcp_command(args, config)
     if command == "job-run":
         if not config.jobs_enabled:
             print("job-run: background jobs are disabled (set IRIS_JOBS=true)")
