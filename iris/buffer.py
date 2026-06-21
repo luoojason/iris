@@ -48,9 +48,16 @@ def _graphql(query: str, variables: dict, *, token: str, http=None) -> dict:
             },
             timeout=60,
         )
-        body = resp.json()
-    except Exception as exc:  # network / decode
+    except Exception as exc:  # network
         raise BufferError(f"Buffer request failed: {exc}") from exc
+    status = getattr(resp, "status_code", 200)
+    if status >= 400:
+        body_text = (getattr(resp, "text", "") or "")[:200]
+        raise BufferError(f"Buffer HTTP {status}: {body_text}")
+    try:
+        body = resp.json()
+    except Exception as exc:  # non-JSON response
+        raise BufferError(f"Buffer returned non-JSON ({status}): {exc}") from exc
     if body.get("errors"):
         msgs = "; ".join(e.get("message", str(e)) for e in body["errors"])
         raise BufferError(msgs)

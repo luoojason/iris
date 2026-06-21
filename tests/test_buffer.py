@@ -67,6 +67,13 @@ def test_graphql_raises_on_empty_data():
         _graphql("query { x }", {}, token="t", http=http)
 
 
+def test_graphql_raises_on_http_error_status():
+    http = FakeHttp(posts=[FakeResp({}, status_code=401, text="<html>unauthorized</html>")])
+    with pytest.raises(BufferError) as exc:
+        _graphql("query { x }", {}, token="bad", http=http)
+    assert "401" in str(exc.value)
+
+
 def test_list_channels_parses():
     resp = FakeResp({"data": {"account": {"channels": [
         {"id": "c1", "service": "twitter", "handle": "@me"},
