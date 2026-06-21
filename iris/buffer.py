@@ -198,7 +198,10 @@ def publish(
 
     for cid in ids:
         label = by_id[cid]["service"] or cid
-        results[label] = create_post(
-            caption, cid, video_url=video_url, scheduled_at=scheduled_at, token=token, http=http,
-        )
+        try:
+            results[label] = create_post(
+                caption, cid, video_url=video_url, scheduled_at=scheduled_at, token=token, http=http,
+            )
+        except Exception as exc:  # one channel must never sink the rest
+            results[label] = {"error": str(exc)}
     return results

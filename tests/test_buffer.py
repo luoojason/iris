@@ -231,3 +231,18 @@ def test_publish_hosting_failure_stops_posts():
     out = publish("/tmp/v.mp4", "cap", ["twitter"], token="t", http=http, media_host=bad_host)
     assert "error" in out["twitter"] and "no media host" in out["twitter"]["error"]
     assert len(http.calls) == 1  # no create_post attempted
+
+
+def test_publish_failsoft_if_create_post_raises(monkeypatch):
+    import iris.buffer as b
+
+    def fake_create(text, cid, **k):
+        if cid == "c2":
+            raise OSError("timeout")
+        return {"id": "p1"}
+
+    monkeypatch.setattr(b, "create_post", fake_create)
+    http = FakeHttp(posts=[CHAN_RESP])  # only the channels query is used
+    out = b.publish("/tmp/v.mp4", "cap", [], token="t", http=http, media_host=_host_ok)
+    assert out["twitter"] == {"id": "p1"}
+    assert "error" in out["linkedin"] and "timeout" in out["linkedin"]["error"]
