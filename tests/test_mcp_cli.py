@@ -39,6 +39,7 @@ def test_allow_all_uses_server_prefix(tmp_path):
 
 def test_enable_disable_remove(tmp_path):
     run(tmp_path, "add", "x", "--command", "c")
+    assert ConnectionStore(str(tmp_path / "conns.json")).get("x").enabled is True
     assert run(tmp_path, "disable", "x") == 0
     assert ConnectionStore(str(tmp_path / "conns.json")).get("x").enabled is False
     assert run(tmp_path, "enable", "x") == 0

@@ -632,6 +632,7 @@ def mcp_command(args, config) -> int:
         for c in conns:
             state = "on " if c.enabled else "off"
             tools = ", ".join(c.allowed_tools) or "(no tools allowed)"
+            # env values are intentionally never printed (secrets); only command/args/tools
             print(f"[{state}] {c.name}: {c.command} {' '.join(c.args)}  ->  {tools}")
         return 0
 
@@ -652,7 +653,8 @@ def mcp_command(args, config) -> int:
     if action == "import":
         import json as _json
         try:
-            data = _json.loads(open(args.path, encoding="utf-8").read())
+            with open(args.path, encoding="utf-8") as _f:
+                data = _json.loads(_f.read())
         except (OSError, ValueError) as exc:
             print(f"error: cannot read {args.path}: {exc}")
             return 1
