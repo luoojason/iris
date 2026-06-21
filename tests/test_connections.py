@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import pytest
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +93,14 @@ def test_materialize_writes_enabled_only(tmp_path):
     assert out == dest
     data = json.loads(Path(dest).read_text())
     assert list(data["mcpServers"]) == ["a"]
+
+
+def test_materialize_file_is_owner_only(tmp_path):
+    s = store(tmp_path)
+    s.add("a", "cmda", allowed_tools=["mcp__a__x"])
+    dest = str(tmp_path / "gen.json")
+    s.materialize(dest)
+    assert stat.S_IMODE(os.stat(dest).st_mode) == 0o600
 
 
 def test_materialize_none_when_no_enabled(tmp_path):

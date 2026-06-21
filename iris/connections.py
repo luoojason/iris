@@ -126,7 +126,10 @@ class ConnectionStore:
             return None
         path = Path(dest)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(cfg, indent=2))
+        os.chmod(str(path), 0o600)
         return dest
 
 

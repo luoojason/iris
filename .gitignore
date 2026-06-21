@@ -1,6 +1,8 @@
 # sessions, memory, and local state
 iris-sessions.json
 iris-memory.json
+iris-connections.json
+iris-connections.generated.json
 *.corrupt
 .env
 
