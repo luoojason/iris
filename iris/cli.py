@@ -55,6 +55,25 @@ class _Spinner:
             sys.stdout.flush()
 
 
+def connection_doctor_lines(config) -> list[str]:
+    import shutil as _shutil
+    from .connections import ConnectionStore
+
+    store = ConnectionStore(config.connections_file)
+    conns = store.list()
+    if not conns:
+        return ["connections: none registered (iris mcp add NAME --command CMD)"]
+    lines = [f"connections: {len(conns)} registered"]
+    for c in conns:
+        state = "on" if c.enabled else "off"
+        lines.append(f"  [{state}] {c.name}: {c.command}")
+        if c.enabled and _shutil.which(c.command) is None and not c.command.startswith("/"):
+            lines.append(f"    WARNING: command not found on PATH: {c.command}")
+        if c.enabled and not c.allowed_tools:
+            lines.append(f"    WARNING: {c.name} has no allowed tools, so it is inert")
+    return lines
+
+
 def doctor(config: Config, probe: bool = True, fix: bool = False) -> int:
     """Verify the claude binary is present and actually signed in.
 
@@ -115,6 +134,8 @@ def doctor(config: Config, probe: bool = True, fix: bool = False) -> int:
         print("standing orders: (none)")
     print(f"mcp tools: {config.mcp_config or '(none)'}")
     print(f"allowed tools: {', '.join(config.allowed_tools) if config.allowed_tools else '(none)'}")
+    for line in connection_doctor_lines(config):
+        print(line)
     print(f"voice transcription: {'on (' + config.voice_model + ')' if config.voice_enabled else 'off'}")
     if config.compact_at_tokens or config.compact_every:
         triggers = []

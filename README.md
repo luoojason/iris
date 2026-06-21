@@ -210,6 +210,26 @@ only the home channel / configured guild unless ids are added to
 transcripts Claude Code already keeps. Point Claude at any other MCP server
 (filesystem, browser, web search, your own) the same way.
 
+## Connect your own MCP servers
+
+Iris ships with no integrations turned on. You connect the tools you want —
+any MCP server — and nothing is pre-set.
+
+    iris mcp add buffer --command npx --arg buffer-mcp --env TOKEN=... --allow mcp__buffer__publish
+    iris mcp test buffer      # probe the server and list the tools it exposes
+    iris mcp list
+    iris mcp disable buffer   # turn a connection off without removing it
+
+The built-in Iris servers (memory, reminders, jobs, usage, wiki, goals,
+history, skills, discord, tts) are just connections too — import the sample set
+and enable the ones you want:
+
+    iris mcp import examples/mcp.example.json
+    iris mcp enable memory
+
+Connections are owner-managed from the CLI only; the agent never edits them.
+`iris doctor` lists your connections and flags any that are misconfigured.
+
 ### Trace ledger
 
 Set `IRIS_TRACE_FILE` and every `claude -p` invocation — chat, jobs, proactive

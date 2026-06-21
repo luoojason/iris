@@ -61,3 +61,20 @@ def test_import_registers_disabled(tmp_path):
     c = ConnectionStore(str(tmp_path / "conns.json")).get("memory")
     assert c is not None and c.enabled is False  # imported disabled until owner enables + allows
     assert c.command == "python" and c.args == ["-m", "iris.mcp.memory_server"]
+
+
+import shutil
+
+from iris.cli import connection_doctor_lines
+
+
+def test_connection_doctor_flags_empty_allow_and_bad_command(tmp_path):
+    c = cfg(tmp_path)
+    s = ConnectionStore(c.connections_file)
+    s.add("good", shutil.which("python") or "python", allowed_tools=["mcp__good__x"])
+    s.add("noallow", shutil.which("python") or "python")  # enabled, no tools
+    s.add("badcmd", "definitely-not-a-real-binary-xyz", allowed_tools=["mcp__badcmd__y"])
+    lines = "\n".join(connection_doctor_lines(c))
+    assert "good" in lines
+    assert "noallow" in lines and "no allowed tools" in lines.lower()
+    assert "badcmd" in lines and "not found" in lines.lower()
