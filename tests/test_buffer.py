@@ -11,6 +11,7 @@ from iris.buffer import (
     list_channels,
     load_token,
     resolve_channels,
+    stable_media_host,
 )
 
 
@@ -145,3 +146,35 @@ def test_create_post_never_raises_on_unexpected(monkeypatch):
     monkeypatch.setattr(b, "_graphql", boom)
     out = b.create_post("hi", "c1", token="t", http=FakeHttp())
     assert "error" in out and "kaboom" in out["error"]
+
+
+def test_stable_media_host_requires_public_base(monkeypatch):
+    monkeypatch.setenv("IRIS_MEDIA_BUCKET", "b")
+    monkeypatch.delenv("IRIS_MEDIA_PUBLIC_BASE", raising=False)
+    with pytest.raises(BufferError) as exc:
+        stable_media_host()
+    assert "public" in str(exc.value).lower()
+
+
+def test_stable_media_host_requires_bucket(monkeypatch):
+    monkeypatch.delenv("IRIS_MEDIA_BUCKET", raising=False)
+    monkeypatch.setenv("IRIS_MEDIA_PUBLIC_BASE", "https://cdn.example.com")
+    with pytest.raises(BufferError):
+        stable_media_host()
+
+
+def test_stable_media_host_returns_permanent_url(monkeypatch):
+    monkeypatch.setenv("IRIS_MEDIA_BUCKET", "b")
+    monkeypatch.setenv("IRIS_MEDIA_PUBLIC_BASE", "https://cdn.example.com/")
+    uploaded = {}
+
+    class FakeS3:
+        def upload_file(self, path, bucket, key, ExtraArgs=None):
+            uploaded["args"] = (path, bucket, key, ExtraArgs)
+
+    host = stable_media_host(uploader=FakeS3())
+    url = host("/tmp/clip.mp4")
+    assert url.startswith("https://cdn.example.com/")
+    assert url.endswith("clip.mp4")
+    assert uploaded["args"][1] == "b"
+    assert uploaded["args"][3] == {"ContentType": "video/mp4"}

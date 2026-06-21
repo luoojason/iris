@@ -122,3 +122,44 @@ def create_post(
     if not post_id:
         return {"error": f"Buffer createPost returned no id: {data}"}
     return {"id": post_id}
+
+
+def stable_media_host(
+    *,
+    bucket: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    public_base: Optional[str] = None,
+    uploader=None,
+) -> MediaHost:
+    """A media host returning a PERMANENT public URL (never presigned).
+
+    Buffer fetches media at publish time (possibly days later for scheduled
+    posts), so an expiring URL fails silently. This requires a public base URL
+    (a public R2/S3 bucket or CDN domain) and refuses to run without one.
+
+    Env: IRIS_MEDIA_BUCKET, IRIS_MEDIA_ENDPOINT (R2/B2 endpoint, omit for AWS),
+    IRIS_MEDIA_PUBLIC_BASE (the public base the bucket serves files at), plus the
+    usual AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for the upload.
+    """
+    bucket = bucket or os.environ.get("IRIS_MEDIA_BUCKET")
+    endpoint = endpoint or os.environ.get("IRIS_MEDIA_ENDPOINT") or None
+    public_base = public_base or os.environ.get("IRIS_MEDIA_PUBLIC_BASE") or None
+    if not bucket:
+        raise BufferError("set IRIS_MEDIA_BUCKET (and S3/R2 credentials) to host videos")
+    if not public_base:
+        raise BufferError(
+            "set IRIS_MEDIA_PUBLIC_BASE to a permanent public URL base; Buffer "
+            "fetches media at publish time, so presigned/expiring URLs fail"
+        )
+
+    def host(mp4_path: str) -> str:
+        client = uploader
+        if client is None:
+            import boto3  # lazy: only when actually posting
+
+            client = boto3.client("s3", endpoint_url=endpoint)
+        key = f"iris/{int(time.time())}-{os.path.basename(mp4_path)}"
+        client.upload_file(mp4_path, bucket, key, ExtraArgs={"ContentType": "video/mp4"})
+        return f"{public_base.rstrip('/')}/{key}"
+
+    return host
