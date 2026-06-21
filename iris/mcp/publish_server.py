@@ -71,6 +71,7 @@ def publish_video(mp4_path: str, caption: str, platforms: str = "", when: str = 
         return f"Media hosting is not configured: {exc}"
 
     names = [p.strip() for p in platforms.split(",") if p.strip()]
+    # http=None lets iris.buffer.publish use its default requests client; injectable in tests
     results = publish(
         mp4_path, caption, names, scheduled_at=scheduled_at, token=token, http=None, media_host=host,
     )

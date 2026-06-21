@@ -78,3 +78,18 @@ def test_publish_dir_restriction(tmp_path, monkeypatch):
     monkeypatch.setattr(ps, "publish", lambda *a, **k: {"twitter": {"id": "p1"}})
     assert "Refused" in ps.publish_video(str(outside), "cap")
     assert "Refused" not in ps.publish_video(str(good), "cap")
+
+
+def test_publish_tool_media_host_unconfigured(tmp_path, monkeypatch):
+    f = tmp_path / "v.mp4"
+    f.write_bytes(b"x")
+    monkeypatch.delenv("IRIS_PUBLISH_DIR", raising=False)
+    monkeypatch.setattr(ps, "load_token", lambda: "tok")
+
+    def boom():
+        raise ps.BufferError("set IRIS_MEDIA_PUBLIC_BASE to a permanent public URL base")
+
+    monkeypatch.setattr(ps, "stable_media_host", boom)
+    out = ps.publish_video(str(f), "cap")
+    assert "Media hosting is not configured" in out
+    assert "IRIS_MEDIA_PUBLIC_BASE" in out
