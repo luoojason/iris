@@ -9,6 +9,7 @@ pre-set. Mirrors the owner-CLI-only writer model of ``iris/workspaces.py``.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field, replace
@@ -118,3 +119,30 @@ class ConnectionStore:
             if c.enabled:
                 tools.update(c.allowed_tools)
         return sorted(tools)
+
+    def materialize(self, dest: str) -> str | None:
+        cfg = self.to_mcp_config()
+        if not cfg["mcpServers"]:
+            return None
+        path = Path(dest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        return dest
+
+
+def resolve_connections(config, *, generated_path: str | None = None):
+    """Derive mcp_config + allowed_tools from enabled connections.
+
+    Back-compat: if no connections file exists (or none are enabled), the config
+    is returned unchanged so IRIS_MCP_CONFIG / IRIS_ALLOWED_TOOLS keep working.
+    """
+    cfile = getattr(config, "connections_file", None)
+    if not cfile or not Path(cfile).exists():
+        return config
+    store = ConnectionStore(cfile)
+    gen = generated_path or str(Path(cfile).with_suffix(".generated.json"))
+    mcp_path = store.materialize(gen)
+    if mcp_path is None:
+        return config
+    merged = sorted(set(store.allowed_tools_for_enabled()) | set(config.allowed_tools or []))
+    return replace(config, mcp_config=mcp_path, allowed_tools=merged)

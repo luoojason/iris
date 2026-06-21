@@ -414,6 +414,8 @@ class Agent:
 
     @classmethod
     def from_config(cls, config: Config, *, clock_gated: bool = False) -> "Agent":
+        from .connections import resolve_connections
+        config = resolve_connections(config)
         # Clock-triggered contexts (proactive reviews, goal ticks) are stripped of
         # the tools that create new self-starting work, so the clock can't amplify
         # itself off the timer. Chat passes clock_gated=False (full control plane).

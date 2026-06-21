@@ -70,3 +70,51 @@ def test_to_mcp_config_and_allowed_tools_enabled_only(tmp_path):
 def test_valid_name_length_boundary():
     assert valid_name("a" * 32)        # 32 chars allowed
     assert not valid_name("a" * 33)    # 33 chars rejected
+
+
+import json
+from dataclasses import dataclass, field
+
+from iris.connections import resolve_connections
+
+
+@dataclass
+class FakeConfig:
+    connections_file: str = "iris-connections.json"
+    mcp_config: str | None = None
+    allowed_tools: list = field(default_factory=list)
+
+
+def test_materialize_writes_enabled_only(tmp_path):
+    s = store(tmp_path)
+    s.add("a", "cmda", allowed_tools=["mcp__a__x"])
+    s.add("b", "cmdb", enabled=False)
+    dest = str(tmp_path / "gen.json")
+    out = s.materialize(dest)
+    assert out == dest
+    data = json.loads(open(dest).read())
+    assert list(data["mcpServers"]) == ["a"]
+
+
+def test_materialize_none_when_no_enabled(tmp_path):
+    s = store(tmp_path)
+    s.add("b", "cmdb", enabled=False)
+    dest = str(tmp_path / "gen.json")
+    assert s.materialize(dest) is None
+    assert not (tmp_path / "gen.json").exists()
+
+
+def test_resolve_connections_derives_config(tmp_path):
+    cfile = tmp_path / "conns.json"
+    s = ConnectionStore(str(cfile))
+    s.add("a", "cmda", allowed_tools=["mcp__a__x", "mcp__a__y"])
+    cfg = FakeConfig(connections_file=str(cfile), allowed_tools=["mcp__keep__z"])
+    out = resolve_connections(cfg, generated_path=str(tmp_path / "gen.json"))
+    assert out.mcp_config == str(tmp_path / "gen.json")
+    assert out.allowed_tools == ["mcp__a__x", "mcp__a__y", "mcp__keep__z"]
+
+
+def test_resolve_connections_passthrough_when_no_file(tmp_path):
+    cfg = FakeConfig(connections_file=str(tmp_path / "missing.json"), mcp_config="orig.json", allowed_tools=["t"])
+    out = resolve_connections(cfg)
+    assert out is cfg  # unchanged object, back-compat

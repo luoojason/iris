@@ -68,6 +68,7 @@ class Config:
     # Owner-edited standing orders (durable rules, not facts) appended to the
     # system prompt every turn. Keep it small: every byte is re-billed per turn.
     standing_orders_file: Optional[str] = None
+    connections_file: str = "iris-connections.json"
     mcp_config: Optional[str] = None
     permission_mode: str = "default"
     allowed_tools: list[str] = field(default_factory=list)
@@ -313,6 +314,7 @@ class Config:
             trivial_max_chars=int(os.environ.get("IRIS_TRIVIAL_MAX_CHARS", "140")),
             persona_file=os.environ.get("IRIS_PERSONA_FILE") or None,
             standing_orders_file=os.environ.get("IRIS_STANDING_ORDERS_FILE") or None,
+            connections_file=os.environ.get("IRIS_CONNECTIONS_FILE", "iris-connections.json"),
             mcp_config=os.environ.get("IRIS_MCP_CONFIG") or None,
             permission_mode=os.environ.get("IRIS_PERMISSION_MODE", "default"),
             allowed_tools=_split(os.environ.get("IRIS_ALLOWED_TOOLS")),
