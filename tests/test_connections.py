@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import pytest
+from dataclasses import dataclass, field
+from pathlib import Path
 
-from iris.connections import Connection, ConnectionStore, valid_name
+from iris.connections import Connection, ConnectionStore, valid_name, resolve_connections
 
 
 def test_valid_name():
@@ -72,12 +75,6 @@ def test_valid_name_length_boundary():
     assert not valid_name("a" * 33)    # 33 chars rejected
 
 
-import json
-from dataclasses import dataclass, field
-
-from iris.connections import resolve_connections
-
-
 @dataclass
 class FakeConfig:
     connections_file: str = "iris-connections.json"
@@ -92,7 +89,7 @@ def test_materialize_writes_enabled_only(tmp_path):
     dest = str(tmp_path / "gen.json")
     out = s.materialize(dest)
     assert out == dest
-    data = json.loads(open(dest).read())
+    data = json.loads(Path(dest).read_text())
     assert list(data["mcpServers"]) == ["a"]
 
 
@@ -118,3 +115,22 @@ def test_resolve_connections_passthrough_when_no_file(tmp_path):
     cfg = FakeConfig(connections_file=str(tmp_path / "missing.json"), mcp_config="orig.json", allowed_tools=["t"])
     out = resolve_connections(cfg)
     assert out is cfg  # unchanged object, back-compat
+
+
+def test_resolve_connections_passthrough_when_all_disabled(tmp_path):
+    cfile = tmp_path / "conns.json"
+    s = ConnectionStore(str(cfile))
+    s.add("a", "cmda", enabled=False)
+    cfg = FakeConfig(connections_file=str(cfile), mcp_config="orig.json", allowed_tools=["t"])
+    out = resolve_connections(cfg)
+    assert out is cfg  # all disabled -> unchanged (back-compat)
+
+
+def test_resolve_connections_supersedes_env_mcp_config(tmp_path):
+    cfile = tmp_path / "conns.json"
+    s = ConnectionStore(str(cfile))
+    s.add("a", "cmda", allowed_tools=["mcp__a__x"])
+    cfg = FakeConfig(connections_file=str(cfile), mcp_config="env-set.json", allowed_tools=["mcp__keep__z"])
+    out = resolve_connections(cfg, generated_path=str(tmp_path / "gen.json"))
+    assert out.mcp_config == str(tmp_path / "gen.json")          # env mcp_config superseded
+    assert out.allowed_tools == ["mcp__a__x", "mcp__keep__z"]     # env tools unioned

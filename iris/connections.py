@@ -135,6 +135,10 @@ def resolve_connections(config, *, generated_path: str | None = None):
 
     Back-compat: if no connections file exists (or none are enabled), the config
     is returned unchanged so IRIS_MCP_CONFIG / IRIS_ALLOWED_TOOLS keep working.
+
+    When enabled connections DO exist they supersede IRIS_MCP_CONFIG: config.mcp_config
+    is replaced by the generated file (the env mcp-config is not merged), while
+    allowed_tools from the env are unioned with the connections' allowed tools.
     """
     cfile = getattr(config, "connections_file", None)
     if not cfile or not Path(cfile).exists():
