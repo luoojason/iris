@@ -680,6 +680,24 @@ def mcp_command(args, config) -> int:
         print(f"imported {added} connection(s), disabled. Enable + allow tools, e.g.: iris mcp enable NAME")
         return 0
 
+    if action == "test":
+        conn = store.get(args.name)
+        if conn is None:
+            print(f"no connection named {args.name!r}")
+            return 1
+        from .mcp_probe import ProbeError, probe_tools
+        try:
+            tools = probe_tools(conn.command, conn.args, conn.env)
+        except ProbeError as exc:
+            print(f"could not probe {args.name!r}: {exc}")
+            return 1
+        if not tools:
+            print(f"{args.name!r} started but exposed no tools")
+            return 0
+        print(f"{args.name!r} exposes: " + ", ".join(f"mcp__{args.name}__{t}" for t in tools))
+        print("allow them with: iris mcp add (or re-add) using --allow <tool>")
+        return 0
+
     print("unknown mcp action")
     return 1
 
@@ -791,6 +809,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_imp = mcp_sub.add_parser("import", help="import servers from an existing mcp.json")
     p_imp.add_argument("path")
+
+    p_test = mcp_sub.add_parser("test", help="probe a connection and list its tools")
+    p_test.add_argument("name")
 
     return parser
 
