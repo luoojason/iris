@@ -116,6 +116,8 @@ def create_post(
         data = _graphql(_CREATE_POST, {"input": inp}, token=token, http=http)
     except BufferError as exc:
         return {"error": str(exc)}
+    except Exception as exc:  # honor the never-raises contract
+        return {"error": f"unexpected: {exc}"}
     post_id = (data.get("createPost") or {}).get("id")
     if not post_id:
         return {"error": f"Buffer createPost returned no id: {data}"}

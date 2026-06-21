@@ -134,3 +134,14 @@ def test_create_post_missing_id_is_error():
     http = FakeHttp(posts=[FakeResp({"data": {"createPost": {}}})])
     out = create_post("hi", "c1", token="t", http=http)
     assert "error" in out
+
+
+def test_create_post_never_raises_on_unexpected(monkeypatch):
+    import iris.buffer as b
+
+    def boom(*a, **k):
+        raise ValueError("kaboom")
+
+    monkeypatch.setattr(b, "_graphql", boom)
+    out = b.create_post("hi", "c1", token="t", http=FakeHttp())
+    assert "error" in out and "kaboom" in out["error"]
