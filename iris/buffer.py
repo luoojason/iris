@@ -88,3 +88,35 @@ def resolve_channels(names: list[str], channels: list[dict]) -> tuple[list[str],
         else:
             unknown.append(name.strip())
     return ids, unknown
+
+
+_CREATE_POST = (
+    "mutation($input: CreatePostInput!) { createPost(input: $input) { id } }"
+)
+
+
+def create_post(
+    text: str,
+    channel_id: str,
+    *,
+    video_url: Optional[str] = None,
+    scheduled_at: Optional[str] = None,
+    token: str,
+    http=None,
+) -> dict:
+    """Create one post on one channel. {id} or {error}; never raises."""
+    inp: dict = {"text": text, "channelIds": [channel_id]}
+    if video_url:
+        inp["assets"] = [{"video": {"url": video_url}}]
+    if scheduled_at:
+        inp["scheduledAt"] = scheduled_at
+    else:
+        inp["scheduledAt"] = None  # null => post now
+    try:
+        data = _graphql(_CREATE_POST, {"input": inp}, token=token, http=http)
+    except BufferError as exc:
+        return {"error": str(exc)}
+    post_id = (data.get("createPost") or {}).get("id")
+    if not post_id:
+        return {"error": f"Buffer createPost returned no id: {data}"}
+    return {"id": post_id}

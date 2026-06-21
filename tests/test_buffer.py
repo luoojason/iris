@@ -7,6 +7,7 @@ import pytest
 from iris.buffer import (
     BufferError,
     _graphql,
+    create_post,
     list_channels,
     load_token,
     resolve_channels,
@@ -99,3 +100,37 @@ def test_resolve_channels_reports_unknown():
     ids, unknown = resolve_channels(["twitter", "tiktok"], CHANS)
     assert ids == ["c1"]
     assert unknown == ["tiktok"]
+
+
+def test_create_post_now_with_video():
+    http = FakeHttp(posts=[FakeResp({"data": {"createPost": {"id": "p1"}}})])
+    out = create_post("hello", "c1", video_url="https://h/v.mp4", token="t", http=http)
+    assert out == {"id": "p1"}
+    _, kw = http.calls[0]
+    variables = kw["json"]["variables"]
+    assert variables["input"]["channelIds"] == ["c1"]
+    assert variables["input"]["assets"][0]["video"]["url"] == "https://h/v.mp4"
+    assert variables["input"].get("scheduledAt") is None
+
+
+def test_create_post_scheduled():
+    http = FakeHttp(posts=[FakeResp({"data": {"createPost": {"id": "p2"}}})])
+    out = create_post(
+        "hi", "c1", video_url="https://h/v.mp4",
+        scheduled_at="2026-07-01T15:00:00", token="t", http=http,
+    )
+    assert out == {"id": "p2"}
+    _, kw = http.calls[0]
+    assert kw["json"]["variables"]["input"]["scheduledAt"] == "2026-07-01T15:00:00"
+
+
+def test_create_post_error_is_failsoft():
+    http = FakeHttp(posts=[FakeResp({"errors": [{"message": "channel down"}]})])
+    out = create_post("hi", "c1", video_url="https://h/v.mp4", token="t", http=http)
+    assert "error" in out and "channel down" in out["error"]
+
+
+def test_create_post_missing_id_is_error():
+    http = FakeHttp(posts=[FakeResp({"data": {"createPost": {}}})])
+    out = create_post("hi", "c1", token="t", http=http)
+    assert "error" in out
