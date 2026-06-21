@@ -49,9 +49,9 @@ class ConnectionStore:
         return Connection(
             name=name,
             command=str(rec.get("command", "")),
-            args=[str(a) for a in rec.get("args", []) if isinstance(a, str)],
+            args=[str(a) for a in rec.get("args", [])],
             env={str(k): str(v) for k, v in (rec.get("env") or {}).items()},
-            allowed_tools=[str(t) for t in rec.get("allowed_tools", []) if isinstance(t, str)],
+            allowed_tools=[str(t) for t in rec.get("allowed_tools", [])],
             enabled=bool(rec.get("enabled", True)),
         )
 
@@ -81,8 +81,9 @@ class ConnectionStore:
                 "allowed_tools": list(allowed_tools),
                 "enabled": bool(enabled),
             }
+            conn = self._to_conn(name, data[name])
             self._store.save(data)
-        return self.get(name)
+        return conn
 
     def remove(self, name: str) -> bool:
         with self._store.locked():
@@ -99,8 +100,9 @@ class ConnectionStore:
             if name not in data:
                 raise ValueError(f"no connection named {name!r}")
             data[name]["enabled"] = bool(enabled)
+            conn = self._to_conn(name, data[name])
             self._store.save(data)
-        return self.get(name)
+        return conn
 
     def to_mcp_config(self) -> dict:
         servers = {

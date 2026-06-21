@@ -65,3 +65,8 @@ def test_to_mcp_config_and_allowed_tools_enabled_only(tmp_path):
     cfg = s.to_mcp_config()
     assert cfg == {"mcpServers": {"a": {"command": "cmda", "args": ["x"], "env": {"K": "v"}}}}
     assert s.allowed_tools_for_enabled() == ["mcp__a__one", "mcp__a__two"]
+
+
+def test_valid_name_length_boundary():
+    assert valid_name("a" * 32)        # 32 chars allowed
+    assert not valid_name("a" * 33)    # 33 chars rejected
