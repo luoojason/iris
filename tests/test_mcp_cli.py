@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 
-from iris.cli import build_parser, mcp_command
+from iris.cli import build_parser, connection_doctor_lines, mcp_command
 from iris.config import Config
 from iris.connections import ConnectionStore
 
@@ -61,11 +62,6 @@ def test_import_registers_disabled(tmp_path):
     c = ConnectionStore(str(tmp_path / "conns.json")).get("memory")
     assert c is not None and c.enabled is False  # imported disabled until owner enables + allows
     assert c.command == "python" and c.args == ["-m", "iris.mcp.memory_server"]
-
-
-import shutil
-
-from iris.cli import connection_doctor_lines
 
 
 def test_connection_doctor_flags_empty_allow_and_bad_command(tmp_path):

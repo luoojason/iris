@@ -59,6 +59,8 @@ def connection_doctor_lines(config) -> list[str]:
     import shutil as _shutil
     from .connections import ConnectionStore
 
+    if not getattr(config, "connections_file", None):
+        return ["connections: (not configured — set IRIS_CONNECTIONS_FILE to enable)"]
     store = ConnectionStore(config.connections_file)
     conns = store.list()
     if not conns:
@@ -66,7 +68,8 @@ def connection_doctor_lines(config) -> list[str]:
     lines = [f"connections: {len(conns)} registered"]
     for c in conns:
         state = "on" if c.enabled else "off"
-        lines.append(f"  [{state}] {c.name}: {c.command}")
+        shown = f"{c.command} {' '.join(c.args)}".strip()
+        lines.append(f"  [{state}] {c.name}: {shown}")
         if c.enabled and _shutil.which(c.command) is None and not c.command.startswith("/"):
             lines.append(f"    WARNING: command not found on PATH: {c.command}")
         if c.enabled and not c.allowed_tools:
