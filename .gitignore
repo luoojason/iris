@@ -17,6 +17,10 @@ dist/
 venv/
 .pytest_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # os
 .DS_Store
