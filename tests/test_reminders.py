@@ -47,6 +47,25 @@ def test_recurring_reschedules_from_now(tmp_path):
     assert remaining[0]["due_ts"] == 150 + 3600
 
 
+def test_finite_recurring_reminder_stops_after_its_remaining_fires(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(due_ts=100, text="standup", channel_id="c1", repeat_secs=60, remaining=2)
+    # fire 1: spends one, reschedules with remaining 1
+    assert [j["text"] for j in store.pop_due(now=100)] == ["standup"]
+    rem = store.all()
+    assert len(rem) == 1 and rem[0]["remaining"] == 1 and rem[0]["due_ts"] == 160
+    # fire 2: last one, so it is dropped instead of rescheduled
+    assert [j["text"] for j in store.pop_due(now=160)] == ["standup"]
+    assert store.all() == []
+
+
+def test_infinite_recurring_reminder_unaffected_by_remaining(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(due_ts=100, text="forever", channel_id="c1", repeat_secs=60)  # no remaining
+    store.pop_due(now=100)
+    assert len(store.all()) == 1  # still scheduled
+
+
 def test_missed_window_fires_once_not_every_occurrence(tmp_path):
     # Host asleep for a long time: a daily job that was due ages ago should fire
     # exactly once on the next tick, then resume cadence, not replay every day.

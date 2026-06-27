@@ -112,7 +112,7 @@ def _guard_parked(config) -> bool:
 
 
 def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
-          resume=False, runner=None, driver_factory=None, sender=None):
+          resume=False, channel=None, runner=None, driver_factory=None, sender=None):
     """Run the command, decide, compose, deliver. Returns the command's exit code.
 
     With ``fold=True`` a concise completion note is also appended to the
@@ -123,25 +123,35 @@ def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
 
     With ``resume=True`` AND the owner having turned autonomous resume on
     (``IRIS_AUTO_RESUME``), a resume request is also enqueued so the bot fires
-    one follow-up turn on the home conversation — the chain carries itself
-    forward. This is the bounded relaxation of zero idle inference; it is inert
-    unless both the per-launch flag and the master flag are set.
+    one follow-up turn on that conversation — the chain carries itself forward.
+    This is the bounded relaxation of zero idle inference; it is inert unless
+    both the per-launch flag and the master flag are set.
+
+    ``channel`` is the conversation the command was launched from (a thread's
+    id, threaded through from ``IRIS_ORIGIN_CHANNEL`` by run_in_background). When
+    set, the completion ping, the fold note, and the resume turn all go BACK
+    THERE, so a task started in a thread does not surface its result over in the
+    home channel. A clock-launched run (a scheduled script rule) has no origin
+    and falls back to the home / notify channel as before.
     """
     exit_code, duration_s, tail = run_command(argv, runner=runner)
     title = name or " ".join(argv)
     status = "finished" if exit_code == 0 else f"failed (exit {exit_code})"
+    origin = (channel or "").strip() or None
+    # Where the conversation-facing outputs (fold note, resume turn) land: the
+    # originating thread if there is one, else the owner's home channel.
+    conv_channel = origin or getattr(config, "home_channel", "")
     if fold and getattr(config, "inbox_file", ""):
         note = f"background command '{title}' {status}."
         if (tail or "").strip():
             note += " Last output: " + (tail or "").strip()[-400:]
         try:
             from ..inbox import Inbox
-            home = getattr(config, "home_channel", "")
             Inbox(config.inbox_file).append(
-                note, conversation_id=(f"discord:{home}" if home else None))
+                note, conversation_id=(f"discord:{conv_channel}" if conv_channel else None))
         except Exception:
             pass
-    if resume and getattr(config, "auto_resume", False) and getattr(config, "home_channel", ""):
+    if resume and getattr(config, "auto_resume", False) and conv_channel:
         prompt = (
             f"[auto] Your background task '{title}' just {status}. "
             "If the plan has a next step, do it now, then tell me what happened."
@@ -151,7 +161,7 @@ def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
         try:
             from ..autoresume import ResumeQueue
             ResumeQueue(config.resume_queue_file).enqueue(
-                f"discord:{config.home_channel}", prompt)
+                f"discord:{conv_channel}", prompt)
         except Exception:
             pass
     event = Event(
@@ -170,6 +180,8 @@ def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
             if driver is not None:
                 driver = _RecordingDriver(driver, config.usage_file)
         text = render(event, driver)
-        if not deliver_send(text, token=config.discord_token, channel=config.notify_channel, sender=sender):
+        # Ping the originating thread when there is one, else the notify channel.
+        notify_channel = origin or config.notify_channel
+        if not deliver_send(text, token=config.discord_token, channel=notify_channel, sender=sender):
             print(text)
     return exit_code

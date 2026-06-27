@@ -431,6 +431,37 @@ def test_run_in_background_autoresume_honest_without_a_home_channel(bg_env):
     assert "off" in out.lower() or "ping" in out.lower()
 
 
+def test_run_in_background_threads_origin_channel_to_watch(bg_env, monkeypatch):
+    # Launched from a thread: --channel carries the origin so the completion ping
+    # and any resume turn report back THERE, not the home channel. This is the
+    # channel/thread-confusion fix on the launch side.
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-77")
+    out = srv.run_in_background("build.sh", label="b")
+    argv = bg_env["calls"][0][0]
+    assert argv[argv.index("--channel") + 1] == "thread-77"
+    assert "here" in out.lower()  # reply names the thread, not the home channel
+
+
+def test_run_in_background_omits_channel_without_origin(bg_env, monkeypatch):
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
+    out = srv.run_in_background("build.sh", label="b")
+    argv = bg_env["calls"][0][0]
+    assert "--channel" not in argv  # clock/non-Discord origin: home channel as before
+    assert "home channel" in out.lower()
+
+
+def test_run_in_background_arms_resume_from_origin_without_home_channel(bg_env, monkeypatch):
+    # Master flag on, no home channel, but launched from a thread: the thread IS
+    # a place to resume, so --resume must arm (origin, not home, satisfies it).
+    bg_env["config"].auto_resume = True
+    bg_env["config"].home_channel = ""
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-88")
+    srv.run_in_background("build.sh", label="b", autoresume=True)
+    argv = bg_env["calls"][0][0]
+    assert "--resume" in argv
+    assert argv[argv.index("--channel") + 1] == "thread-88"
+
+
 def test_run_in_background_gated_on_jobs(bg_env):
     bg_env["config"].jobs_enabled = False
     out = srv.run_in_background("anything")

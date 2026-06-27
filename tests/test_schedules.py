@@ -110,6 +110,43 @@ def test_tick_launches_a_due_job_rule(tmp_path):
     assert fresh["fired"] == {month_key(NOW): 1}
 
 
+def test_parse_wake_gate():
+    from iris.schedules import parse_wake_gate
+    assert parse_wake_gate("false") is False
+    assert parse_wake_gate("checking...\nSKIP") is False
+    assert parse_wake_gate('{"wakeAgent": false}') is False
+    assert parse_wake_gate("looks good\ntrue") is True
+    assert parse_wake_gate("") is True  # fails open
+    assert parse_wake_gate("garbage line") is True  # unparseable fails open
+
+
+def test_wake_gated_job_skips_when_probe_says_no(tmp_path):
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    add_rule(store, title="poll", when="2026-01-01T00:00:00Z", every="every 1d",
+             instructions="do the work", grants="shell", gate_command="check.sh",
+             default_cap=config.schedule_monthly_cap)
+    spawned = []
+    out = tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid),
+                         gate_runner=lambda cmd: "nothing new\nfalse")
+    assert spawned == []  # the probe said skip: no model call, no job
+    assert "gated" in out
+
+
+def test_wake_gated_job_launches_and_prepends_probe_output(tmp_path):
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    add_rule(store, title="poll", when="2026-01-01T00:00:00Z", every="every 1d",
+             instructions="do the work", grants="shell", gate_command="check.sh",
+             default_cap=config.schedule_monthly_cap)
+    spawned = []
+    tick_schedules(config, now=NOW, spawn=lambda jid, **kw: spawned.append(jid),
+                   gate_runner=lambda cmd: "3 new items\ntrue")
+    assert spawned == [1]
+    job = JobStore(config.jobs_file).get(1)
+    assert "3 new items" in job["instructions"] and "do the work" in job["instructions"]
+
+
 def test_tick_skips_a_rule_not_yet_due(tmp_path):
     config = make_config(tmp_path)
     store = ScheduleStore(config.schedules_file)

@@ -65,6 +65,37 @@ def test_single_message_runs_and_replies():
     asyncio.run(go())
 
 
+def test_reply_is_preserved_when_send_fails_and_draining_continues():
+    # A chat send can raise (auto-thread archived/locked, perms revoked, network
+    # reset). The paid reply must not vanish: it is handed to on_undelivered and
+    # the drain loop survives to deliver the next queued turn.
+    preserved: list[str] = []
+    delivered: list[str] = []
+
+    async def send(text):
+        if "first" in text:
+            raise RuntimeError("channel gone")
+        delivered.append(text)
+
+    async def run_turn(prompt, has_attachments):
+        return f"reply to {prompt}"
+
+    runner = ConversationRunner(
+        run_turn=run_turn, send=send, ack_line=lambda: None, ack_delay=10,
+        on_undelivered=lambda text: preserved.append(text),
+    )
+
+    async def go():
+        runner.submit(Turn(text="first"))
+        await runner._worker
+        runner.submit(Turn(text="second"))
+        await runner._worker
+
+    asyncio.run(go())
+    assert preserved == ["reply to first"]   # the failed reply was captured, not lost
+    assert delivered == ["reply to second"]  # the runner survived to deliver the next turn
+
+
 def test_messages_during_a_turn_coalesce_into_the_next():
     async def go():
         gate = asyncio.Event()

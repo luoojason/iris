@@ -194,6 +194,34 @@ def check_clock_gating(config: Config) -> list[Finding]:
     return []
 
 
+def check_supply_chain(config: Config) -> list[Finding]:
+    """Flag known-compromised dependency versions (pip + owner-wired npx/uvx MCP).
+
+    Stdlib-only and deterministic: matches what is actually installed and the
+    pinned MCP server packages against a small static advisory catalog. Silent
+    unless a compromised version is genuinely present. A live OSV scan is opt-in.
+    """
+    from . import advisories
+    components = []
+    try:
+        from .connections import ConnectionStore
+        for conn in ConnectionStore(config.connections_file).list():
+            if conn.enabled:
+                comp = advisories.parse_mcp_component(conn.command, conn.args)
+                if comp is not None:
+                    components.append(comp)
+    except Exception:
+        pass  # an unreadable connections file must not crash the audit
+    findings: list[Finding] = []
+    for adv, version in advisories.scan(advisories.installed_pip_versions(), components,
+                                        advisories=advisories.ADVISORIES):
+        findings.append(Finding(
+            adv.severity, "supply-chain", f"compromised dependency {adv.package} {version}",
+            f"{adv.ecosystem} {adv.package}=={version} matches advisory {adv.id}: {adv.note}",
+            f"upgrade {adv.package} off {version} (or remove the MCP server pinning it)"))
+    return findings
+
+
 _CHECKS = (
     check_secrets_mode,
     check_chat_sandbox,
@@ -203,6 +231,7 @@ _CHECKS = (
     check_single_user,
     check_job_isolation,
     check_clock_gating,
+    check_supply_chain,
 )
 
 

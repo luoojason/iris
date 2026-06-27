@@ -307,6 +307,19 @@ def build_client(config: Config, agent: Agent):
             for piece in chunk_text(text, DISCORD_LIMIT):
                 await channel.send(piece)
 
+        def preserve_undelivered(text: str) -> None:
+            # A paid reply whose send raised is appended to a durable file rather
+            # than lost; tagged with the conversation so it can be recovered.
+            try:
+                from .statefile import JsonListStore
+                store = JsonListStore(config.undelivered_file, "undelivered replies")
+                with store.locked():
+                    items = store.load()
+                    items.append({"conversation_id": conversation_id, "text": text})
+                    store.save(items[-200:])  # bound the file
+            except Exception:
+                log.warning("could not preserve an undelivered reply", exc_info=True)
+
         if config.live_interrupt and agent.stream_driver is not None:
             # Live interrupt: a mid-turn message redirects the running turn.
             def start_turn(prompt: str, has_attachments: bool) -> _LiveAdapterHandle:
@@ -318,6 +331,7 @@ def build_client(config: Config, agent: Agent):
                 ack_line=_ack_line,
                 typing=channel.typing,
                 ack_delay=config.ack_delay,
+                on_undelivered=preserve_undelivered,
             )
             runners[conversation_id] = runner
             return runner
@@ -338,6 +352,7 @@ def build_client(config: Config, agent: Agent):
             ack_line=_ack_line,
             typing=channel.typing,
             ack_delay=config.ack_delay,
+            on_undelivered=preserve_undelivered,
         )
         runners[conversation_id] = runner
         return runner

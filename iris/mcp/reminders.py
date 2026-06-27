@@ -54,7 +54,10 @@ def _default_channel() -> str:
     from iris.config import load_dotenv
 
     load_dotenv()
-    return os.environ.get("IRIS_DISCORD_HOME_CHANNEL", "")
+    # Prefer the thread this turn ran in (the driver re-adds IRIS_ORIGIN_CHANNEL
+    # to the MCP server env after stripping IRIS_*), so a reminder/follow-up set
+    # mid-conversation comes back HERE, not the home channel. Mirrors mcp/jobs.py.
+    return os.environ.get("IRIS_ORIGIN_CHANNEL") or os.environ.get("IRIS_DISCORD_HOME_CHANNEL", "")
 
 
 mcp = FastMCP("iris-reminders")

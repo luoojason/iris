@@ -140,6 +140,14 @@ class Config:
         default_factory=lambda: ["browser_evaluate", "browser_run_code_unsafe"])
     # Where finished background work queues notes for the next chat turn.
     inbox_file: str = "iris-inbox.json"
+    # Replies whose chat send raised (channel archived/locked, perms revoked,
+    # network) are preserved here instead of being silently dropped after the
+    # model turn was already paid for. See conversation._deliver.
+    undelivered_file: str = "iris-undelivered.json"
+    # Per-conversation recent-turns buffer, persisted so the compaction summary
+    # survives a restart instead of being lost (it lived only in RAM before, so a
+    # restart-then-overflow dropped history). See Agent._persist_recent_turns.
+    recent_turns_file: str = "iris-recent-turns.json"
     # The owner's recorded home channel (job pings, artifact uploads).
     home_channel: str = ""
 
@@ -238,6 +246,10 @@ class Config:
     # halves while the credit guard is running hot.
     memory_file: str = "iris-memory.json"
     memory_digest_bytes: int = 2400
+    # Per-turn auto-prefetch of NON-pinned notes relevant to the current message
+    # (pinned notes always inject via memory_digest_bytes). 0 disables it. Guarded:
+    # inert unless a note actually scores against the message. See Agent.respond.
+    memory_prefetch_bytes: int = 1000
 
     # The active-jobs digest: a tier-0 view of background jobs in flight (and just
     # finished), injected into the system prompt every turn so any session (chat,
@@ -349,6 +361,8 @@ class Config:
                 if "IRIS_BROWSER_DENY_TOOLS" in os.environ
                 else ["browser_evaluate", "browser_run_code_unsafe"]),
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
+            undelivered_file=os.environ.get("IRIS_UNDELIVERED_FILE", "iris-undelivered.json"),
+            recent_turns_file=os.environ.get("IRIS_RECENT_TURNS_FILE", "iris-recent-turns.json"),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
             auto_resume=_flag(os.environ.get("IRIS_AUTO_RESUME"), False),
             auto_resume_max_per_day=int(os.environ.get("IRIS_AUTO_RESUME_MAX_PER_DAY", "12")),
@@ -389,6 +403,7 @@ class Config:
             tighten_factor=float(os.environ.get("IRIS_TIGHTEN_FACTOR", "3")),
             memory_file=os.environ.get("IRIS_MEMORY_FILE", "iris-memory.json"),
             memory_digest_bytes=int(os.environ.get("IRIS_MEMORY_DIGEST_BYTES", "2400")),
+            memory_prefetch_bytes=int(os.environ.get("IRIS_MEMORY_PREFETCH_BYTES", "1000")),
             jobs_digest_bytes=int(os.environ.get("IRIS_JOBS_DIGEST_BYTES", "600")),
             jobs_digest_recent_secs=int(os.environ.get("IRIS_JOBS_DIGEST_RECENT_SECS", "3600")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),

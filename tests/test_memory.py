@@ -218,3 +218,22 @@ def test_pinned_digest_zero_budget_is_off():
     from iris.memory import pinned_digest
 
     assert pinned_digest([_pnote(1, "fact", pinned=True)], now_ts=1.75e9, max_bytes=0) == ""
+
+
+def test_relevant_digest_surfaces_a_matching_nonpinned_note():
+    from iris.memory import relevant_digest
+
+    notes = [_pnote(1, "the deploy key lives in vault path kv-prod", pinned=False),
+             _pnote(2, "unrelated grocery shopping list", pinned=False),
+             _pnote(3, "a pinned deploy fact", pinned=True)]
+    out = relevant_digest(notes, "where is the deploy key", now_ts=1.75e9, max_bytes=500)
+    assert "vault path kv-prod" in out
+    assert "grocery" not in out       # zero term-overlap is dropped
+    assert "pinned deploy fact" not in out  # pinned excluded (already injected each turn)
+
+
+def test_relevant_digest_empty_without_query_or_match():
+    from iris.memory import relevant_digest
+
+    assert relevant_digest([_pnote(1, "apples", pinned=False)], "", now_ts=1.0) == ""
+    assert relevant_digest([_pnote(1, "apples", pinned=False)], "zebra", now_ts=1.0) == ""

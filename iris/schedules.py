@@ -35,6 +35,7 @@ the clock.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -157,9 +158,45 @@ class ScheduleStore:
             return due
 
 
+def parse_wake_gate(stdout: str) -> bool:
+    """Whether a gated schedule should spend its model turn, from a probe's stdout.
+
+    Reads the LAST non-empty line. An explicit ``false``/``no``/``skip``/``0`` (or a
+    JSON ``{"wakeAgent": false}``) means skip; anything else, including an empty or
+    unparseable result, fails OPEN and launches, so a broken probe never silently
+    disables a schedule.
+    """
+    last = ""
+    for line in (stdout or "").splitlines():
+        if line.strip():
+            last = line.strip()
+    if not last:
+        return True
+    try:
+        obj = json.loads(last)
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key.lower() == "wakeagent":
+                    return bool(value)
+    except (ValueError, TypeError):
+        pass
+    return last.lower() not in ("false", "no", "0", "skip", "off", "nowake")
+
+
+def _run_gate(command: str, timeout: float = 30.0) -> str:
+    """Run a gate probe and return its stdout. Model-free; errors -> '' (fail open)."""
+    import subprocess
+    try:
+        proc = subprocess.run(["/bin/sh", "-c", command], capture_output=True,
+                              text=True, timeout=timeout)
+        return proc.stdout or ""
+    except Exception:
+        return ""
+
+
 def add_rule(store: ScheduleStore, *, title: str, when: str, every: str = "",
              instructions: str = "", command: str = "", grants: str = "",
-             workspace: str = "", cap: Optional[int] = None,
+             workspace: str = "", cap: Optional[int] = None, gate_command: str = "",
              created_by: str = "owner", default_cap: int = 62,
              now: Optional[float] = None) -> dict:
     """Validate and record one schedule rule. Raises ValueError on bad input.
@@ -194,6 +231,9 @@ def add_rule(store: ScheduleStore, *, title: str, when: str, every: str = "",
         due_ts=due,
         repeat_secs=repeat_secs,
         monthly_cap=cap,
+        # An optional cheap probe (model-free) run before a job rule fires: if it
+        # says skip, the firing spends no model call and no cap slot. Job rules only.
+        gate_command=(gate_command or "").strip(),
         fired={},
         last_job_id=None,
         enabled=True,
@@ -318,7 +358,7 @@ def _fire_script_rule(rule: dict, popen) -> dict:
 
 
 def tick_schedules(config: Config, now: Optional[float] = None,
-                   spawn=None, popen=None) -> str:
+                   spawn=None, popen=None, gate_runner=None) -> str:
     """Fire due schedule rules. Runs inside reminders-tick, fail-soft.
 
     Gated on IRIS_SCHEDULED_JOBS; with it unset this returns immediately and
@@ -342,6 +382,21 @@ def tick_schedules(config: Config, now: Optional[float] = None,
                 notes.append(f"#{rule['id']} skipped: at its monthly cap ({cap})")
                 continue
             if rule.get("instructions"):
+                gate = rule.get("gate_command")
+                if gate:
+                    gate_out = (gate_runner or _run_gate)(gate)
+                    if not parse_wake_gate(gate_out):
+                        notes.append(f"#{rule['id']} gated: probe said skip (no model call)")
+                        # A skip spends nothing; for a one-shot, re-enable so it
+                        # re-checks next tick (wait-until-ready), like the no-record path.
+                        if int(rule.get("repeat_secs", 0) or 0) == 0:
+                            store.update_if(rule["id"], rule.get("created_ts"), enabled=True)
+                        continue
+                    if (gate_out or "").strip():
+                        # Hand the probe's output to the run as fenced context.
+                        rule = {**rule, "instructions":
+                                f"[probe output, context for this run]\n{gate_out.strip()}\n\n"
+                                + rule["instructions"]}
                 outcome = _fire_job_rule(config, rule, spawn)
             else:
                 outcome = _fire_script_rule(rule, popen)

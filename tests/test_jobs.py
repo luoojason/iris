@@ -822,6 +822,141 @@ def test_spawn_runner_records_the_pid(tmp_path):
     assert store.get(1)["pid"] == 31337
 
 
+def test_spawn_runner_writes_a_per_job_log_not_devnull(tmp_path):
+    import subprocess
+    from iris.jobs import spawn_runner
+
+    store = make_store(tmp_path)
+    store.add("a", "x", [], "", "")
+    captured = {}
+
+    class FakeProc:
+        pid = 999
+
+    def fake_popen(*a, **k):
+        captured.update(k)
+        return FakeProc()
+
+    spawn_runner(1, store=store, popen=fake_popen)
+    # The runner's output goes to a real per-job log, not /dev/null, so a runner
+    # that dies during import leaves a trace instead of vanishing silently.
+    assert captured["stdout"] is not subprocess.DEVNULL
+    assert captured["stderr"] == subprocess.STDOUT
+    assert list(tmp_path.rglob("job-1.log")), "expected a per-job runner log file"
+
+
+def test_spawn_runner_counts_start_attempts(tmp_path):
+    from iris.jobs import spawn_runner
+
+    store = make_store(tmp_path)
+    store.add("a", "x", [], "", "")
+
+    class FakeProc:
+        pid = 1
+
+    spawn_runner(1, store=store, popen=lambda *a, **k: FakeProc())
+    spawn_runner(1, store=store, popen=lambda *a, **k: FakeProc())
+    assert store.get(1)["spawn_attempts"] == 2
+
+
+def test_retry_dead_starts_respawns_a_startup_death(tmp_path, monkeypatch):
+    import iris.jobs as jobs_mod
+    from iris.jobs import retry_dead_starts
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "")
+    store.update(1, pid=4242, spawn_attempts=1)  # spawned once, then died importing
+    store.add("queued", "y", [], "", "")  # never spawned: pid stays None
+    monkeypatch.setattr(jobs_mod, "_pid_alive", lambda pid: False)
+    respawned = []
+    n = retry_dead_starts(store, spawn=lambda jid, **k: respawned.append(jid))
+    assert n == 1 and respawned == [1]
+    assert store.get(2)["state"] == "pending"  # queued job untouched
+
+
+def test_retry_dead_starts_ignores_a_live_runner(tmp_path, monkeypatch):
+    import iris.jobs as jobs_mod
+    from iris.jobs import retry_dead_starts
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "")
+    store.update(1, pid=4242, spawn_attempts=1)
+    monkeypatch.setattr(jobs_mod, "_pid_alive", lambda pid: True)  # still importing/running
+    assert retry_dead_starts(store, spawn=lambda *a, **k: None) == 0
+
+
+def test_redeliver_reports_retries_a_failed_report_ping(tmp_path):
+    from iris.config import Config
+    from iris.jobs import redeliver_reports
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "chan-9")
+    # a finished job whose report ping never landed (Discord was down at delivery)
+    store.update(1, state="done", report="the result", report_delivered=False)
+    sent = []
+    n = redeliver_reports(Config(discord_token="tok"),
+                          send=lambda c, t, k: sent.append((c, t)) or True, store=store)
+    assert n == 1
+    assert sent and sent[0][0] == "chan-9" and "the result" in sent[0][1]
+    assert store.get(1)["report_delivered"] is True
+
+
+def test_redeliver_reports_gives_up_after_max_attempts(tmp_path):
+    from iris.config import Config
+    from iris.jobs import MAX_REDELIVER_ATTEMPTS, redeliver_reports
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "chan-9")
+    store.update(1, state="done", report="r", report_delivered=False,
+                 redeliver_attempts=MAX_REDELIVER_ATTEMPTS)  # already exhausted
+    sent = []
+    assert redeliver_reports(Config(discord_token="tok"),
+                             send=lambda *a: sent.append(1) or True, store=store) == 0
+    assert sent == []  # gave up; no further send attempts (report stays in the row + inbox)
+
+
+def test_redeliver_reports_marks_an_empty_report_done(tmp_path):
+    from iris.config import Config
+    from iris.jobs import redeliver_reports
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "chan-9")
+    store.update(1, state="done", report="", report_delivered=False)
+    # nothing to send, but it must not stay pending forever
+    assert redeliver_reports(Config(discord_token="tok"),
+                             send=lambda *a: 1 / 0, store=store) == 0
+    assert store.get(1)["report_delivered"] is True
+
+
+def test_redeliver_reports_counts_a_failed_attempt(tmp_path):
+    from iris.config import Config
+    from iris.jobs import redeliver_reports
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "chan-9")
+    store.update(1, state="done", report="r", report_delivered=False)
+    assert redeliver_reports(Config(discord_token="tok"),
+                             send=lambda *a: False, store=store) == 0  # send fails
+    assert store.get(1)["report_delivered"] is False
+    assert store.get(1)["redeliver_attempts"] == 1  # bounded retry counter advanced
+
+
+def test_retry_dead_starts_stops_after_max_then_repair_fails_it(tmp_path, monkeypatch):
+    import iris.jobs as jobs_mod
+    from iris.jobs import MAX_START_ATTEMPTS, repair_dead_runners, retry_dead_starts
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "")
+    store.update(1, pid=4242, spawn_attempts=MAX_START_ATTEMPTS)  # retries exhausted
+    monkeypatch.setattr(jobs_mod, "_pid_alive", lambda pid: False)
+    respawned = []
+    assert retry_dead_starts(store, spawn=lambda jid, **k: respawned.append(jid)) == 0
+    assert respawned == []
+    # exhausted: the ordinary repair sweep then fails it so the owner is told once
+    assert repair_dead_runners(store) == 1
+    assert store.get(1)["state"] == "failed"
+
+
 def test_store_admission_is_atomic_with_add(tmp_path):
     store = make_store(tmp_path)
     store.add("a", "x", [], "", "")

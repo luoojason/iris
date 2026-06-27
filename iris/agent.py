@@ -143,9 +143,16 @@ class Agent:
         stream_driver: Optional[StreamDriver] = None,
         inbox=None,
         guard=None,
+        recent_turns_file: str = "",
+        memory_file: str = "",
+        memory_prefetch_bytes: int = 0,
     ):
         self.driver = driver
         self.store = store
+        # Per-turn auto-prefetch of query-relevant non-pinned memory (off when
+        # either is empty/zero). Read in respond() where the message is in hand.
+        self._memory_file = memory_file
+        self._memory_prefetch_bytes = memory_prefetch_bytes
         # Built only when live interrupt is enabled; the one-shot driver is always
         # present and remains the fallback path.
         self.stream_driver = stream_driver
@@ -172,7 +179,22 @@ class Agent:
         self.compact_seed_turns = max(1, compact_seed_turns)
         # Per-conversation rolling buffer of recent (user, reply) pairs, guarded by
         # _locks_guard. Populated each successful turn; read at compaction time.
+        # Persisted to recent_turns_file (when set) so the seed survives a restart.
         self._recent_turns: dict[str, list[tuple[str, str]]] = {}
+        self._recent_turns_store = None
+        if recent_turns_file:
+            from .statefile import JsonDictStore
+            self._recent_turns_store = JsonDictStore(recent_turns_file, "recent turns")
+            try:
+                data = self._recent_turns_store.load()
+                if isinstance(data, dict):
+                    self._recent_turns = {
+                        cid: [tuple(p) for p in pairs
+                              if isinstance(p, (list, tuple)) and len(p) == 2]
+                        for cid, pairs in data.items() if isinstance(pairs, list)
+                    }
+            except Exception:
+                log.warning("could not load the recent-turns buffer", exc_info=True)
         # When False, compaction runs inline instead of in a background thread
         # (used by tests for determinism).
         self.compact_async = True
@@ -202,6 +224,45 @@ class Agent:
             buf.append((user_text, reply))
             if len(buf) > self.compact_seed_turns:
                 del buf[: len(buf) - self.compact_seed_turns]
+        self._persist_recent_turns()
+
+    def _relevant_memory(self, conversation_id: str, message: str) -> str:
+        """A small fenced block of non-pinned notes relevant to this message, or "".
+
+        Model-free and best-effort: pinned notes already inject every turn, so this
+        surfaces the rest of long-term memory the message actually touches. A
+        missing/broken store or an off-topic message yields nothing.
+        """
+        if not (self._memory_file and self._memory_prefetch_bytes > 0):
+            return ""
+        try:
+            import json
+            from pathlib import Path
+
+            from .driver import _origin_channel
+            from .memory import relevant_digest
+            data = json.loads(Path(self._memory_file).read_text("utf-8"))
+            if not isinstance(data, list):
+                return ""
+            return relevant_digest(data, message, time.time(),
+                                   max_bytes=self._memory_prefetch_bytes,
+                                   conversation_id=_origin_channel(conversation_id))
+        except (OSError, ValueError):
+            return ""
+
+    def _persist_recent_turns(self) -> None:
+        """Best-effort write of the recent-turns buffer to disk (when configured),
+        so a process restart does not lose the compaction seed."""
+        if self._recent_turns_store is None:
+            return
+        with self._locks_guard:
+            snapshot = {cid: [list(p) for p in pairs]
+                        for cid, pairs in self._recent_turns.items() if pairs}
+        try:
+            with self._recent_turns_store.locked():
+                self._recent_turns_store.save(snapshot)
+        except Exception:
+            log.warning("could not persist the recent-turns buffer", exc_info=True)
 
     def _recent_transcript(self, conversation_id: str) -> str:
         """Render the recent-turns buffer as a plain transcript, or "" if empty."""
@@ -251,6 +312,9 @@ class Agent:
                 folded = self.inbox.drain(conversation_id)
                 if folded:
                     text = _fold_prompt(folded, text)
+            prefetch = self._relevant_memory(conversation_id, user_text)
+            if prefetch:
+                text = prefetch + "\n\n" + text
             session_id = self.store.get(conversation_id)
             try:
                 result = self.driver.run(text, session_id, model, conversation_id=conversation_id)
@@ -398,6 +462,7 @@ class Agent:
             self.store.set(conversation_id, seeded.session_id)
             with self._locks_guard:
                 self._recent_turns.pop(conversation_id, None)  # the buffer is now summarized
+        self._persist_recent_turns()  # the cleared buffer must not resurrect on restart
         self._compact_cooldown_until.pop(conversation_id, None)
         log.info("compacted conversation %s onto a fresh session", conversation_id)
         return True
@@ -493,6 +558,9 @@ class Agent:
             stream_driver=stream_driver,
             inbox=inbox,
             guard=guard,
+            recent_turns_file=config.recent_turns_file,
+            memory_file=config.memory_file,
+            memory_prefetch_bytes=config.memory_prefetch_bytes,
         )
 
 

@@ -325,8 +325,21 @@ def reminders_tick(config: Config) -> int:
         print(f"heartbeat tick failed: {exc}")
     if config.jobs_enabled:
         try:
-            from .jobs import notify_dead_jobs
+            from .jobs import (JobStore, notify_dead_jobs, redeliver_reports,
+                               retry_dead_starts)
+            # Respawn runners that died in their startup window before failing
+            # anything: a transient OOM/cgroup death self-heals within a minute
+            # instead of leaving a dead scheduled day. Runs first so only the
+            # genuinely exhausted deaths fall through to the fail+notify sweep.
+            retried = retry_dead_starts(JobStore(config.jobs_file, keep=config.jobs_keep))
+            if retried:
+                print(f"job-retry: respawned {retried} runner(s) that died at startup")
             print(f"dead-jobs: {notify_dead_jobs(config)} notified")
+            # Re-ping any finished report whose delivery failed (Discord was down
+            # when the job completed); bounded, so a dead channel won't loop.
+            redelivered = redeliver_reports(config)
+            if redelivered:
+                print(f"job-reports: redelivered {redelivered}")
         except Exception as exc:
             print(f"dead-jobs sweep failed: {exc}")
     return 0
@@ -434,6 +447,7 @@ def schedule_cmd(config: Config, args) -> int:
                 grants=args.grant,
                 workspace=args.workspace,
                 cap=args.cap,
+                gate_command=getattr(args, "gate_command", ""),
                 default_cap=config.schedule_monthly_cap,
             )
         except ValueError as exc:
@@ -721,6 +735,21 @@ def mcp_command(args, config) -> int:
         print("allow them with: iris mcp add (or re-add) using --allow <tool>")
         return 0
 
+    if action == "catalog":
+        from .mcp_catalog import render_catalog
+        print(render_catalog())
+        return 0
+
+    if action == "install":
+        import getpass
+        from .mcp_catalog import install
+
+        def _prompt(text: str, secret: bool) -> str:
+            return getpass.getpass(text + ": ") if secret else input(text + ": ")
+
+        print(install(args.name, store, _prompt, force=getattr(args, "force", False)))
+        return 0
+
     print("unknown mcp action")
     return 1
 
@@ -794,6 +823,8 @@ def build_parser() -> argparse.ArgumentParser:
     sc_add.add_argument("--grant", default="", help="job grants, comma-separated: shell,files")
     sc_add.add_argument("--workspace", default="", help="a registered workspace name")
     sc_add.add_argument("--cap", type=int, default=None, help="monthly fire cap (default IRIS_SCHEDULE_MONTHLY_CAP)")
+    sc_add.add_argument("--gate", dest="gate_command", default="",
+                        help="a cheap shell probe run before firing (a job rule); if its last stdout line is false/skip, the firing spends no model call")
     sc_remove = sched_sub.add_parser("remove", help="remove a schedule rule")
     sc_remove.add_argument("rule_id", type=int)
     sched_sub.add_parser("list", help="list schedule rules (default)")
@@ -811,6 +842,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--quiet", action="store_true", help="suppress the ping for this run")
     watch_parser.add_argument("--fold", action="store_true", help="also fold the completion into Iris's next turn")
     watch_parser.add_argument("--resume", action="store_true", help="enqueue a follow-up turn so Iris continues the chain (needs IRIS_AUTO_RESUME)")
+    watch_parser.add_argument("--channel", default=None, help="conversation/thread id to report back to (defaults to the home channel)")
     watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
     mcp_p = sub.add_parser("mcp", help="connect your own MCP servers")
     mcp_sub = mcp_p.add_subparsers(dest="mcp_action", required=True)
@@ -835,6 +867,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_test = mcp_sub.add_parser("test", help="probe a connection and list its tools")
     p_test.add_argument("name")
+
+    mcp_sub.add_parser("catalog", help="list the curated, vetted MCP servers you can install")
+    p_install = mcp_sub.add_parser("install", help="install a catalog server by name")
+    p_install.add_argument("name")
+    p_install.add_argument("--force", action="store_true", help="replace an existing connection of the same name")
+
+    sub.add_parser("context", help="show how full the current conversation's context window is")
+    sub.add_parser("briefing", help="print the model-free status block (due reminders, goals, schedules, health)")
+    recap_parser = sub.add_parser("recap", help="instant, model-free recap of the latest conversation")
+    recap_parser.add_argument("--session", default=None, help="a specific session id (defaults to the latest)")
+    sub.add_parser("prompt-size", help="show the fixed per-turn prompt budget (bytes injected each turn)")
+    backup_parser = sub.add_parser("backup", help="snapshot all Iris state files")
+    backup_parser.add_argument("--label", default="", help="a label for the snapshot")
+    sub.add_parser("backups", help="list state snapshots")
+    restore_parser = sub.add_parser("restore", help="restore state from a snapshot")
+    restore_parser.add_argument("snapshot_id", help="the snapshot id/dir to restore")
+    restore_parser.add_argument("--force", action="store_true", help="restore even if it would empty an active registry")
 
     return parser
 
@@ -905,6 +954,53 @@ def main(argv: list[str] | None = None) -> int:
         return digest_cmd(config, days=args.days)
     if command == "heartbeat":
         return heartbeat_cmd(config)
+    if command == "context":
+        from .footer import format_context
+        # The live token count lives in the running process; from the CLI we show
+        # the configured compaction thresholds so the owner knows the budget shape.
+        print(format_context(None, config.compact_at_tokens, 0, config.compact_every))
+        return 0
+    if command == "briefing":
+        import time as _time
+        from .briefing import build_briefing
+        print(build_briefing(config, now=_time.time()))
+        return 0
+    if command == "recap":
+        from .recap import build_recap, latest_transcript
+        path = latest_transcript()
+        if getattr(args, "session", None):
+            import glob
+            import os
+            hits = [p for p in glob.glob(os.path.join(
+                os.environ.get("IRIS_TRANSCRIPTS_DIR") or os.path.expanduser("~/.claude/projects"),
+                "**", f"*{args.session}*.jsonl"), recursive=True)]
+            path = hits[0] if hits else path
+        print(build_recap(path) if path else "(no conversation transcript found yet)")
+        return 0
+    if command == "prompt-size":
+        from .prompt_size import render
+        print(render(config))
+        return 0
+    if command == "backup":
+        import time as _time
+        from .backup import snapshot_state
+        print(snapshot_state(config, now_ts=_time.time(), label=getattr(args, "label", "")))
+        return 0
+    if command == "backups":
+        from .backup import list_snapshots
+        snaps = list_snapshots(config)
+        print("\n".join(snaps) if snaps else "No snapshots yet.")
+        return 0
+    if command == "restore":
+        import time as _time
+        from .backup import EmptyClockGuard, restore_state
+        try:
+            print(restore_state(config, args.snapshot_id, now_ts=_time.time(),
+                                force=getattr(args, "force", False)))
+            return 0
+        except EmptyClockGuard as exc:
+            print(f"refused: {exc} (use --force to override)")
+            return 1
     if command == "webhook":
         from .webhooks import run_webhook_server
         return run_webhook_server(config)
@@ -940,7 +1036,8 @@ def main(argv: list[str] | None = None) -> int:
         from .notify.watch_cmd import watch as run_watch
         return run_watch(watch_cmd, config, name=args.name, force=args.always,
                          quiet=args.quiet, fold=getattr(args, "fold", False),
-                         resume=getattr(args, "resume", False))
+                         resume=getattr(args, "resume", False),
+                         channel=getattr(args, "channel", None))
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)

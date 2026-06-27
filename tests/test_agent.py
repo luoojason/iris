@@ -18,6 +18,47 @@ def test_respond_persists_new_session(tmp_path):
     assert store.get("c1") == "sess-1"
 
 
+def test_respond_prefetches_relevant_memory_into_the_prompt(tmp_path):
+    import json
+    mem = tmp_path / "mem.json"
+    mem.write_text(json.dumps([
+        {"id": 1, "text": "the staging url is staging.example.com",
+         "pinned": False, "created_at": "2026-06-01T00:00:00Z"}]), "utf-8")
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([ClaudeResult(text="ok", session_id="s1", is_error=False)])
+    agent = Agent(driver, store, memory_file=str(mem), memory_prefetch_bytes=500)
+    agent.respond("c1", "what is the staging url again")
+    assert "staging.example.com" in driver.calls[0][0]  # the relevant note was prefetched
+
+
+def test_respond_skips_prefetch_when_disabled(tmp_path):
+    import json
+    mem = tmp_path / "mem.json"
+    mem.write_text(json.dumps([
+        {"id": 1, "text": "the staging url is staging.example.com",
+         "pinned": False, "created_at": "2026-06-01T00:00:00Z"}]), "utf-8")
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([ClaudeResult(text="ok", session_id="s1", is_error=False)])
+    agent = Agent(driver, store, memory_file=str(mem), memory_prefetch_bytes=0)  # off
+    agent.respond("c1", "what is the staging url again")
+    assert "staging.example.com" not in driver.calls[0][0]
+
+
+def test_recent_turns_buffer_survives_a_restart(tmp_path):
+    # The compaction seed used to live only in RAM, so a restart-then-overflow
+    # dropped history. Persisting it means a fresh process still has something to
+    # summarize instead of skipping compaction entirely.
+    rt = str(tmp_path / "rt.json")
+    store = SessionStore(tmp_path / "s.json")
+    agent = Agent(FakeDriver([]), store, recent_turns_file=rt)
+    agent._record_turn("discord:1", "what's the plan", "ship it")
+    agent._record_turn("discord:1", "and then", "test it")
+    # a brand-new Agent over the same file = a process restart
+    agent2 = Agent(FakeDriver([]), store, recent_turns_file=rt)
+    transcript = agent2._recent_transcript("discord:1")
+    assert "what's the plan" in transcript and "ship it" in transcript and "test it" in transcript
+
+
 def test_respond_resumes_existing_session(tmp_path):
     store = SessionStore(tmp_path / "s.json")
     store.set("c1", "old-session")
