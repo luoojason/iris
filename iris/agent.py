@@ -498,6 +498,7 @@ class Agent:
             add_dirs.append(config.attachments_dir)
         brain_cwd = None
         if getattr(config, "chat_isolate_cwd", False):
+            import os
             import tempfile
             # A neutral scratch cwd so a `Read ./.env` from an injected turn cannot
             # reach the agent dir's secrets. Persona/standing-orders and attachments
