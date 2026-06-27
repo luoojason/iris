@@ -207,7 +207,38 @@ def _dispatch(cmd_text, config, **kw):
         reset=kw.get("reset", lambda: None),
         stop=kw.get("stop", lambda: "Nothing is running here right now."),
         status_fields=kw.get("status_fields", lambda: {"busy": False, "pending": 0, "session_turns": 0}),
+        set_footer=kw.get("set_footer"),
     )
+
+
+def test_parse_footer_takes_on_off_or_nothing():
+    assert commands.parse("!footer on").arg == "on"
+    assert commands.parse("!footer off").arg == "off"
+    assert commands.parse("!footer").arg == ""
+    assert commands.parse("!footer please show it") is None  # arg is prose -> not a command
+
+
+def test_parse_recap_is_a_no_arg_command():
+    assert commands.parse("!recap").name == "recap"
+    assert commands.parse("!recap the meeting") is None  # trailing prose -> not a command
+
+
+def test_dispatch_footer_toggles_through_the_hook():
+    flips = []
+
+    def set_footer(want):
+        flips.append(want)
+        return f"footer {want}"
+
+    assert _dispatch("!footer on", Config(), set_footer=set_footer) == "footer True"
+    assert _dispatch("!footer off", Config(), set_footer=set_footer) == "footer False"
+    assert _dispatch("!footer", Config(), set_footer=set_footer) == "footer None"  # report state
+    assert flips == [True, False, None]
+
+
+def test_dispatch_footer_without_hook_says_unavailable():
+    out = _dispatch("!footer on", Config())  # no set_footer (e.g. a transport without it)
+    assert "isn't available" in out
 
 
 def test_dispatch_new_calls_reset(tmp_path):

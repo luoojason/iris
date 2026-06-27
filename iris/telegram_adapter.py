@@ -99,6 +99,13 @@ def build_app(config: Config, agent: Agent):
     # turns (never two claude --resume at once), coalesce messages that pile up
     # while a turn runs, and fire a short interim ack on a slow turn.
     runners: dict[str, ConversationRunner] = {}
+    footer_enabled = [config.footer_default]
+
+    def _set_footer(want) -> str:
+        if want is None:
+            return f"Reply footer is {'on' if footer_enabled[0] else 'off'}."
+        footer_enabled[0] = bool(want)
+        return f"Reply footer {'on' if want else 'off'}."
 
     def _allowed(update) -> bool:
         return is_allowed_update(update, config)
@@ -159,7 +166,13 @@ def build_app(config: Config, agent: Agent):
                 log.warning("turn errored: %s", result.error)
                 return ("Something went wrong on that one."
                         + (f" ({result.error})" if result.error else ""))
-            return result.text.strip() or "(no response)"
+            text = result.text.strip() or "(no response)"
+            if footer_enabled[0]:
+                from .footer import format_footer
+                line = format_footer(result, show_cost=config.footer_cost)
+                if line:
+                    text = f"{text}\n{line}"
+            return text
 
         import random
         runner = ConversationRunner(
@@ -228,7 +241,7 @@ def build_app(config: Config, agent: Agent):
 
             try:
                 reply = commands.dispatch(cmd, config, reset=_reset, stop=_stop,
-                                          status_fields=_status_fields)
+                                          status_fields=_status_fields, set_footer=_set_footer)
             except Exception:
                 log.warning("command %s failed", cmd.name, exc_info=True)
                 reply = f"Couldn't run !{cmd.name} just now."

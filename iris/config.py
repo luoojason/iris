@@ -148,6 +148,11 @@ class Config:
     # survives a restart instead of being lost (it lived only in RAM before, so a
     # restart-then-overflow dropped history). See Agent._persist_recent_turns.
     recent_turns_file: str = "iris-recent-turns.json"
+    # A small "model · tokens · time" line under each reply, toggled at runtime
+    # with !footer on|off. footer_cost adds the per-turn cost when the brain
+    # reports it (subscription OAuth often does not).
+    footer_default: bool = False
+    footer_cost: bool = False
     # The owner's recorded home channel (job pings, artifact uploads).
     home_channel: str = ""
 
@@ -363,6 +368,8 @@ class Config:
             inbox_file=os.environ.get("IRIS_INBOX_FILE", "iris-inbox.json"),
             undelivered_file=os.environ.get("IRIS_UNDELIVERED_FILE", "iris-undelivered.json"),
             recent_turns_file=os.environ.get("IRIS_RECENT_TURNS_FILE", "iris-recent-turns.json"),
+            footer_default=_flag(os.environ.get("IRIS_FOOTER"), False),
+            footer_cost=_flag(os.environ.get("IRIS_FOOTER_COST"), False),
             home_channel=os.environ.get("IRIS_DISCORD_HOME_CHANNEL", ""),
             auto_resume=_flag(os.environ.get("IRIS_AUTO_RESUME"), False),
             auto_resume_max_per_day=int(os.environ.get("IRIS_AUTO_RESUME_MAX_PER_DAY", "12")),
