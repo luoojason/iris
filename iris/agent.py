@@ -471,6 +471,10 @@ class Agent:
         """Forget a conversation so the next message starts fresh."""
         with self._locks_guard:
             self._epochs[conversation_id] = self._epochs.get(conversation_id, 0) + 1
+            # Drop the recent-turns buffer too, or the first compaction after a
+            # !new would summarize the turns the owner just told us to forget.
+            self._recent_turns.pop(conversation_id, None)
+        self._persist_recent_turns()
         return self.store.clear(conversation_id)
 
     def _epoch_for(self, conversation_id: str) -> int:
@@ -514,7 +518,11 @@ class Agent:
             permission_prompt_tool=("mcp__approvals__check"
                                     if getattr(config, "approvals_enabled", False) else None),
         )
-        store = SessionStore(config.session_store_path)
+        # Clock-gated ticks keep sessions in a separate file so their whole-dict
+        # flush cannot clobber sessions the long-lived bot wrote since they loaded.
+        store_path = (config.clock_session_store if clock_gated and config.clock_session_store
+                      else config.session_store_path)
+        store = SessionStore(store_path)
         stream_driver = None
         if config.live_interrupt:
             stream_driver = StreamDriver(

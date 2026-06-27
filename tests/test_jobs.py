@@ -359,6 +359,22 @@ def test_notify_dead_jobs_pings_once_for_a_runner_that_died(tmp_path):
     assert sent == []
 
 
+def test_notify_dead_jobs_does_not_reflood_on_a_permanently_failing_send(tmp_path):
+    # Regression: a deleted/forbidden channel (send always False) must not re-fold
+    # the inbox note every tick. The fold is the durable record; the ping is
+    # best-effort, so the death is claimed once regardless of send success.
+    from iris.jobs import notify_dead_jobs
+
+    cfg = _death_cfg(tmp_path)
+    store = JobStore(cfg.jobs_file)
+    store.add("pull", "i", ["subagents"], "", "chan-dead", state="running")
+    store.update(1, pid=999999)  # the runner died
+    for _ in range(3):
+        notify_dead_jobs(cfg, send=lambda c, t, k: False)  # Discord permanently down
+    notes = Inbox(cfg.inbox_file).drain("discord:chan-dead")
+    assert len(notes) == 1  # exactly one note despite three sweeps
+
+
 def test_notify_dead_jobs_leaves_clean_failures_and_healthy_jobs_alone(tmp_path):
     import os
 
@@ -899,6 +915,22 @@ def test_redeliver_reports_retries_a_failed_report_ping(tmp_path):
     assert n == 1
     assert sent and sent[0][0] == "chan-9" and "the result" in sent[0][1]
     assert store.get(1)["report_delivered"] is True
+
+
+def test_redeliver_reports_skips_a_just_finished_job_then_delivers(tmp_path):
+    from iris.config import Config
+    from iris.jobs import redeliver_reports
+
+    store = make_store(tmp_path)
+    store.add("produce", "x", [], "", "chan-9")
+    store.update(1, state="done", report="r", report_delivered=False, finished_ts=1000.0)
+    sent = []
+    cfg = Config(discord_token="tok")
+    # within the grace window: let the runner's own deliver() land first
+    assert redeliver_reports(cfg, send=lambda *a: sent.append(1) or True, store=store, now=1050.0) == 0
+    assert sent == []
+    # past the grace window: the tick re-delivers
+    assert redeliver_reports(cfg, send=lambda *a: sent.append(1) or True, store=store, now=2000.0) == 1
 
 
 def test_redeliver_reports_gives_up_after_max_attempts(tmp_path):

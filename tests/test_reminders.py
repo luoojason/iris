@@ -59,6 +59,24 @@ def test_finite_recurring_reminder_stops_after_its_remaining_fires(tmp_path):
     assert store.all() == []
 
 
+def test_cron_reminder_recurs_instead_of_firing_once(tmp_path, monkeypatch):
+    # Regression: a `cron:` reminder must recompute its next fire from the spec
+    # and survive, not fire once and vanish.
+    monkeypatch.setenv("IRIS_TZ", "UTC")
+    from iris.reminders import cron_spec, parse_when
+    store = ReminderStore(tmp_path / "r.json")
+    when = "cron: 0 9 * * *"  # every day at 09:00 UTC
+    base = 1780000000.0
+    due = parse_when(when, now=base)
+    store.add(due, "standup", "c1", cron=cron_spec(when))
+    fired = store.pop_due(now=due + 1)
+    assert [j["text"] for j in fired] == ["standup"]
+    remaining = store.all()
+    assert len(remaining) == 1                     # survived (did not vanish)
+    assert remaining[0]["cron"] == "0 9 * * *"
+    assert remaining[0]["due_ts"] > due            # advanced to the next 09:00
+
+
 def test_infinite_recurring_reminder_unaffected_by_remaining(tmp_path):
     store = ReminderStore(tmp_path / "r.json")
     store.add(due_ts=100, text="forever", channel_id="c1", repeat_secs=60)  # no remaining

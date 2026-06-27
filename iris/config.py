@@ -82,6 +82,9 @@ class Config:
     add_dirs: list[str] = field(default_factory=list)
     # Where inbound images/files are downloaded so the brain's Read tool can see them.
     attachments_dir: str = "iris-attachments"
+    # Inbound attachments are deleted after this many days by the reminders tick,
+    # so downloaded media does not fill the box's disk without bound. 0 disables.
+    attachments_ttl_days: int = 14
     # A directory of skill folders (each with SKILL.md) to make available to the brain.
     skills_dir: str = ""
     # Staging area for Iris's proposed changes to her own skills. A proposal is
@@ -264,6 +267,12 @@ class Config:
     jobs_digest_recent_secs: int = 3600
 
     session_store_path: str = "iris-sessions.json"
+    # Clock-gated processes (the proactive/goal cron ticks) keep their sessions in
+    # a SEPARATE file: SessionStore flushes the whole dict, so a tick sharing the
+    # bot's file would overwrite any session the long-lived bot wrote since the
+    # tick loaded it. Their conversation ids (proactive:*/goal:*) are disjoint from
+    # the bot's (discord:*), so a separate file loses nothing.
+    clock_session_store: str = "iris-sessions-clock.json"
     # When set, append one JSON line of telemetry per turn to this file. Opt-in;
     # empty means no metrics are written (the default for the published agent).
     metrics_file: str = ""
@@ -340,6 +349,7 @@ class Config:
             disable_auto_memory=_flag(os.environ.get("IRIS_DISABLE_AUTO_MEMORY"), True),
             add_dirs=_split(os.environ.get("IRIS_ADD_DIRS")),
             attachments_dir=os.environ.get("IRIS_ATTACHMENTS_DIR", "iris-attachments"),
+            attachments_ttl_days=int(os.environ.get("IRIS_ATTACHMENTS_TTL_DAYS", "14")),
             skills_dir=os.environ.get("IRIS_SKILLS_DIR", ""),
             skill_proposals_file=os.environ.get("IRIS_SKILL_PROPOSALS_FILE", "iris-skill-proposals.json"),
             voice_enabled=_flag(os.environ.get("IRIS_VOICE"), False),
@@ -414,6 +424,7 @@ class Config:
             jobs_digest_bytes=int(os.environ.get("IRIS_JOBS_DIGEST_BYTES", "600")),
             jobs_digest_recent_secs=int(os.environ.get("IRIS_JOBS_DIGEST_RECENT_SECS", "3600")),
             session_store_path=os.environ.get("IRIS_SESSION_STORE", "iris-sessions.json"),
+            clock_session_store=os.environ.get("IRIS_CLOCK_SESSION_STORE", "iris-sessions-clock.json"),
             metrics_file=os.environ.get("IRIS_METRICS_FILE", ""),
             trace_file=os.environ.get("IRIS_TRACE_FILE", ""),
             trace_capture_content=_flag(os.environ.get("IRIS_TRACE_CAPTURE_CONTENT"), False),

@@ -94,7 +94,9 @@ def schedule_reminder(text: str, when: str, channel_id: Optional[str] = None,
         repeat_secs = parse_every(every or "")
     except ValueError as exc:
         return str(exc)
-    reminder_id = store.add(due, text, channel, repeat_secs, kind=kind, origin="model")
+    from iris.reminders import cron_spec
+    reminder_id = store.add(due, text, channel, repeat_secs, kind=kind, origin="model",
+                            cron=cron_spec(when) or "")
     cadence = f", repeating {every.strip()}" if repeat_secs else ""
     label = "Follow-up" if kind == "followup" else "Reminder"
     return f"{label} #{reminder_id} set for {fmt_ts(due)}{cadence}: {text}"

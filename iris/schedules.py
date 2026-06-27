@@ -133,6 +133,7 @@ class ScheduleStore:
         firing per missed window, like reminders); a one-shot rule is disabled
         in place so it stays visible in ``iris schedule list``.
         """
+        from .cron import next_fire
         with self._locked():
             items = self._load()
             due: list[dict] = []
@@ -148,8 +149,15 @@ class ScheduleStore:
                 if not isinstance(due_ts, (int, float)) or due_ts > now:
                     continue
                 due.append(dict(rule))
+                cron = rule.get("cron")
                 period = int(rule.get("repeat_secs", 0) or 0)
-                if period > 0:
+                if cron:
+                    nxt = next_fire(cron, now, rule.get("cron_tz") or "UTC")
+                    if nxt is not None:
+                        rule["due_ts"] = nxt  # recur on the cron spec
+                    else:
+                        rule["enabled"] = False  # bad/exhausted cron -> stop
+                elif period > 0:
                     rule["due_ts"] = now + period
                 else:
                     rule["enabled"] = False
@@ -214,7 +222,9 @@ def add_rule(store: ScheduleStore, *, title: str, when: str, every: str = "",
         raise ValueError("a schedule needs a title")
     if bool(instructions) == bool(command):
         raise ValueError("give exactly one of instructions (a job) or command (a script)")
+    from .reminders import cron_spec
     due = parse_when(when, now)
+    cspec = cron_spec(when) or ""
     repeat_secs = parse_every(every or "")
     granted_names = parse_grants(grants)
     if cap is None:
@@ -230,6 +240,8 @@ def add_rule(store: ScheduleStore, *, title: str, when: str, every: str = "",
         workspace=(workspace or "").strip(),
         due_ts=due,
         repeat_secs=repeat_secs,
+        cron=cspec,
+        cron_tz=(os.environ.get("IRIS_TZ", "UTC") if cspec else ""),
         monthly_cap=cap,
         # An optional cheap probe (model-free) run before a job rule fires: if it
         # says skip, the firing spends no model call and no cap slot. Job rules only.

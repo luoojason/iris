@@ -110,6 +110,23 @@ def test_tick_launches_a_due_job_rule(tmp_path):
     assert fresh["fired"] == {month_key(NOW): 1}
 
 
+def test_cron_schedule_recurs_instead_of_disabling(tmp_path, monkeypatch):
+    # Regression: a `cron:` schedule rule must recur, not fire once and disable.
+    monkeypatch.setenv("IRIS_TZ", "UTC")
+    config = make_config(tmp_path)
+    store = ScheduleStore(config.schedules_file)
+    add_rule(store, title="daily", when="cron: 0 9 * * *", instructions="do it",
+             default_cap=config.schedule_monthly_cap)
+    rule = store.all()[0]
+    due = rule["due_ts"]
+    fired = store.take_due(due + 1)
+    assert len(fired) == 1
+    after = store.all()[0]
+    assert after["enabled"] is True          # still armed (not disabled)
+    assert after["cron"] == "0 9 * * *"
+    assert after["due_ts"] > due             # advanced to the next day
+
+
 def test_parse_wake_gate():
     from iris.schedules import parse_wake_gate
     assert parse_wake_gate("false") is False

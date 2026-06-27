@@ -44,6 +44,31 @@ def test_respond_skips_prefetch_when_disabled(tmp_path):
     assert "staging.example.com" not in driver.calls[0][0]
 
 
+def test_clock_gated_agent_uses_a_separate_session_store(tmp_path):
+    # Regression: a clock tick (proactive/goal) must not share the bot's session
+    # file, or its whole-dict flush clobbers sessions the bot wrote in between.
+    from iris.config import Config
+    cfg = Config(session_store_path=str(tmp_path / "main.json"),
+                 clock_session_store=str(tmp_path / "clock.json"))
+    bot = Agent.from_config(cfg, clock_gated=False)
+    tick = Agent.from_config(cfg, clock_gated=True)
+    assert str(bot.store.path).endswith("main.json")
+    assert str(tick.store.path).endswith("clock.json")
+
+
+def test_reset_clears_the_recent_turns_buffer(tmp_path):
+    # Regression: !new must drop the buffer too, or the next compaction summarizes
+    # the turns the owner just forgot.
+    rt = str(tmp_path / "rt.json")
+    store = SessionStore(tmp_path / "s.json")
+    agent = Agent(FakeDriver([]), store, recent_turns_file=rt)
+    agent._record_turn("c1", "secret thing", "noted")
+    agent.reset("c1")
+    assert agent._recent_transcript("c1") == ""           # in-memory cleared
+    fresh = Agent(FakeDriver([]), store, recent_turns_file=rt)
+    assert fresh._recent_transcript("c1") == ""           # and persisted clear
+
+
 def test_recent_turns_buffer_survives_a_restart(tmp_path):
     # The compaction seed used to live only in RAM, so a restart-then-overflow
     # dropped history. Persisting it means a fresh process still has something to

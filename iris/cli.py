@@ -323,6 +323,15 @@ def reminders_tick(config: Config) -> int:
         print(tick_heartbeat(config))
     except Exception as exc:
         print(f"heartbeat tick failed: {exc}")
+    try:
+        import time as _t
+        from .attachments import sweep_old_attachments
+        swept = sweep_old_attachments(config.attachments_dir, _t.time(),
+                                      config.attachments_ttl_days * 86400)
+        if swept:
+            print(f"attachments: swept {swept} expired file(s)")
+    except Exception as exc:
+        print(f"attachments sweep failed: {exc}")
     if config.jobs_enabled:
         try:
             from .jobs import (JobStore, notify_dead_jobs, redeliver_reports,

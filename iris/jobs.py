@@ -328,6 +328,24 @@ class JobStore:
                     return dict(job)
             return None
 
+    def claim_field(self, job_id: int, field: str, expected, new) -> bool:
+        """Atomically set ``field`` to ``new`` iff it currently equals ``expected``.
+
+        A cross-process compare-and-set (like transition, but on one field) so two
+        overlapping tickers cannot both act on the same job: exactly one wins the
+        claim and does the side effect (fold the inbox note, send the report).
+        """
+        with self._locked():
+            items = self._load()
+            for job in items:
+                if job.get("id") == job_id:
+                    if job.get(field) != expected:
+                        return False
+                    job[field] = new
+                    self._save(items)
+                    return True
+            return False
+
     def transition(self, job_id: int, from_states: tuple, to_state: str, **fields) -> Optional[dict]:
         """Atomically move a job between states; None if it was not in from_states.
 
@@ -521,20 +539,24 @@ def notify_dead_jobs(config: Config, *, send=None, inbox: Optional[Inbox] = None
     for job in store.all():
         if job.get("state") != "failed" or job.get("death_notified") is not False:
             continue
+        # Claim FIRST: flip death_notified False->True atomically. Only the winner
+        # folds + pings, so the note lands exactly once even across overlapping
+        # ticks, and a permanently-undeliverable channel never re-folds it every
+        # minute (the inbox fold is the durable record; the ping is best-effort).
+        if not store.claim_field(job["id"], "death_notified", False, True):
+            continue
         channel = job.get("channel_id") or config.home_channel
         message = (f"job #{job['id']} ({job.get('title') or ''}) failed: "
                    f"{job.get('error') or 'the runner died'}")
         inbox.append(message, conversation_id=(f"discord:{channel}" if channel else None))
-        delivered = True
-        if channel and config.discord_token:
-            delivered = bool(send(channel, message, config.discord_token))
-        if delivered:
-            store.update(job["id"], death_notified=True)
-            notified += 1
+        if channel and config.discord_token and not send(channel, message, config.discord_token):
+            log.warning("could not ping channel %s for dead job %s", channel, job["id"])
+        notified += 1
     return notified
 
 
-def redeliver_reports(config: Config, *, send=None, store: Optional[JobStore] = None) -> int:
+def redeliver_reports(config: Config, *, send=None, store: Optional[JobStore] = None,
+                      now: Optional[float] = None, grace_secs: float = 120.0) -> int:
     """Retry the Discord delivery of finished job reports whose ping never landed.
 
     deliver() sets report_delivered True only on a successful send, so a job that
@@ -542,17 +564,23 @@ def redeliver_reports(config: Config, *, send=None, store: Optional[JobStore] = 
     re-pings the owner. This sweep (on the reminders tick) re-sends the stored
     report for done jobs whose delivery is still pending, bounded by
     ``redeliver_attempts`` so a permanently-dead channel does not POST forever.
-    The fold-back inbox note already landed on the original turn, so even a
-    give-up leaves the report recoverable. Returns how many were delivered.
+    A job finished within ``grace_secs`` is skipped so the runner's own deliver()
+    wins (no tick-vs-runner double-send). The fold-back inbox note already landed
+    on the original turn, so even a give-up leaves the report recoverable. Returns
+    how many were delivered.
     """
     store = store or JobStore(config.jobs_file, keep=config.jobs_keep)
     if send is None:
         from .reminders import send_discord_message as send
+    now = time.time() if now is None else now
     token = config.discord_token
     delivered = 0
     for job in store.all():
         if job.get("state") != "done" or job.get("report_delivered"):
             continue
+        finished = job.get("finished_ts")
+        if isinstance(finished, (int, float)) and (now - finished) < grace_secs:
+            continue  # let the runner's own delivery land first
         report = (job.get("report") or "").strip()
         if not report:
             store.update(job["id"], report_delivered=True)  # nothing to send

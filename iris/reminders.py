@@ -29,6 +29,18 @@ _EVERY = re.compile(r"^(?:every\s+)?(\d+)\s*([mhd])$", re.IGNORECASE)
 _UNIT = {"m": 60, "h": 3600, "d": 86400}
 
 
+def cron_spec(when: str) -> Optional[str]:
+    """The 5-field cron string if ``when`` is a ``cron: ...`` form, else None.
+
+    Persisting this string (not just the first epoch parse_when returns) is what
+    lets a cron reminder/schedule RECUR instead of firing once and stopping.
+    """
+    text = (when or "").strip()
+    if text.lower().startswith("cron:"):
+        return text[len("cron:"):].strip()
+    return None
+
+
 def parse_when(when: str, now: Optional[float] = None) -> float:
     """Resolve a time spec to an epoch timestamp.
 
@@ -99,7 +111,8 @@ class ReminderStore:
         self._store.save(items)
 
     def add(self, due_ts: float, text: str, channel_id: str, repeat_secs: int = 0,
-            kind: str = "", origin: str = "", remaining: Optional[int] = None) -> int:
+            kind: str = "", origin: str = "", remaining: Optional[int] = None,
+            cron: str = "") -> int:
         with self._locked():
             items = self._load()
             new_id = max((int(i.get("id", 0)) for i in items), default=0) + 1
@@ -107,6 +120,11 @@ class ReminderStore:
                 "id": new_id, "due_ts": due_ts, "text": text,
                 "channel_id": channel_id, "repeat_secs": int(repeat_secs or 0),
             }
+            # A cron reminder recurs by recomputing its next fire from the spec
+            # (stored with the tz it was created in), not a fixed interval.
+            if cron:
+                record["cron"] = cron
+                record["cron_tz"] = os.environ.get("IRIS_TZ", "UTC")
             # Optional identity fields, stored only when set so plain reminders
             # keep the original record shape.
             if kind:
@@ -162,6 +180,16 @@ class ReminderStore:
                 return []
             kept = [i for i in items if i.get("due_ts", 0) > now]
             for job in due:
+                cron = job.get("cron")
+                if cron:
+                    # Recurring on a cron: recompute the next fire from the spec.
+                    from .cron import next_fire
+                    nxt = next_fire(cron, now, job.get("cron_tz") or "UTC")
+                    if nxt is not None:
+                        rescheduled = dict(job)
+                        rescheduled["due_ts"] = nxt
+                        kept.append(rescheduled)
+                    continue
                 period = int(job.get("repeat_secs", 0) or 0)
                 if period <= 0:
                     continue  # one-shot: fired and removed
