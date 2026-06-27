@@ -499,11 +499,17 @@ class Agent:
         brain_cwd = None
         if getattr(config, "chat_isolate_cwd", False):
             import tempfile
-            # An isolated scratch dir so a `Read ./.env` from an injected turn
-            # cannot reach the agent dir's secrets. Persona/standing-orders and
-            # attachments are passed as absolute paths, and the MCP servers get
-            # their config via env, so the brain loses no real capability.
-            brain_cwd = tempfile.mkdtemp(prefix="iris-brain-")
+            # A neutral scratch cwd so a `Read ./.env` from an injected turn cannot
+            # reach the agent dir's secrets. Persona/standing-orders and attachments
+            # are passed as absolute paths and the MCP servers get their config via
+            # env, so the brain loses no real capability. A STABLE shared dir (not a
+            # fresh mkdtemp per process) so the per-minute clock ticks do not leak a
+            # new dir each run; it stays empty (just a working directory).
+            brain_cwd = os.path.join(tempfile.gettempdir(), "iris-brain-cwd")
+            try:
+                os.makedirs(brain_cwd, exist_ok=True)
+            except OSError:
+                brain_cwd = None
         driver = ClaudeDriver(
             claude_bin=config.claude_bin,
             model=config.model,
