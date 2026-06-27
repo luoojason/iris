@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -133,7 +135,18 @@ class UsageCache:
 
     def _save(self, utilization: Optional[float], now: float) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"utilization": utilization, "ts": now}), "utf-8")
+        text = json.dumps({"utilization": utilization, "ts": now})
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp, self.path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def get(self, now: float, fetcher: Callable[[], Optional[float]],
             max_age: float = CACHE_MAX_AGE) -> Optional[float]:

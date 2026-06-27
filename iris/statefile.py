@@ -98,6 +98,8 @@ class JsonStateFile:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2, ensure_ascii=False, sort_keys=self._sort_keys)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp, self.path)
         finally:
             if os.path.exists(tmp):
