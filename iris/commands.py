@@ -105,7 +105,7 @@ def render_jobs(config: Config, limit: int = 10) -> str:
         # A foreign or hand-edited row may carry no timestamp; default to 0 so
         # a single odd row never crashes the whole listing (fmt_ts handles 0).
         when = job.get("finished_ts") or job.get("started_ts") or job.get("created_ts") or 0
-        lines.append(f"#{job['id']} [{job['state']}] {job['title']} ({fmt_ts(when)})")
+        lines.append(f"#{job.get('id', '?')} [{job.get('state', '?')}] {job.get('title', '(untitled)')} ({fmt_ts(when)})")
     return "\n".join(lines)
 
 
@@ -121,17 +121,12 @@ def render_schedules(config: Config) -> str:
 
 
 def render_goals(config: Config) -> str:
-    from .goals import GoalStore
+    from .goals import GoalStore, format_goal_line
 
     goals = GoalStore(config.goals_file).all()
     if not goals:
         return "No goals set. Tell me an objective to pursue and I'll track it."
-    lines = []
-    for g in goals:
-        if g.get("status") == "active":
-            lines.append(f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}")
-        else:
-            lines.append(f"#{g['id']} [{g.get('status')}]: {g['text']}")
+    lines = [format_goal_line(g) for g in goals]
     if not config.goals_enabled:
         lines.append("(IRIS_GOALS is off: nothing advances.)")
     return "\n".join(lines)

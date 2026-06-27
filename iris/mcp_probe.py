@@ -88,3 +88,14 @@ def probe_tools(command: str, args, env, *, timeout: float = 10.0,
             proc.kill()
         except Exception:
             pass
+        for name in ("stdin", "stdout", "stderr"):
+            try:
+                stream = getattr(proc, name, None)
+                if stream is not None:
+                    stream.close()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            pass

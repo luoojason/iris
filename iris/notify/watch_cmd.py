@@ -161,7 +161,6 @@ def watch(argv, config, *, name=None, force=False, quiet=False, fold=False,
         exit_code=exit_code,
         duration_s=duration_s,
         tail=tail,
-        urgency="high" if exit_code != 0 else "normal",
     )
     verdict = decide(event, config.watch_min_seconds, force=force, quiet=quiet)
     if verdict == "notify":

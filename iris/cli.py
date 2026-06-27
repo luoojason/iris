@@ -56,7 +56,6 @@ class _Spinner:
 
 
 def connection_doctor_lines(config) -> list[str]:
-    import shutil as _shutil
     from .connections import ConnectionStore
 
     if not getattr(config, "connections_file", None):
@@ -70,7 +69,7 @@ def connection_doctor_lines(config) -> list[str]:
         state = "on" if c.enabled else "off"
         shown = f"{c.command} {' '.join(c.args)}".strip()
         lines.append(f"  [{state}] {c.name}: {shown}")
-        if c.enabled and _shutil.which(c.command) is None and not c.command.startswith("/"):
+        if c.enabled and shutil.which(c.command) is None and not c.command.startswith("/"):
             lines.append(f"    WARNING: command not found on PATH: {c.command}")
         if c.enabled and not c.allowed_tools:
             lines.append(f"    WARNING: {c.name} has no allowed tools, so it is inert")
@@ -496,7 +495,7 @@ def goals_cmd(config: Config, args) -> int:
     """Owner-side view and steering of the standing goals the tick advances."""
     import time
 
-    from .goals import GoalStore
+    from .goals import GoalStore, format_goal_line
 
     store = GoalStore(config.goals_file)
     action = getattr(args, "goals_action", None) or "list"
@@ -513,10 +512,7 @@ def goals_cmd(config: Config, args) -> int:
         print("No goals set. Iris records them when you give her one to pursue.")
         return 0
     for g in goals:
-        if g.get("status") == "active":
-            print(f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}")
-        else:
-            print(f"#{g['id']} [{g.get('status')}]: {g['text']}")
+        print(format_goal_line(g))
     if not config.goals_enabled:
         print("(IRIS_GOALS is off: nothing advances.)")
     return 0
@@ -682,14 +678,17 @@ def mcp_command(args, config) -> int:
         except (OSError, ValueError) as exc:
             print(f"error: cannot read {args.path}: {exc}")
             return 1
-        servers = (data or {}).get("mcpServers", {})
-        if not servers:
+        servers = data.get("mcpServers", {}) if isinstance(data, dict) else None
+        if not isinstance(servers, dict) or not servers:
             print("no mcpServers found in that file")
             return 1
         added = 0
         for name, spec in servers.items():
             if store.get(name) is not None:
                 print(f"skip {name!r}: already exists")
+                continue
+            if not isinstance(spec, dict):
+                print(f"skip {name!r}: not an object")
                 continue
             try:
                 store.add(
@@ -699,7 +698,7 @@ def mcp_command(args, config) -> int:
                     allowed_tools=[], enabled=False,
                 )
                 added += 1
-            except ValueError as exc:
+            except (ValueError, TypeError, AttributeError) as exc:
                 print(f"skip {name!r}: {exc}")
         print(f"imported {added} connection(s), disabled. Enable + allow tools, e.g.: iris mcp enable NAME")
         return 0

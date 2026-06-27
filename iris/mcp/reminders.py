@@ -17,8 +17,8 @@ except ImportError as exc:  # pragma: no cover
 
 from iris.reminders import KINDS, ReminderStore, fmt_ts, parse_every, parse_when
 
-STORE = ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
-DEFAULT_CHANNEL = os.environ.get("IRIS_DISCORD_HOME_CHANNEL", "")
+STORE: Optional[ReminderStore] = None
+DEFAULT_CHANNEL: Optional[str] = None
 # A ceiling on how many reminders the agent may have pending at once, so a
 # runaway turn (or a prompt-injected loop) cannot fill the schedule. Owner-made
 # reminders do not count against it. None means "read the env lazily": the
@@ -38,6 +38,25 @@ def _max_pending() -> int:
     except ValueError:
         return 25  # a non-numeric override must not break the tool
 
+
+def _store() -> ReminderStore:
+    if STORE is not None:
+        return STORE
+    from iris.config import load_dotenv
+
+    load_dotenv()
+    return ReminderStore(os.environ.get("IRIS_REMINDERS_FILE", "iris-reminders.json"))
+
+
+def _default_channel() -> str:
+    if DEFAULT_CHANNEL is not None:
+        return DEFAULT_CHANNEL
+    from iris.config import load_dotenv
+
+    load_dotenv()
+    return os.environ.get("IRIS_DISCORD_HOME_CHANNEL", "")
+
+
 mcp = FastMCP("iris-reminders")
 
 
@@ -56,13 +75,14 @@ def schedule_reminder(text: str, when: str, channel_id: Optional[str] = None,
             you promised to do later; it is delivered as a follow-up the owner
             can resume by replying. Omit for a plain reminder.
     """
-    channel = channel_id or DEFAULT_CHANNEL
+    channel = channel_id or _default_channel()
     if not channel:
         return "No channel to send to (set IRIS_DISCORD_HOME_CHANNEL or pass channel_id)."
     kind = (kind or "").strip().lower()
     if kind and kind not in KINDS:
         return f"Unknown reminder kind {kind!r}; use 'followup' or omit it."
-    pending = sum(1 for item in STORE.all() if item.get("origin") == "model")
+    store = _store()
+    pending = sum(1 for item in store.all() if item.get("origin") == "model")
     if pending >= _max_pending():
         return (f"You already have {pending} pending reminders, the most allowed. "
                 "Cancel some with cancel_reminder before scheduling more.")
@@ -71,7 +91,7 @@ def schedule_reminder(text: str, when: str, channel_id: Optional[str] = None,
         repeat_secs = parse_every(every or "")
     except ValueError as exc:
         return str(exc)
-    reminder_id = STORE.add(due, text, channel, repeat_secs, kind=kind, origin="model")
+    reminder_id = store.add(due, text, channel, repeat_secs, kind=kind, origin="model")
     cadence = f", repeating {every.strip()}" if repeat_secs else ""
     label = "Follow-up" if kind == "followup" else "Reminder"
     return f"{label} #{reminder_id} set for {fmt_ts(due)}{cadence}: {text}"
@@ -80,7 +100,7 @@ def schedule_reminder(text: str, when: str, channel_id: Optional[str] = None,
 @mcp.tool()
 def list_reminders() -> str:
     """List the pending reminders."""
-    items = STORE.all()
+    items = _store().all()
     if not items:
         return "No reminders scheduled."
     lines = []
@@ -96,7 +116,7 @@ def list_reminders() -> str:
 @mcp.tool()
 def cancel_reminder(reminder_id: int) -> str:
     """Cancel a pending reminder by id."""
-    return f"Cancelled reminder #{reminder_id}." if STORE.remove(reminder_id) else f"No reminder #{reminder_id}."
+    return f"Cancelled reminder #{reminder_id}." if _store().remove(reminder_id) else f"No reminder #{reminder_id}."
 
 
 def main() -> None:

@@ -90,7 +90,7 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     """
     config = _config()
     if not config.jobs_enabled:
-        return "Background jobs are disabled. The owner can set IRIS_JOBS=true."
+        return _DISABLED
     if not (title or "").strip() or not (instructions or "").strip():
         return "A job needs both a title and instructions."
     try:
@@ -252,7 +252,7 @@ def resume_job(job_id: int, answer: str = "") -> str:
     """
     config = _config()
     if not config.jobs_enabled:
-        return "Background jobs are disabled. The owner can set IRIS_JOBS=true."
+        return _DISABLED
     from iris.jobs import resume_job as resume_core
     reply = resume_core(_store(), job_id, answer=answer, spawn=SPAWN)
     # The chat tool nudges the owner toward the answer= form for a paused job.

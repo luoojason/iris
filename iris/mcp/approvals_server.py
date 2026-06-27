@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 
-from iris.approvals import ApprovalStore, decide, format_decision
+from iris.approvals import ApprovalStore, decide
 
 try:
     from mcp.server.fastmcp import FastMCP

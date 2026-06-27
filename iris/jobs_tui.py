@@ -18,6 +18,7 @@ from .jobs import (
     JobStore,
     cancel,
     repair_dead_runners,
+    resume_job,
     spawn_runner,
 )
 from .jobs_console import _age, format_detail, gated_launch
@@ -113,13 +114,7 @@ def build_jobs_app(config: Config, *, spawn=None):
             jid = self.selected_id()
             if jid is None:
                 return
-            job = self.store.get(jid)
-            if not job or job["state"] not in ("pending", "parked"):
-                self._status(f"job #{jid} cannot be resumed (state: {job['state'] if job else 'gone'})")
-                return
-            self.store.transition(jid, ("parked",), "pending")
-            launch(jid, store=self.store)
-            self._status(f"resumed job #{jid}")
+            self._status(resume_job(self.store, jid, spawn=launch))
             self.refresh_jobs()
 
         def action_rerun_job(self) -> None:

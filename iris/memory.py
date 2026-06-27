@@ -243,11 +243,13 @@ def pinned_digest(entries: list[dict], now_ts: float, max_bytes: int = 2400,
     """
     if max_bytes <= 0:
         return ""
-    pinned = [
-        e for e in entries
-        if isinstance(e, dict) and normalize(e)["pinned"]
-        and note_in_scope(normalize(e), conversation_id)
-    ]
+    pinned = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        n = normalize(e)
+        if n["pinned"] and note_in_scope(n, conversation_id):
+            pinned.append(e)
     if not pinned:
         return ""
     # Framed as data, not authority: these notes are model-written (and can

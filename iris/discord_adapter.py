@@ -235,8 +235,10 @@ async def _save_attachments(attachments, base_dir: str, conversation_id: str) ->
     if not attachments or not base_dir:
         return paths
     conv_dir = conversation_dir(base_dir, conversation_id)
-    for att in list(attachments)[:5]:
-        dest = conv_dir / safe_filename(getattr(att, "filename", None))
+    for i, att in enumerate(list(attachments)[:5]):
+        # Index-prefix the leaf so same-named uploads (Discord pasted images are
+        # all "image.png") don't overwrite each other and drop a file.
+        dest = conv_dir / f"{i}_{safe_filename(getattr(att, 'filename', None))}"
         try:
             await att.save(dest)
             paths.append(str(dest.resolve()))

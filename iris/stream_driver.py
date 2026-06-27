@@ -55,11 +55,6 @@ def _user_message(text: str) -> str:
     return json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n"
 
 
-# A process-like object: stdin (write/flush/close), stdout/stderr (iterable of
-# lines), kill(), wait(). The default is subprocess.Popen; tests inject a fake.
-Process = "subprocess.Popen[str]"
-
-
 def _default_spawn(cmd: Sequence[str], env: dict) -> "subprocess.Popen[str]":
     kwargs = {}
     if os.name == "posix":
