@@ -16,7 +16,22 @@ def load_dotenv(path: str | os.PathLike[str] = ".env") -> None:
     """Minimal .env reader: KEY=VALUE lines, ``#`` comments, no interpolation.
 
     Existing environment variables always win, so real env beats the file.
+
+    When ``IRIS_HOME`` is set, first chdir there so the .env and all cwd-relative
+    state-file defaults resolve against the agent dir even if the process was
+    spawned elsewhere. This is what lets the MCP servers keep working when the
+    brain's claude child runs in an isolated scratch cwd (IRIS_CHAT_ISOLATE_CWD):
+    the servers get IRIS_HOME in their mcp.json env block and re-anchor here, so
+    they behave exactly as if launched from the agent dir. Only processes that
+    carry IRIS_HOME chdir; the bot/cron ticks (which already run in the agent dir)
+    do not set it and are unaffected.
     """
+    home = os.environ.get("IRIS_HOME")
+    if home:
+        try:
+            os.chdir(home)
+        except OSError:
+            pass
     p = Path(path)
     if not p.exists():
         return
