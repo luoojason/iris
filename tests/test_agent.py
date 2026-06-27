@@ -44,6 +44,16 @@ def test_respond_skips_prefetch_when_disabled(tmp_path):
     assert "staging.example.com" not in driver.calls[0][0]
 
 
+def test_chat_isolate_cwd_runs_the_brain_in_a_scratch_dir(tmp_path):
+    # Security: with IRIS_CHAT_ISOLATE_CWD on, the brain's claude child runs in an
+    # isolated scratch dir so a `Read ./.env` cannot reach the agent dir's secrets.
+    from iris.config import Config
+    off = Agent.from_config(Config(chat_isolate_cwd=False))
+    assert off.driver.cwd is None
+    on = Agent.from_config(Config(chat_isolate_cwd=True))
+    assert on.driver.cwd is not None and "iris-brain-" in on.driver.cwd
+
+
 def test_clock_gated_agent_uses_a_separate_session_store(tmp_path):
     # Regression: a clock tick (proactive/goal) must not share the bot's session
     # file, or its whole-dict flush clobbers sessions the bot wrote in between.

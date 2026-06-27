@@ -194,6 +194,29 @@ def check_clock_gating(config: Config) -> list[Finding]:
     return []
 
 
+def check_chat_secret_reach(config: Config, *, env_path: Optional[Path] = None) -> list[Finding]:
+    """Chat's Read tool reads any path; if .env sits in the brain's working dir a
+    prompt-injected ``Read ./.env`` could exfiltrate secrets (e.g. via WebFetch).
+
+    Closed by IRIS_CHAT_ISOLATE_CWD (the brain runs in an isolated scratch cwd).
+    """
+    if getattr(config, "chat_isolate_cwd", False):
+        return []
+    env_path = Path(env_path) if env_path is not None else Path(".env")
+    try:
+        if not env_path.exists():
+            return []
+    except OSError:
+        return []
+    if "Read" in _effective_denylist(config) or "Read" in set(config.disallowed_tools):
+        return []  # Read is denied, so the relative read cannot happen
+    return [Finding(
+        "high", "chat-secret-reach", "the brain can Read secrets in its working directory",
+        f"{env_path} is in the brain's cwd and Read is enabled, so a prompt-injected "
+        "'Read ./.env' (e.g. attacker text folded back from a job report) could exfiltrate it",
+        "set IRIS_CHAT_ISOLATE_CWD=true (your mcp.json must provide config via env, not a cwd .env)")]
+
+
 def check_supply_chain(config: Config) -> list[Finding]:
     """Flag known-compromised dependency versions (pip + owner-wired npx/uvx MCP).
 
@@ -232,6 +255,7 @@ _CHECKS = (
     check_job_isolation,
     check_clock_gating,
     check_supply_chain,
+    check_chat_secret_reach,
 )
 
 

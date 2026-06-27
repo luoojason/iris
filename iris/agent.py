@@ -496,9 +496,18 @@ class Agent:
         add_dirs = list(config.add_dirs)
         if config.attachments_dir:
             add_dirs.append(config.attachments_dir)
+        brain_cwd = None
+        if getattr(config, "chat_isolate_cwd", False):
+            import tempfile
+            # An isolated scratch dir so a `Read ./.env` from an injected turn
+            # cannot reach the agent dir's secrets. Persona/standing-orders and
+            # attachments are passed as absolute paths, and the MCP servers get
+            # their config via env, so the brain loses no real capability.
+            brain_cwd = tempfile.mkdtemp(prefix="iris-brain-")
         driver = ClaudeDriver(
             claude_bin=config.claude_bin,
             model=config.model,
+            cwd=brain_cwd,
             append_system_prompt_file=config.persona_file,
             standing_orders_file=config.standing_orders_file,
             mcp_config=config.mcp_config,

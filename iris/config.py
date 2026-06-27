@@ -73,6 +73,13 @@ class Config:
     permission_mode: str = "default"
     allowed_tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
+    # Run the brain's claude child in an isolated scratch cwd so a prompt-injected
+    # `Read ./.env` (e.g. attacker text folded back from a job report) resolves to
+    # an empty dir, not the agent directory that holds .env + state. Safe ONLY when
+    # the MCP servers get their config via env/absolute paths (as the generated
+    # mcp.json does), NOT cwd-relative .env; off by default to avoid breaking a
+    # deployment that relies on cwd. `iris audit` flags the exposure when it is off.
+    chat_isolate_cwd: bool = False
     # Deny the dangerous built-in tools (Bash, Write, WebFetch, ...) by default so
     # IRIS_ALLOWED_TOOLS is a real boundary, not just an auto-approve list. Turn
     # off only if you want the agent to have host shell/file/web reach.
@@ -345,6 +352,7 @@ class Config:
             permission_mode=os.environ.get("IRIS_PERMISSION_MODE", "default"),
             allowed_tools=_split(os.environ.get("IRIS_ALLOWED_TOOLS")),
             disallowed_tools=_split(os.environ.get("IRIS_DISALLOWED_TOOLS")),
+            chat_isolate_cwd=_flag(os.environ.get("IRIS_CHAT_ISOLATE_CWD"), False),
             restrict_builtin_tools=_flag(os.environ.get("IRIS_RESTRICT_BUILTIN_TOOLS"), True),
             disable_auto_memory=_flag(os.environ.get("IRIS_DISABLE_AUTO_MEMORY"), True),
             add_dirs=_split(os.environ.get("IRIS_ADD_DIRS")),

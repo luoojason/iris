@@ -54,6 +54,19 @@ def test_chat_sandbox_ok_with_default_restrict():
     assert check_chat_sandbox(Config()) == []
 
 
+def test_chat_secret_reach_flags_a_readable_env_in_cwd(tmp_path):
+    from iris.audit import check_chat_secret_reach
+    env = tmp_path / ".env"
+    env.write_text("IRIS_DISCORD_TOKEN=secret", "utf-8")
+    # default config: Read enabled, cwd not isolated -> flagged
+    f = _by_code(check_chat_secret_reach(Config(), env_path=env), "chat-secret-reach")
+    assert f is not None and f.severity == "high"
+    # isolating the brain cwd closes it
+    assert check_chat_secret_reach(Config(chat_isolate_cwd=True), env_path=env) == []
+    # no .env present -> nothing to reach
+    assert check_chat_secret_reach(Config(), env_path=tmp_path / "absent.env") == []
+
+
 def test_chat_sandbox_critical_when_unrestricted_and_dangerous_allowed():
     cfg = Config(restrict_builtin_tools=False, allowed_tools=["Bash", "Read"])
     f = _by_code(check_chat_sandbox(cfg), "chat-sandbox")
