@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -1138,6 +1139,28 @@ def test_auto_prune_keep_zero_never_reuses_ids(tmp_path):
     store.transition(j1, ("pending",), "done")  # auto-prune fires, keep=0
     j2 = store.add("b", "x", [], "", "")["id"]
     assert j2 > j1  # monotonic despite keep=0
+
+
+def test_run_job_emits_job_metrics(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="done", session_id="s", is_error=False, context_tokens=4321))
+    metrics_path = tmp_path / "iris-metrics.json"
+    env["config"].metrics_file = str(metrics_path)
+    assert run_with(env) == 0
+    lines = metrics_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["conversation_id"] == f"job:{env['job_id']}"
+    assert rec["transport"] == "job"
+    assert rec["context_tokens"] == 4321
+
+
+def test_run_job_no_metrics_when_disabled(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="done", session_id="s", is_error=False, context_tokens=10))
+    env["config"].metrics_file = ""          # disabled -> emit is a no-op
+    assert run_with(env) == 0
+    assert not (tmp_path / "iris-metrics.json").exists()
 
 
 # -- browser grant --------------------------------------------------------------
