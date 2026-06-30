@@ -40,6 +40,7 @@ from typing import Optional
 from .config import Config
 from .driver import DANGEROUS_BUILTINS, ClaudeDriver
 from .inbox import Inbox
+from .metrics import emit_turn
 from .statefile import JsonListStore
 from .workspaces import WorkspaceStore, collect_artifacts
 
@@ -1008,6 +1009,7 @@ def run_job(
             deliver(f"job #{job_id} ({job['title']}) failed: the job turn crashed: {exc}")
             return 1
         guard.record("job", result)
+        emit_turn(config.metrics_file, f"job:{job_id}", result, None, "job", False, 1)
 
         if result.is_error:
             error = result.error or "the job turn failed"
