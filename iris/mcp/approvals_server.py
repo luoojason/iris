@@ -18,7 +18,7 @@ import time
 import urllib.error
 import urllib.request
 
-from iris.approvals import ApprovalStore, decide, format_decision
+from iris.approvals import ApprovalStore, decide
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -30,8 +30,14 @@ mcp = FastMCP("iris-approvals")
 
 
 def _post_approval(req_id: str, summary: str, config) -> bool:
-    """Post an Approve/Deny prompt to the owner's channel. False if it can't send."""
-    channel = config.home_channel
+    """Post an Approve/Deny prompt to the owner's channel. False if it can't send.
+
+    Prefer the thread this turn ran in (IRIS_ORIGIN_CHANNEL, re-added to the MCP
+    server env by the driver) so an approval raised mid-thread appears where the
+    owner is working, not over in the home channel; on_interaction records the tap
+    by custom_id regardless of channel.
+    """
+    channel = os.environ.get("IRIS_ORIGIN_CHANNEL") or config.home_channel
     if not channel or not config.discord_token:
         return False
     body = json.dumps({

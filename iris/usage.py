@@ -18,7 +18,6 @@ import os
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from .config import Config

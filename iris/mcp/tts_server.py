@@ -101,10 +101,10 @@ def speak(text: str, channel_id: str = "") -> str:
         return "No channel id given and no home channel configured."
     out_path = os.path.join(tempfile.gettempdir(), f"iris-speech-{uuid.uuid4().hex}.wav")
     try:
-        synthesize(text, out_path)
-    except TTSUnavailable as exc:
-        return f"Could not speak: {exc}"
-    try:
+        try:
+            synthesize(text, out_path)
+        except TTSUnavailable as exc:
+            return f"Could not speak: {exc}"
         res = _post_audio(channel, out_path, content="")
     finally:
         try:

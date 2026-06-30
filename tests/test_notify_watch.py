@@ -165,3 +165,51 @@ def test_watch_does_not_enqueue_resume_when_master_flag_off(tmp_path):
     watch(["build.sh"], config, name="build-z", fold=True, resume=True,
           runner=lambda argv: (0, 40.0, "done"))
     assert ResumeQueue(config.resume_queue_file).drain() == []  # master flag gates it
+
+
+def test_watch_routes_fold_resume_and_notify_to_origin_channel(tmp_path):
+    # A background command launched from a thread (origin channel given) must
+    # report THERE — the fold note, the autonomous-resume turn, and the
+    # completion ping all follow the thread, not the global home/notify channel.
+    # This is the channel/thread-confusion fix: without it, work started in a
+    # thread surfaces over in #general.
+    from iris.autoresume import ResumeQueue
+    from iris.config import Config
+    from iris.inbox import Inbox
+    from iris.notify.watch_cmd import watch
+    config = Config(inbox_file=str(tmp_path / "inbox.json"),
+                    resume_queue_file=str(tmp_path / "resume.json"),
+                    auto_resume=True, home_channel="555",
+                    notify_channel="123", discord_token="t")
+    sent = []
+    rc = watch(["build.sh"], config, name="build-t", fold=True, resume=True,
+               channel="999",
+               runner=fake_runner((0, 40.0, "all done")),
+               sender=collect_sender(sent))
+    assert rc == 0
+    # completion ping went to the thread, not notify_channel 123
+    assert sent and sent[0][0] == "999"
+    # fold note is tied to the thread's conversation, not the home channel
+    inbox = Inbox(config.inbox_file)
+    assert inbox.drain("discord:555") == []  # nothing leaked to home
+    thread_notes = inbox.drain("discord:999")
+    assert thread_notes and "build-t" in thread_notes[0]
+    # the resume turn fires back in the thread, not the home channel 555
+    items = ResumeQueue(config.resume_queue_file).drain()
+    assert len(items) == 1 and items[0]["conversation_id"] == "discord:999"
+
+
+def test_watch_arms_resume_from_origin_even_without_home_channel(tmp_path):
+    # An origin thread is itself a place for the resume to land, so resume must
+    # arm on (origin or home), not home alone.
+    from iris.autoresume import ResumeQueue
+    from iris.config import Config
+    from iris.notify.watch_cmd import watch
+    config = Config(inbox_file=str(tmp_path / "inbox.json"),
+                    resume_queue_file=str(tmp_path / "resume.json"),
+                    auto_resume=True, home_channel="",
+                    notify_channel="", discord_token="")
+    watch(["build.sh"], config, name="build-o", fold=True, resume=True,
+          channel="999", runner=lambda argv: (0, 40.0, "done"))
+    items = ResumeQueue(config.resume_queue_file).drain()
+    assert len(items) == 1 and items[0]["conversation_id"] == "discord:999"

@@ -145,11 +145,17 @@ it costs zero inference and works even mid-turn:
 | `!goals` | Standing goals and their step progress. |
 | `!heartbeat` | Last-known health-check status (no fresh probe). |
 | `!schedules` | Recorded scheduled jobs (when enabled). |
+| `!recap` | Instant, model-free recap of this conversation. |
+| `!footer on\|off` | Toggle a `model · tokens · time` line under each reply. |
 | `!status` | Whether a reply is in flight here, queue depth, active jobs. |
 | `!stop` | Stop the reply being written in this conversation. |
 | `!stop <id>` | Cancel background job `#id` (alias `!cancel <id>`) — kills its process group. |
 | `!new` | Start a fresh conversation here (aliases `!reset`, `!forget`, `!newchat`). |
 | `!help` | List the commands. |
+
+The same bang plane and per-conversation turn handling (coalescing, an interim
+ack on a slow turn, an undelivered-reply guard) run on **both** Discord and
+Telegram.
 
 They run through the same access rules as any message (the allowlist, and the
 mention gate in channels), so use them in a DM or thread, or `@mention` the bot
@@ -210,6 +216,26 @@ only the home channel / configured guild unless ids are added to
 transcripts Claude Code already keeps. Point Claude at any other MCP server
 (filesystem, browser, web search, your own) the same way.
 
+## Connect your own MCP servers
+
+Iris ships with no integrations turned on. You connect the tools you want —
+any MCP server — and nothing is pre-set.
+
+    iris mcp add buffer --command npx --arg buffer-mcp --env TOKEN=... --allow mcp__buffer__publish
+    iris mcp test buffer      # probe the server and list the tools it exposes
+    iris mcp list
+    iris mcp disable buffer   # turn a connection off without removing it
+
+The built-in Iris servers (memory, reminders, jobs, usage, wiki, goals,
+history, skills, discord, tts) are just connections too — import the sample set
+and enable the ones you want:
+
+    iris mcp import examples/mcp.example.json
+    iris mcp enable memory
+
+Connections are owner-managed from the CLI only; the agent never edits them.
+`iris doctor` lists your connections and flags any that are misconfigured.
+
 ### Trace ledger
 
 Set `IRIS_TRACE_FILE` and every `claude -p` invocation — chat, jobs, proactive
@@ -227,9 +253,30 @@ off by default for privacy.
 `iris audit` runs a model-free, read-only check of the security and compliance
 posture — the §0 invariants and the hardening findings codified as standing
 checks: secret-file modes, the chat sandbox (chat can never shell), grant
-clamping, the single-user gate, publish/usage/trace settings. It prints only
-actionable findings ranked by severity and exits non-zero on any critical/high,
-so it doubles as a cron/CI tripwire. `--json` for machine output.
+clamping, the single-user gate, publish/usage/trace settings, and a
+**supply-chain advisory check** that flags known-compromised dependency versions
+(pip, plus the pinned `npx`/`uvx` packages behind your MCP servers). It prints
+only actionable findings ranked by severity and exits non-zero on any
+critical/high, so it doubles as a cron/CI tripwire. `--json` for machine output.
+
+### Operator commands
+
+A handful of instant, model-free commands for the box where Iris runs:
+
+```sh
+iris context        # how full the conversation's context window is
+iris briefing       # due reminders, active goals, next schedule, health, in one block
+iris recap          # instant recap of the latest conversation (also !recap in chat)
+iris prompt-size    # bytes each tier-0 block injects into every turn
+iris backup --label nightly   # snapshot all state files (guarded restore with `iris restore <id>`)
+iris mcp catalog    # vetted MCP servers; `iris mcp install <name>` wires one up
+```
+
+Reminders and schedules also take cron-style times in `IRIS_TZ`: `--at "cron: 0
+9 * * 1-5"` fires weekdays at 09:00 local. A scheduled job can carry a cheap
+`--gate` probe whose output decides whether the firing spends a model call at
+all, so a "check, then act if there's something to do" schedule burns nothing on
+the quiet days.
 
 ### Session digest
 

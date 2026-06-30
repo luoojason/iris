@@ -283,6 +283,7 @@ def build_app(agent: Agent, config: Optional[Config] = None):
         def on_input_submitted(self, event: Input.Submitted) -> None:
             if event.input.id != "ianswer":
                 return
+            event.stop()  # don't let the answer bubble up as a chat prompt too
             item = self._selected()
             value = event.value.strip()
             event.input.value = ""

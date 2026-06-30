@@ -23,6 +23,35 @@ def conversation_dir(base: str, conversation_id: str) -> Path:
     return directory
 
 
+def sweep_old_attachments(base: str, now: float, ttl_secs: float) -> int:
+    """Best-effort delete attachment files older than ``ttl_secs`` and prune the
+    now-empty per-conversation dirs. Model-free and non-raising; returns the count
+    removed. Inbound media downloads forever otherwise and is the fastest disk sink
+    on a small box."""
+    if ttl_secs <= 0:
+        return 0
+    root = Path(base).expanduser()
+    if not root.is_dir():
+        return 0
+    removed = 0
+    for conv_dir in list(root.iterdir()):
+        if not conv_dir.is_dir():
+            continue
+        for item in list(conv_dir.iterdir()):
+            try:
+                if item.is_file() and (now - item.stat().st_mtime) > ttl_secs:
+                    item.unlink()
+                    removed += 1
+            except OSError:
+                continue
+        try:
+            if not any(conv_dir.iterdir()):
+                conv_dir.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 def safe_filename(name: str | None) -> str:
     """A filesystem-safe leaf name (no directory traversal)."""
     leaf = Path(name or "file").name

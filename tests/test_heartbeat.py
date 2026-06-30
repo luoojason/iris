@@ -41,6 +41,29 @@ def test_evaluate_disk_free():
     assert bad is False and "%" in detail
 
 
+def test_evaluate_mem_free():
+    check = {"name": "mem", "kind": "mem_free", "min_percent": 15}
+    bad, detail = _evaluate(check, now=0.0, mem_pct=lambda: 10.0)
+    assert bad is False and "10" in detail
+    ok, _ = _evaluate(check, now=0.0, mem_pct=lambda: 40.0)
+    assert ok is True
+    # unmeasurable (non-Linux / no /proc) must not raise a false alarm
+    ok2, _ = _evaluate(check, now=0.0, mem_pct=lambda: None)
+    assert ok2 is True
+
+
+def test_validate_accepts_mem_free_and_rejects_bad_percent():
+    from iris.heartbeat import validate_checks
+    assert validate_checks([{"name": "m", "kind": "mem_free", "min_percent": 15}]) == []
+    assert validate_checks([{"name": "m", "kind": "mem_free", "min_percent": 0}])  # out of range
+
+
+def test_system_mem_available_pct_is_a_percent_or_none():
+    from iris.heartbeat import system_mem_available_pct
+    v = system_mem_available_pct()
+    assert v is None or (0.0 <= v <= 100.0)
+
+
 def test_evaluate_file_fresh(tmp_path):
     f = tmp_path / "beat"
     f.write_text("x", "utf-8")
@@ -135,6 +158,26 @@ def test_tick_keeps_the_failure_in_the_inbox_even_without_a_channel(tmp_path):
                    fetch=lambda url, timeout: 500)
     assert sent == []  # nowhere to ping
     assert any("site" in n for n in Inbox(cfg.inbox_file).drain())
+
+
+def test_tick_retries_a_failed_ping_instead_of_going_silent(tmp_path):
+    # A failed Discord ping must NOT advance the failing-set baseline, or the
+    # alert is lost: the next tick would see an unchanged set and stay quiet, so
+    # a real health alert that hit a transient send failure would never reach the
+    # owner. The change must be re-pinged until it actually lands.
+    _write(tmp_path, [{"name": "site", "kind": "url_ok", "url": "https://e.com"}])
+    cfg = _cfg(tmp_path)
+    attempts = []
+
+    def flaky_send(c, t, k):
+        attempts.append(t)
+        return len(attempts) >= 2  # first ping fails, the retry succeeds
+
+    tick_heartbeat(cfg, now=1.0, send=flaky_send, fetch=lambda url, timeout: 500)  # fail -> ping fails
+    tick_heartbeat(cfg, now=2.0, send=flaky_send, fetch=lambda url, timeout: 500)  # unchanged, but re-pings
+    assert len(attempts) == 2  # the failed ping was retried, not silently dropped
+    tick_heartbeat(cfg, now=3.0, send=flaky_send, fetch=lambda url, timeout: 500)  # now steady -> quiet
+    assert len(attempts) == 2  # no further pings once the alert has landed
 
 
 def test_tick_announces_recovery_then_goes_quiet(tmp_path):

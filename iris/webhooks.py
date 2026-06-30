@@ -29,7 +29,7 @@ import hmac
 import json
 import logging
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from .config import Config
 from .inbox import Inbox
@@ -106,8 +106,7 @@ def _make_handler(config: Config):
             parsed = urlparse(self.path)
             name = parsed.path.strip("/").split("/")[-1] or "hook"
             token = (self.headers.get("X-Iris-Token")
-                     or _bearer(self.headers.get("Authorization"))
-                     or (parse_qs(parsed.query).get("token") or [None])[0])
+                     or _bearer(self.headers.get("Authorization")))
             status, text = handle_hook(config, name=name, body=body, token=token)
             payload = text.encode("utf-8")
             self.send_response(status)

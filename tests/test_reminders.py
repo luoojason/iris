@@ -47,6 +47,43 @@ def test_recurring_reschedules_from_now(tmp_path):
     assert remaining[0]["due_ts"] == 150 + 3600
 
 
+def test_finite_recurring_reminder_stops_after_its_remaining_fires(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(due_ts=100, text="standup", channel_id="c1", repeat_secs=60, remaining=2)
+    # fire 1: spends one, reschedules with remaining 1
+    assert [j["text"] for j in store.pop_due(now=100)] == ["standup"]
+    rem = store.all()
+    assert len(rem) == 1 and rem[0]["remaining"] == 1 and rem[0]["due_ts"] == 160
+    # fire 2: last one, so it is dropped instead of rescheduled
+    assert [j["text"] for j in store.pop_due(now=160)] == ["standup"]
+    assert store.all() == []
+
+
+def test_cron_reminder_recurs_instead_of_firing_once(tmp_path, monkeypatch):
+    # Regression: a `cron:` reminder must recompute its next fire from the spec
+    # and survive, not fire once and vanish.
+    monkeypatch.setenv("IRIS_TZ", "UTC")
+    from iris.reminders import cron_spec, parse_when
+    store = ReminderStore(tmp_path / "r.json")
+    when = "cron: 0 9 * * *"  # every day at 09:00 UTC
+    base = 1780000000.0
+    due = parse_when(when, now=base)
+    store.add(due, "standup", "c1", cron=cron_spec(when))
+    fired = store.pop_due(now=due + 1)
+    assert [j["text"] for j in fired] == ["standup"]
+    remaining = store.all()
+    assert len(remaining) == 1                     # survived (did not vanish)
+    assert remaining[0]["cron"] == "0 9 * * *"
+    assert remaining[0]["due_ts"] > due            # advanced to the next 09:00
+
+
+def test_infinite_recurring_reminder_unaffected_by_remaining(tmp_path):
+    store = ReminderStore(tmp_path / "r.json")
+    store.add(due_ts=100, text="forever", channel_id="c1", repeat_secs=60)  # no remaining
+    store.pop_due(now=100)
+    assert len(store.all()) == 1  # still scheduled
+
+
 def test_missed_window_fires_once_not_every_occurrence(tmp_path):
     # Host asleep for a long time: a daily job that was due ages ago should fire
     # exactly once on the next tick, then resume cadence, not replay every day.

@@ -37,7 +37,6 @@ import logging
 import os
 import time
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Callable, Optional
 
 from .statefile import JsonListStore
@@ -159,6 +158,22 @@ class GoalStore:
     def transition(self, goal_id: int, status: str, now: float) -> Optional[dict]:
         return self.update(goal_id, status=status, updated_ts=now)
 
+    def transition_if_active(self, goal_id: int, status: str, now: float) -> Optional[dict]:
+        """Like transition, but only when the goal is still active. Returns None if
+        the owner cancelled (or otherwise moved) it concurrently, so a budget/terminal
+        flip never clobbers a cancel that landed mid-tick."""
+        with self._locked():
+            items = self._load()
+            for goal in items:
+                if int(goal.get("id", 0)) == int(goal_id):
+                    if goal.get("status") != "active":
+                        return None
+                    goal["status"] = status
+                    goal["updated_ts"] = now
+                    self._save(items)
+                    return goal
+            return None
+
     def record_step(self, goal_id: int, *, now: float, entry: dict,
                     status: Optional[str] = None) -> Optional[dict]:
         """Atomically record one step's outcome (steps+1, log, updated_ts, and an
@@ -184,6 +199,13 @@ class GoalStore:
                     self._save(items)
                     return goal
             return None
+
+
+def format_goal_line(g: dict) -> str:
+    """One owner-facing status line for a goal. Shared by the CLI and the chat command."""
+    if g.get("status") == "active":
+        return f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}"
+    return f"#{g['id']} [{g.get('status')}]: {g['text']}"
 
 
 def _gate(config, now: float, fetch: Optional[Callable]) -> tuple[bool, str]:
@@ -334,7 +356,8 @@ def run_goal_tick(config, *, now: float, store: Optional[GoalStore] = None,
         send(channel, text, config.discord_token)
 
     if done_steps >= max_steps:
-        store.transition(goal_id, "blocked", now)
+        if store.transition_if_active(goal_id, "blocked", now) is None:
+            return "cancelled"
         report(f"[goal needs you] I've used my {max_steps}-step budget on “{goal['text']}” "
                "without finishing. Want me to extend it, change the approach, or drop it?")
         return "budget"

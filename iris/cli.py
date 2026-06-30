@@ -55,6 +55,27 @@ class _Spinner:
             sys.stdout.flush()
 
 
+def connection_doctor_lines(config) -> list[str]:
+    from .connections import ConnectionStore
+
+    if not getattr(config, "connections_file", None):
+        return ["connections: (not configured — set IRIS_CONNECTIONS_FILE to enable)"]
+    store = ConnectionStore(config.connections_file)
+    conns = store.list()
+    if not conns:
+        return ["connections: none registered (iris mcp add NAME --command CMD)"]
+    lines = [f"connections: {len(conns)} registered"]
+    for c in conns:
+        state = "on" if c.enabled else "off"
+        shown = f"{c.command} {' '.join(c.args)}".strip()
+        lines.append(f"  [{state}] {c.name}: {shown}")
+        if c.enabled and shutil.which(c.command) is None and not c.command.startswith("/"):
+            lines.append(f"    WARNING: command not found on PATH: {c.command}")
+        if c.enabled and not c.allowed_tools:
+            lines.append(f"    WARNING: {c.name} has no allowed tools, so it is inert")
+    return lines
+
+
 def doctor(config: Config, probe: bool = True, fix: bool = False) -> int:
     """Verify the claude binary is present and actually signed in.
 
@@ -115,6 +136,8 @@ def doctor(config: Config, probe: bool = True, fix: bool = False) -> int:
         print("standing orders: (none)")
     print(f"mcp tools: {config.mcp_config or '(none)'}")
     print(f"allowed tools: {', '.join(config.allowed_tools) if config.allowed_tools else '(none)'}")
+    for line in connection_doctor_lines(config):
+        print(line)
     print(f"voice transcription: {'on (' + config.voice_model + ')' if config.voice_enabled else 'off'}")
     if config.compact_at_tokens or config.compact_every:
         triggers = []
@@ -300,10 +323,32 @@ def reminders_tick(config: Config) -> int:
         print(tick_heartbeat(config))
     except Exception as exc:
         print(f"heartbeat tick failed: {exc}")
+    try:
+        import time as _t
+        from .attachments import sweep_old_attachments
+        swept = sweep_old_attachments(config.attachments_dir, _t.time(),
+                                      config.attachments_ttl_days * 86400)
+        if swept:
+            print(f"attachments: swept {swept} expired file(s)")
+    except Exception as exc:
+        print(f"attachments sweep failed: {exc}")
     if config.jobs_enabled:
         try:
-            from .jobs import notify_dead_jobs
+            from .jobs import (JobStore, notify_dead_jobs, redeliver_reports,
+                               retry_dead_starts)
+            # Respawn runners that died in their startup window before failing
+            # anything: a transient OOM/cgroup death self-heals within a minute
+            # instead of leaving a dead scheduled day. Runs first so only the
+            # genuinely exhausted deaths fall through to the fail+notify sweep.
+            retried = retry_dead_starts(JobStore(config.jobs_file, keep=config.jobs_keep))
+            if retried:
+                print(f"job-retry: respawned {retried} runner(s) that died at startup")
             print(f"dead-jobs: {notify_dead_jobs(config)} notified")
+            # Re-ping any finished report whose delivery failed (Discord was down
+            # when the job completed); bounded, so a dead channel won't loop.
+            redelivered = redeliver_reports(config)
+            if redelivered:
+                print(f"job-reports: redelivered {redelivered}")
         except Exception as exc:
             print(f"dead-jobs sweep failed: {exc}")
     return 0
@@ -411,6 +456,7 @@ def schedule_cmd(config: Config, args) -> int:
                 grants=args.grant,
                 workspace=args.workspace,
                 cap=args.cap,
+                gate_command=getattr(args, "gate_command", ""),
                 default_cap=config.schedule_monthly_cap,
             )
         except ValueError as exc:
@@ -472,7 +518,7 @@ def goals_cmd(config: Config, args) -> int:
     """Owner-side view and steering of the standing goals the tick advances."""
     import time
 
-    from .goals import GoalStore
+    from .goals import GoalStore, format_goal_line
 
     store = GoalStore(config.goals_file)
     action = getattr(args, "goals_action", None) or "list"
@@ -489,10 +535,7 @@ def goals_cmd(config: Config, args) -> int:
         print("No goals set. Iris records them when you give her one to pursue.")
         return 0
     for g in goals:
-        if g.get("status") == "active":
-            print(f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}")
-        else:
-            print(f"#{g['id']} [{g.get('status')}]: {g['text']}")
+        print(format_goal_line(g))
     if not config.goals_enabled:
         print("(IRIS_GOALS is off: nothing advances.)")
     return 0
@@ -583,7 +626,145 @@ def skills(config: Config) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parse_kv(pairs):
+    out = {}
+    for p in pairs or []:
+        if "=" not in p:
+            raise SystemExit(f"bad --env {p!r}: expected K=V")
+        k, _, v = p.partition("=")
+        out[k.strip()] = v
+    return out
+
+
+def mcp_command(args, config) -> int:
+    """Owner CLI for MCP connections. Returns a process exit code."""
+    from .connections import ConnectionStore
+
+    store = ConnectionStore(config.connections_file)
+    action = args.mcp_action
+
+    if action == "add":
+        allow = list(args.allow or [])
+        if args.allow_all:
+            allow.append(f"mcp__{args.name}")
+        try:
+            store.add(
+                args.name, args.command,
+                args=args.arg or [], env=_parse_kv(args.env),
+                allowed_tools=allow,
+            )
+        except ValueError as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"added connection {args.name!r} (enabled). Allowed tools: {allow or '(none yet — add with --allow)'}")
+        return 0
+
+    if action == "list":
+        conns = store.list()
+        if args.json:
+            import json as _json
+            print(_json.dumps([
+                {"name": c.name, "command": c.command, "args": c.args,
+                 "enabled": c.enabled, "allowed_tools": c.allowed_tools,
+                 "env_keys": sorted(c.env)} for c in conns
+            ], indent=2))
+            return 0
+        if not conns:
+            print("no connections. Add one with: iris mcp add NAME --command CMD")
+            return 0
+        for c in conns:
+            state = "on " if c.enabled else "off"
+            tools = ", ".join(c.allowed_tools) or "(no tools allowed)"
+            # env values are intentionally never printed (secrets); only command/args/tools
+            print(f"[{state}] {c.name}: {c.command} {' '.join(c.args)}  ->  {tools}")
+        return 0
+
+    if action == "remove":
+        ok = store.remove(args.name)
+        print(f"removed {args.name!r}" if ok else f"no connection named {args.name!r}")
+        return 0 if ok else 1
+
+    if action in ("enable", "disable"):
+        try:
+            store.set_enabled(args.name, action == "enable")
+        except ValueError as exc:
+            print(f"error: {exc}")
+            return 1
+        print(f"{action}d {args.name!r}")
+        return 0
+
+    if action == "import":
+        import json as _json
+        try:
+            with open(args.path, encoding="utf-8") as _f:
+                data = _json.loads(_f.read())
+        except (OSError, ValueError) as exc:
+            print(f"error: cannot read {args.path}: {exc}")
+            return 1
+        servers = data.get("mcpServers", {}) if isinstance(data, dict) else None
+        if not isinstance(servers, dict) or not servers:
+            print("no mcpServers found in that file")
+            return 1
+        added = 0
+        for name, spec in servers.items():
+            if store.get(name) is not None:
+                print(f"skip {name!r}: already exists")
+                continue
+            if not isinstance(spec, dict):
+                print(f"skip {name!r}: not an object")
+                continue
+            try:
+                store.add(
+                    name, str(spec.get("command", "")),
+                    args=[str(a) for a in spec.get("args", [])],
+                    env={str(k): str(v) for k, v in (spec.get("env") or {}).items()},
+                    allowed_tools=[], enabled=False,
+                )
+                added += 1
+            except (ValueError, TypeError, AttributeError) as exc:
+                print(f"skip {name!r}: {exc}")
+        print(f"imported {added} connection(s), disabled. Enable + allow tools, e.g.: iris mcp enable NAME")
+        return 0
+
+    if action == "test":
+        conn = store.get(args.name)
+        if conn is None:
+            print(f"no connection named {args.name!r}")
+            return 1
+        from .mcp_probe import ProbeError, probe_tools
+        try:
+            tools = probe_tools(conn.command, conn.args, conn.env)
+        except ProbeError as exc:
+            print(f"could not probe {args.name!r}: {exc}")
+            return 1
+        if not tools:
+            print(f"{args.name!r} started but exposed no tools")
+            return 0
+        print(f"{args.name!r} exposes: " + ", ".join(f"mcp__{args.name}__{t}" for t in tools))
+        print("allow them with: iris mcp add (or re-add) using --allow <tool>")
+        return 0
+
+    if action == "catalog":
+        from .mcp_catalog import render_catalog
+        print(render_catalog())
+        return 0
+
+    if action == "install":
+        import getpass
+        from .mcp_catalog import install
+
+        def _prompt(text: str, secret: bool) -> str:
+            return getpass.getpass(text + ": ") if secret else input(text + ": ")
+
+        print(install(args.name, store, _prompt, force=getattr(args, "force", False)))
+        return 0
+
+    print("unknown mcp action")
+    return 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the top-level iris argument parser."""
     parser = argparse.ArgumentParser(prog="iris", description="A chat agent on your Claude subscription.")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("discord", help="run the Discord bot (default)")
@@ -651,6 +832,8 @@ def main(argv: list[str] | None = None) -> int:
     sc_add.add_argument("--grant", default="", help="job grants, comma-separated: shell,files")
     sc_add.add_argument("--workspace", default="", help="a registered workspace name")
     sc_add.add_argument("--cap", type=int, default=None, help="monthly fire cap (default IRIS_SCHEDULE_MONTHLY_CAP)")
+    sc_add.add_argument("--gate", dest="gate_command", default="",
+                        help="a cheap shell probe run before firing (a job rule); if its last stdout line is false/skip, the firing spends no model call")
     sc_remove = sched_sub.add_parser("remove", help="remove a schedule rule")
     sc_remove.add_argument("rule_id", type=int)
     sched_sub.add_parser("list", help="list schedule rules (default)")
@@ -668,7 +851,54 @@ def main(argv: list[str] | None = None) -> int:
     watch_parser.add_argument("--quiet", action="store_true", help="suppress the ping for this run")
     watch_parser.add_argument("--fold", action="store_true", help="also fold the completion into Iris's next turn")
     watch_parser.add_argument("--resume", action="store_true", help="enqueue a follow-up turn so Iris continues the chain (needs IRIS_AUTO_RESUME)")
+    watch_parser.add_argument("--channel", default=None, help="conversation/thread id to report back to (defaults to the home channel)")
     watch_parser.add_argument("argv", nargs=argparse.REMAINDER, help="-- then the command to run")
+    mcp_p = sub.add_parser("mcp", help="connect your own MCP servers")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_action", required=True)
+
+    p_add = mcp_sub.add_parser("add", help="register an MCP server connection")
+    p_add.add_argument("name")
+    p_add.add_argument("--command", required=True)
+    p_add.add_argument("--arg", action="append", help="a command argument (repeatable)")
+    p_add.add_argument("--env", action="append", help="K=V env var (repeatable)")
+    p_add.add_argument("--allow", action="append", help="an allowed tool name (repeatable)")
+    p_add.add_argument("--allow-all", action="store_true", help="allow the whole server (mcp__NAME)")
+
+    p_list = mcp_sub.add_parser("list", help="list connections")
+    p_list.add_argument("--json", action="store_true")
+
+    for verb in ("remove", "enable", "disable"):
+        pv = mcp_sub.add_parser(verb, help=f"{verb} a connection")
+        pv.add_argument("name")
+
+    p_imp = mcp_sub.add_parser("import", help="import servers from an existing mcp.json")
+    p_imp.add_argument("path")
+
+    p_test = mcp_sub.add_parser("test", help="probe a connection and list its tools")
+    p_test.add_argument("name")
+
+    mcp_sub.add_parser("catalog", help="list the curated, vetted MCP servers you can install")
+    p_install = mcp_sub.add_parser("install", help="install a catalog server by name")
+    p_install.add_argument("name")
+    p_install.add_argument("--force", action="store_true", help="replace an existing connection of the same name")
+
+    sub.add_parser("context", help="show how full the current conversation's context window is")
+    sub.add_parser("briefing", help="print the model-free status block (due reminders, goals, schedules, health)")
+    recap_parser = sub.add_parser("recap", help="instant, model-free recap of the latest conversation")
+    recap_parser.add_argument("--session", default=None, help="a specific session id (defaults to the latest)")
+    sub.add_parser("prompt-size", help="show the fixed per-turn prompt budget (bytes injected each turn)")
+    backup_parser = sub.add_parser("backup", help="snapshot all Iris state files")
+    backup_parser.add_argument("--label", default="", help="a label for the snapshot")
+    sub.add_parser("backups", help="list state snapshots")
+    restore_parser = sub.add_parser("restore", help="restore state from a snapshot")
+    restore_parser.add_argument("snapshot_id", help="the snapshot id/dir to restore")
+    restore_parser.add_argument("--force", action="store_true", help="restore even if it would empty an active registry")
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     # Configure logging once here so every command (chat, tui, reminders-tick,
@@ -733,6 +963,53 @@ def main(argv: list[str] | None = None) -> int:
         return digest_cmd(config, days=args.days)
     if command == "heartbeat":
         return heartbeat_cmd(config)
+    if command == "context":
+        from .footer import format_context
+        # The live token count lives in the running process; from the CLI we show
+        # the configured compaction thresholds so the owner knows the budget shape.
+        print(format_context(None, config.compact_at_tokens, 0, config.compact_every))
+        return 0
+    if command == "briefing":
+        import time as _time
+        from .briefing import build_briefing
+        print(build_briefing(config, now=_time.time()))
+        return 0
+    if command == "recap":
+        from .recap import build_recap, latest_transcript
+        path = latest_transcript()
+        if getattr(args, "session", None):
+            import glob
+            import os
+            hits = [p for p in glob.glob(os.path.join(
+                os.environ.get("IRIS_TRANSCRIPTS_DIR") or os.path.expanduser("~/.claude/projects"),
+                "**", f"*{args.session}*.jsonl"), recursive=True)]
+            path = hits[0] if hits else path
+        print(build_recap(path) if path else "(no conversation transcript found yet)")
+        return 0
+    if command == "prompt-size":
+        from .prompt_size import render
+        print(render(config))
+        return 0
+    if command == "backup":
+        import time as _time
+        from .backup import snapshot_state
+        print(snapshot_state(config, now_ts=_time.time(), label=getattr(args, "label", "")))
+        return 0
+    if command == "backups":
+        from .backup import list_snapshots
+        snaps = list_snapshots(config)
+        print("\n".join(snaps) if snaps else "No snapshots yet.")
+        return 0
+    if command == "restore":
+        import time as _time
+        from .backup import EmptyClockGuard, restore_state
+        try:
+            print(restore_state(config, args.snapshot_id, now_ts=_time.time(),
+                                force=getattr(args, "force", False)))
+            return 0
+        except EmptyClockGuard as exc:
+            print(f"refused: {exc} (use --force to override)")
+            return 1
     if command == "webhook":
         from .webhooks import run_webhook_server
         return run_webhook_server(config)
@@ -743,6 +1020,8 @@ def main(argv: list[str] | None = None) -> int:
             config, args.ws_action,
             name=getattr(args, "name", ""), path=getattr(args, "path", ""),
         )
+    if command == "mcp":
+        return mcp_command(args, config)
     if command == "job-run":
         if not config.jobs_enabled:
             print("job-run: background jobs are disabled (set IRIS_JOBS=true)")
@@ -766,7 +1045,8 @@ def main(argv: list[str] | None = None) -> int:
         from .notify.watch_cmd import watch as run_watch
         return run_watch(watch_cmd, config, name=args.name, force=args.always,
                          quiet=args.quiet, fold=getattr(args, "fold", False),
-                         resume=getattr(args, "resume", False))
+                         resume=getattr(args, "resume", False),
+                         channel=getattr(args, "channel", None))
     if command == "telegram":
         from .telegram_adapter import run as run_telegram
         run_telegram(config)

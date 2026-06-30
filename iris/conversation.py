@@ -28,6 +28,30 @@ from typing import Awaitable, Callable, List, Optional, Protocol, Sequence
 log = logging.getLogger("iris.conversation")
 
 
+async def _deliver(send: "Send", on_undelivered: Optional[Callable[[str], None]],
+                   text: str) -> bool:
+    """Send a reply, preserving it instead of losing it if the send raises.
+
+    A chat send can fail for reasons outside our control (an auto-thread that was
+    archived or locked, revoked channel perms, a network reset) AFTER the model
+    turn was already paid for. Letting that exception unwind the drain loop would
+    silently drop the reply AND strand the rest of the queued turns. Instead we
+    hand the text to ``on_undelivered`` (a durable sink) and keep going. Returns
+    whether the send landed.
+    """
+    try:
+        await send(text)
+        return True
+    except Exception:
+        log.warning("could not deliver a reply; preserving it for recovery", exc_info=True)
+        if on_undelivered is not None:
+            try:
+                on_undelivered(text)
+            except Exception:
+                log.warning("could not preserve an undelivered reply", exc_info=True)
+        return False
+
+
 def coalesce_messages(messages: Sequence[str]) -> str:
     """Fold consecutive user messages into one prompt.
 
@@ -80,6 +104,7 @@ class ConversationRunner:
         typing: Optional[Typing] = None,
         ack_delay: float = 4.0,
         on_cancel: Optional[Callable[[], None]] = None,
+        on_undelivered: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._run_turn = run_turn
         self._send = send
@@ -87,6 +112,7 @@ class ConversationRunner:
         self._typing = typing
         self._ack_delay = ack_delay
         self._on_cancel = on_cancel
+        self._on_undelivered = on_undelivered
         self._pending: list[Turn] = []
         self._worker: Optional[asyncio.Task] = None
         # Bumped by cancel(); an in-flight turn captures it at the start and
@@ -166,7 +192,7 @@ class ConversationRunner:
         # A cancel() during the turn bumps the generation; honor it by dropping
         # the reply the user asked us to stop.
         if text and self._cancel_gen == gen:
-            await self._send(text)
+            await _deliver(self._send, self._on_undelivered, text)
 
     async def _delayed_ack(self) -> None:
         try:
@@ -228,6 +254,7 @@ class LiveConversationRunner:
         typing: Optional[Typing] = None,
         ack_delay: float = 4.0,
         on_cancel: Optional[Callable[[], None]] = None,
+        on_undelivered: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._start_turn = start_turn
         self._send = send
@@ -235,6 +262,7 @@ class LiveConversationRunner:
         self._typing = typing
         self._ack_delay = ack_delay
         self._on_cancel = on_cancel
+        self._on_undelivered = on_undelivered
         self._pending: list[Turn] = []
         self._live: Optional[LiveHandle] = None
         self._worker: Optional[asyncio.Task] = None
@@ -342,13 +370,13 @@ class LiveConversationRunner:
             finally:
                 ack_task.cancel()
             if reply and self._cancel_gen == gen:
-                await self._send(reply)
+                await _deliver(self._send, self._on_undelivered, reply)
             # aftermath waits the process out and surfaces any stray follow-up
             # (a message that raced the close boundary).
             strays = await handle.aftermath()
             for stray in strays:
                 if stray and self._cancel_gen == gen:
-                    await self._send(stray)
+                    await _deliver(self._send, self._on_undelivered, stray)
         finally:
             handle.close()
             self._live = None

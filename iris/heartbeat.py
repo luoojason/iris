@@ -31,8 +31,37 @@ from .statefile import JsonDictStore
 
 log = logging.getLogger("iris.heartbeat")
 
-KINDS = ("disk_free", "file_fresh", "url_ok")
+KINDS = ("disk_free", "mem_free", "file_fresh", "url_ok")
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def system_mem_available_pct() -> Optional[float]:
+    """Available system memory as a percent of total, or None if unmeasurable.
+
+    Reads /proc/meminfo (Linux, where Iris is deployed) with no third-party
+    dependency. Returns None off-Linux or on any read error, so a dev box with no
+    /proc never raises a false alarm. Prefers MemAvailable (the kernel's estimate
+    of what a new process can claim without swapping), the right signal for the
+    2-core box that spawns a second full Python+iris interpreter per scheduled job.
+    """
+    try:
+        fields: dict[str, float] = {}
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+            for line in fh:
+                key, _, rest = line.partition(":")
+                parts = rest.split()
+                if parts:
+                    fields[key.strip()] = float(parts[0])  # value in kB
+        total = fields.get("MemTotal")
+        avail = fields.get("MemAvailable")
+        if avail is None:  # very old kernels: approximate from free+buffers+cached
+            avail = (fields.get("MemFree", 0.0) + fields.get("Buffers", 0.0)
+                     + fields.get("Cached", 0.0))
+        if not total:
+            return None
+        return max(0.0, min(100.0, avail / total * 100.0))
+    except (OSError, ValueError):
+        return None
 
 
 def validate_checks(checks) -> list[str]:
@@ -63,11 +92,12 @@ def validate_checks(checks) -> list[str]:
             url = check.get("url")
             if not isinstance(url, str) or not url.startswith(("http://", "https://")):
                 problems.append(f"{label}: url must be an http(s) URL, got {url!r}")
-        else:
+        elif kind in ("disk_free", "file_fresh"):
             path = check.get("path")
             if not isinstance(path, str) or not os.path.isabs(path):
                 problems.append(f"{label}: path must be absolute, got {path!r}")
-        if kind == "disk_free":
+        # mem_free is system-wide: it needs neither a path nor a url.
+        if kind in ("disk_free", "mem_free"):
             pct = check.get("min_percent")
             if not isinstance(pct, (int, float)) or not 0 < pct < 100:
                 problems.append(f"{label}: min_percent must be between 0 and 100, got {pct!r}")
@@ -103,7 +133,7 @@ def http_status(url: str, timeout: float) -> int:
 
 
 def _evaluate(check: dict, *, now: float, disk_usage=None, fetch=None,
-              http_timeout: float = 15.0) -> tuple[bool, str]:
+              mem_pct=None, http_timeout: float = 15.0) -> tuple[bool, str]:
     """Evaluate one check. Returns (ok, detail). Cheap and model-free; an error
     fetching/stat-ing is a failure (with detail), never a raise."""
     kind = check["kind"]
@@ -118,6 +148,15 @@ def _evaluate(check: dict, *, now: float, disk_usage=None, fetch=None,
         floor = float(check.get("min_percent", 10))
         if pct < floor:
             return False, f"{pct:.0f}% free < {floor:.0f}% on {check['path']}"
+        return True, ""
+
+    if kind == "mem_free":
+        pct = (mem_pct or system_mem_available_pct)()
+        if pct is None:
+            return True, ""  # unmeasurable (off-Linux): never a false alarm
+        floor = float(check.get("min_percent", 10))
+        if pct < floor:
+            return False, f"{pct:.0f}% memory available < {floor:.0f}%"
         return True, ""
 
     if kind == "file_fresh":
@@ -221,16 +260,24 @@ def tick_heartbeat(config: Config, now: Optional[float] = None, send=None,
             failures, skipped, total = evaluate_all(config, now, fetch)
             prev = set(state.get("failing", []))
             current = set(failures)
-            state["failing"] = sorted(current)
             if current != prev:
                 message = _digest(failures, recovered=sorted(prev - current))
                 channel = config.home_channel or config.notify_channel
-                # Always fold into the inbox so a failure is never lost, even when
-                # there is no channel to ping; push to the channel when there is one.
-                inbox.append(message, conversation_id=(f"discord:{channel}" if channel else None))
-                if channel and config.discord_token and not send(channel, message, config.discord_token):
-                    log.warning("heartbeat could not ping %s", channel)
-                pinged = True
+                delivered = True
+                if channel and config.discord_token:
+                    delivered = bool(send(channel, message, config.discord_token))
+                    if not delivered:
+                        log.warning("heartbeat could not ping %s; will retry next tick", channel)
+                # Surface the change durably, then advance the baseline ONLY once it
+                # has landed. A failed Discord ping keeps the old failing-set so the
+                # next tick re-pings instead of going silent on a real alert. With
+                # no channel the inbox IS the delivery, so that always advances.
+                if delivered or not channel:
+                    inbox.append(message, conversation_id=(f"discord:{channel}" if channel else None))
+                    state["failing"] = sorted(current)
+                pinged = delivered and bool(channel)
+            else:
+                state["failing"] = sorted(current)  # unchanged; keep state tidy
         finally:
             store.save(state)
 

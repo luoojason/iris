@@ -20,6 +20,14 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Only kill the tick's own ExecStart process when the unit stops, NOT the whole
+# control group. The tick spawns detached job runners (`iris job-run`) that stay
+# in this unit's cgroup; with the default KillMode=control-group, systemd tears
+# the cgroup down the instant the tick exits and SIGTERMs those runners
+# mid-startup (start_new_session detaches the session, not the cgroup). That is
+# the "job runner died before starting" failure. KillMode=process leaves the
+# spawned runners alone to finish.
+KillMode=process
 # Absolute path to the iris checkout (where your .env lives).
 WorkingDirectory=%h/iris
 # Use the interpreter from the venv you installed iris into.

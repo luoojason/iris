@@ -30,4 +30,44 @@ def test_check_fails_closed_when_owner_unreachable(tmp_path, monkeypatch):
 
 def test_post_approval_false_without_channel(monkeypatch):
     from iris.config import Config
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
     assert srv._post_approval("r1", "do thing", Config()) is False  # no channel/token
+
+
+def _capture_post_channel(monkeypatch):
+    import urllib.request
+    captured = {}
+
+    class FakeResp:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=15):
+        captured["url"] = req.full_url
+        return FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def test_post_approval_prefers_the_origin_thread(monkeypatch):
+    # An Approve/Deny prompt raised during a thread turn appears in THAT thread,
+    # not the home channel, so the owner approves where they are working.
+    from iris.config import Config
+    captured = _capture_post_channel(monkeypatch)
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-9")
+    assert srv._post_approval("r1", "do thing", Config(home_channel="home-1", discord_token="tok")) is True
+    assert "/channels/thread-9/messages" in captured["url"]
+
+
+def test_post_approval_falls_back_to_home_without_origin(monkeypatch):
+    from iris.config import Config
+    captured = _capture_post_channel(monkeypatch)
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
+    assert srv._post_approval("r1", "do thing", Config(home_channel="home-1", discord_token="tok")) is True
+    assert "/channels/home-1/messages" in captured["url"]

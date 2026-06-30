@@ -87,6 +87,20 @@ def test_update_and_transition(tmp_path):
     assert reloaded["updated_ts"] == 9.0
 
 
+def test_transition_if_active_refuses_a_non_active_goal(tmp_path):
+    # The step-budget block (and any terminal flip) must never overwrite a cancel
+    # the owner landed first; transition_if_active no-ops on a non-active goal.
+    store = GoalStore(tmp_path / "g.json")
+    g = store.add("do a thing", now=1.0)
+    store.transition(g["id"], "cancelled", now=2.0)
+    assert store.transition_if_active(g["id"], "blocked", now=3.0) is None
+    assert store.get(g["id"])["status"] == "cancelled"
+    # an active goal still transitions normally
+    h = store.add("another", now=4.0)
+    assert store.transition_if_active(h["id"], "blocked", now=5.0) is not None
+    assert store.get(h["id"])["status"] == "blocked"
+
+
 def test_active_filters_terminal_goals(tmp_path):
     store = GoalStore(tmp_path / "g.json")
     a = store.add("active one", now=1.0)

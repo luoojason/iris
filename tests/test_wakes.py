@@ -248,6 +248,29 @@ def test_failed_ping_retries_next_tick_but_folds_back_once(tmp_path):
     assert pings == []  # delivered; nothing left to retry
 
 
+def test_pending_ping_gives_up_after_max_attempts_on_a_dead_channel(tmp_path):
+    # A permanently-undeliverable channel (deleted channel / removed bot) must not
+    # wedge the rule: it would otherwise POST one failed REST call every tick
+    # forever AND never fire on a new condition (the tick returns early while a
+    # ping is owed). After a capped number of retries it gives up - the message
+    # already folded into the inbox on the first fire, so it is not lost.
+    from iris.wakes import MAX_PENDING_PING_ATTEMPTS
+
+    target = tmp_path / "drop.txt"
+    write_rules(tmp_path, [rule(tmp_path, name="drop", kind="file_exists",
+                                path=str(target), message="m", pattern=None)])
+    tick(tmp_path)  # arm
+    target.write_text("x", encoding="utf-8")
+
+    posts = []
+    dead = lambda *a: posts.append(1) or False  # Discord permanently down
+    tick(tmp_path, now=NOW + 60, send=dead)  # fires; ping fails -> a ping is owed
+    for i in range(MAX_PENDING_PING_ATTEMPTS + 5):  # keep ticking well past the cap
+        tick(tmp_path, now=NOW + 120 + i * 60, send=dead)
+    # one POST on the fire + one per retry up to the cap, then it stops forever
+    assert len(posts) == MAX_PENDING_PING_ATTEMPTS + 1
+
+
 def test_rule_channel_overrides_home(tmp_path):
     target = tmp_path / "drop.txt"
     target.write_text("x", encoding="utf-8")

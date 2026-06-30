@@ -90,7 +90,7 @@ def start_job(title: str, instructions: str, grants: str = "", workspace: str = 
     """
     config = _config()
     if not config.jobs_enabled:
-        return "Background jobs are disabled. The owner can set IRIS_JOBS=true."
+        return _DISABLED
     if not (title or "").strip() or not (instructions or "").strip():
         return "A job needs both a title and instructions."
     try:
@@ -252,7 +252,7 @@ def resume_job(job_id: int, answer: str = "") -> str:
     """
     config = _config()
     if not config.jobs_enabled:
-        return "Background jobs are disabled. The owner can set IRIS_JOBS=true."
+        return _DISABLED
     from iris.jobs import resume_job as resume_core
     reply = resume_core(_store(), job_id, answer=answer, spawn=SPAWN)
     # The chat tool nudges the owner toward the answer= form for a paused job.
@@ -384,6 +384,7 @@ def run_in_background(command: str, label: str = "", workspace: str = "",
             schedule the uploads after a build) without the owner poking you.
             Default False just pings. Inert unless the owner enabled it.
     """
+    import os
     import shlex
     import sys
 
@@ -403,22 +404,31 @@ def run_in_background(command: str, label: str = "", workspace: str = "",
             return f"No workspace named {workspace!r} (registered: {names})."
         inner = f"cd {shlex.quote(path)} && {command}"
     name = ((label or command).strip())[:60]
-    # iris watch runs the command and pings the notify channel on completion
-    # (templated on success, one model call to interpret a failure). It loads
-    # .env from this server's cwd, so spawn with the inherited cwd.
+    # The conversation this tool call belongs to (a thread), so the completion
+    # ping and any resume turn report BACK HERE instead of the home channel. The
+    # driver re-adds IRIS_ORIGIN_CHANNEL after stripping IRIS_* from the server
+    # env; it is empty for a non-Discord/clock origin, which falls back to home.
+    origin = os.environ.get("IRIS_ORIGIN_CHANNEL", "").strip()
+    # iris watch runs the command and pings on completion (templated on success,
+    # one model call to interpret a failure). It loads .env from this server's
+    # cwd, so spawn with the inherited cwd.
     argv = [sys.executable, "-m", "iris", "watch", "--name", name, "--fold"]
-    # Only arm autonomous resume when the owner turned it on AND has a home
-    # channel for the resume to land in — the same three conditions watch checks
-    # before it enqueues. Keeping the argv and the reply honest means the model
-    # is never told the chain self-continues when it actually won't.
-    will_resume = bool(autoresume and config.auto_resume and config.home_channel)
+    # Only arm autonomous resume when the owner turned it on AND there is a
+    # conversation (this thread, else the home channel) for the resume to land
+    # in — the same conditions watch checks before it enqueues. Keeping the argv
+    # and the reply honest means the model is never told the chain self-continues
+    # when it actually won't.
+    will_resume = bool(autoresume and config.auto_resume and (origin or config.home_channel))
     if will_resume:
         argv.append("--resume")
+    if origin:
+        argv += ["--channel", origin]
     argv += ["--", "/bin/sh", "-c", inner]
     _launch_watch(argv, None)
+    where = "here" if origin else "the home channel"
     base = (f"Started '{name}' in the background. It runs to completion however long "
             f"it takes (no model turn is held open, so no timeout), and I will ping "
-            f"the home channel when it finishes.")
+            f"{where} when it finishes.")
     if will_resume:
         return base + " When it finishes I'll continue the chain automatically and report back."
     if autoresume:

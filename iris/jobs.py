@@ -64,6 +64,20 @@ DISCORD_MESSAGE_LIMIT = 2000
 
 _ACTIVE_STATES = ("pending", "running")
 _TERMINAL_STATES = ("done", "failed", "cancelled")
+
+# How many times a runner that dies in its startup window (before it reaches
+# "running", i.e. before its one model call) is respawned before it is failed.
+# The death is pre-model-call, so each retry costs no credits; this converts a
+# flaky startup death (OOM under memory pressure, a systemd cgroup teardown
+# race) into a rare one. See retry_dead_starts.
+MAX_START_ATTEMPTS = 3
+
+# How many times to retry delivering a finished job's report to Discord before
+# giving up. deliver() marks report_delivered only on a successful send; a job
+# that finishes while Discord is unreachable would otherwise never re-ping the
+# owner. The report is persisted in the job row and folded into the inbox on the
+# original turn, so a give-up still leaves it recoverable. See redeliver_reports.
+MAX_REDELIVER_ATTEMPTS = 3
 # needs_input is a paused, non-terminal state: the job asked the owner a question
 # and is waiting for an answer. It holds no runner and no jobs_max slot.
 
@@ -314,6 +328,24 @@ class JobStore:
                     return dict(job)
             return None
 
+    def claim_field(self, job_id: int, field: str, expected, new) -> bool:
+        """Atomically set ``field`` to ``new`` iff it currently equals ``expected``.
+
+        A cross-process compare-and-set (like transition, but on one field) so two
+        overlapping tickers cannot both act on the same job: exactly one wins the
+        claim and does the side effect (fold the inbox note, send the report).
+        """
+        with self._locked():
+            items = self._load()
+            for job in items:
+                if job.get("id") == job_id:
+                    if job.get(field) != expected:
+                        return False
+                    job[field] = new
+                    self._save(items)
+                    return True
+            return False
+
     def transition(self, job_id: int, from_states: tuple, to_state: str, **fields) -> Optional[dict]:
         """Atomically move a job between states; None if it was not in from_states.
 
@@ -507,17 +539,69 @@ def notify_dead_jobs(config: Config, *, send=None, inbox: Optional[Inbox] = None
     for job in store.all():
         if job.get("state") != "failed" or job.get("death_notified") is not False:
             continue
+        # Claim FIRST: flip death_notified False->True atomically. Only the winner
+        # folds + pings, so the note lands exactly once even across overlapping
+        # ticks, and a permanently-undeliverable channel never re-folds it every
+        # minute (the inbox fold is the durable record; the ping is best-effort).
+        if not store.claim_field(job["id"], "death_notified", False, True):
+            continue
         channel = job.get("channel_id") or config.home_channel
         message = (f"job #{job['id']} ({job.get('title') or ''}) failed: "
                    f"{job.get('error') or 'the runner died'}")
         inbox.append(message, conversation_id=(f"discord:{channel}" if channel else None))
-        delivered = True
-        if channel and config.discord_token:
-            delivered = bool(send(channel, message, config.discord_token))
-        if delivered:
-            store.update(job["id"], death_notified=True)
-            notified += 1
+        if channel and config.discord_token and not send(channel, message, config.discord_token):
+            log.warning("could not ping channel %s for dead job %s", channel, job["id"])
+        notified += 1
     return notified
+
+
+def redeliver_reports(config: Config, *, send=None, store: Optional[JobStore] = None,
+                      now: Optional[float] = None, grace_secs: float = 120.0) -> int:
+    """Retry the Discord delivery of finished job reports whose ping never landed.
+
+    deliver() sets report_delivered True only on a successful send, so a job that
+    finished while Discord was unreachable keeps its report in the row but never
+    re-pings the owner. This sweep (on the reminders tick) re-sends the stored
+    report for done jobs whose delivery is still pending, bounded by
+    ``redeliver_attempts`` so a permanently-dead channel does not POST forever.
+    A job finished within ``grace_secs`` is skipped so the runner's own deliver()
+    wins (no tick-vs-runner double-send). The fold-back inbox note already landed
+    on the original turn, so even a give-up leaves the report recoverable. Returns
+    how many were delivered.
+    """
+    store = store or JobStore(config.jobs_file, keep=config.jobs_keep)
+    if send is None:
+        from .reminders import send_discord_message as send
+    now = time.time() if now is None else now
+    token = config.discord_token
+    delivered = 0
+    for job in store.all():
+        if job.get("state") != "done" or job.get("report_delivered"):
+            continue
+        finished = job.get("finished_ts")
+        if isinstance(finished, (int, float)) and (now - finished) < grace_secs:
+            continue  # let the runner's own delivery land first
+        report = (job.get("report") or "").strip()
+        if not report:
+            store.update(job["id"], report_delivered=True)  # nothing to send
+            continue
+        channel = job.get("channel_id") or config.home_channel
+        if not channel or not token:
+            continue  # nowhere to ping; the inbox fold already informs the owner
+        if int(job.get("redeliver_attempts") or 0) >= MAX_REDELIVER_ATTEMPTS:
+            continue  # gave up; report stays recoverable in the job row + inbox
+        from .textutil import chunk_text
+        text = f"job #{job['id']} ({job.get('title') or ''}) finished: {report}"
+        ok = True
+        for piece in chunk_text(text, DISCORD_MESSAGE_LIMIT):
+            if not send(channel, piece, token):
+                ok = False
+        if ok:
+            store.update(job["id"], report_delivered=True)
+            delivered += 1
+        else:
+            store.update(job["id"], redeliver_attempts=int(job.get("redeliver_attempts") or 0) + 1)
+    return delivered
 
 
 def launch_ready_dependents(store: JobStore, config: Config, *, spawn=None,
@@ -726,6 +810,16 @@ def _cleanup_job_sandbox(driver) -> None:
     _remove_temp_paths(getattr(driver, "_job_temp_paths", ()))
 
 
+def _runner_log_path(store: "JobStore", job_id: int) -> Optional[Path]:
+    """A per-job runner log beside the job registry, or None if it can't be made."""
+    try:
+        log_dir = Path(store.path).parent / "job-logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / f"job-{job_id}.log"
+    except OSError:
+        return None
+
+
 def spawn_runner(job_id: int, *, store: Optional[JobStore] = None, popen=None) -> int:
     """Launch the detached runner for a recorded job, recording its pid.
 
@@ -733,19 +827,71 @@ def spawn_runner(job_id: int, *, store: Optional[JobStore] = None, popen=None) -
     value on its pending->running transition), so a runner that dies before
     that transition is still discoverable by repair_dead_runners instead of
     consuming a jobs_max slot forever.
+
+    The runner's stdout+stderr go to a per-job log file (not /dev/null), so a
+    runner that dies in its startup window — an OOM kill under memory pressure, a
+    systemd cgroup teardown, an import error — leaves a trace to diagnose instead
+    of vanishing silently. Each spawn bumps ``spawn_attempts`` so retry_dead_starts
+    can bound how many times a flaky startup is respawned.
     """
     popen = popen or subprocess.Popen
-    proc = popen(
-        [sys.executable, "-m", "iris", "job-run", str(job_id)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    log_fh = None
+    if store is not None:
+        log_path = _runner_log_path(store, job_id)
+        if log_path is not None:
+            try:
+                log_fh = open(log_path, "a", encoding="utf-8")
+            except OSError:
+                log_fh = None
+    try:
+        proc = popen(
+            [sys.executable, "-m", "iris", "job-run", str(job_id)],
+            stdin=subprocess.DEVNULL,
+            stdout=(log_fh or subprocess.DEVNULL),
+            stderr=(subprocess.STDOUT if log_fh is not None else subprocess.DEVNULL),
+            start_new_session=True,
+        )
+    finally:
+        # The child inherited its own copy of the fd; the parent's handle is no
+        # longer needed and must be closed so it is not leaked across spawns.
+        if log_fh is not None:
+            log_fh.close()
     pid = getattr(proc, "pid", None)
     if store is not None and isinstance(pid, int):
-        store.update(job_id, pid=pid)
+        prior = store.get(job_id) or {}
+        attempts = int(prior.get("spawn_attempts") or 0)
+        store.update(job_id, pid=pid, spawn_attempts=attempts + 1)
     return pid if isinstance(pid, int) else 0
+
+
+def retry_dead_starts(store: JobStore, *, spawn=None,
+                      max_attempts: int = MAX_START_ATTEMPTS) -> int:
+    """Respawn jobs that died in the startup window before they could run.
+
+    A ``pending`` job with a recorded pid whose process is gone died during
+    Python import — BEFORE its one model call — so respawning it costs no
+    credits. Run on the reminders tick ahead of notify_dead_jobs, this lets a
+    transient startup death (an OOM under memory pressure on a small box, a
+    systemd oneshot cgroup teardown racing the just-spawned child) self-heal
+    within a minute instead of leaving a dead scheduled day. A job that exhausts
+    ``max_attempts`` is left for repair_dead_runners to fail and notify exactly
+    once. Returns how many runners were respawned.
+    """
+    spawn = spawn or spawn_runner
+    retried = 0
+    for job in store.all():
+        if job.get("state") != "pending":
+            continue
+        pid = job.get("pid")
+        if not (isinstance(pid, int) and pid > 0):
+            continue  # never spawned (genuinely queued) — untouched
+        if _pid_alive(pid):
+            continue  # still importing, or running fine
+        if int(job.get("spawn_attempts") or 0) >= max_attempts:
+            continue  # exhausted; repair_dead_runners fails + notifies it
+        spawn(job["id"], store=store)
+        retried += 1
+    return retried
 
 
 def _head(text: str, cap: int = REPORT_FOLD_CAP) -> str:

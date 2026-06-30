@@ -20,7 +20,6 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from .statefile import JsonListStore
@@ -30,10 +29,34 @@ _EVERY = re.compile(r"^(?:every\s+)?(\d+)\s*([mhd])$", re.IGNORECASE)
 _UNIT = {"m": 60, "h": 3600, "d": 86400}
 
 
+def cron_spec(when: str) -> Optional[str]:
+    """The 5-field cron string if ``when`` is a ``cron: ...`` form, else None.
+
+    Persisting this string (not just the first epoch parse_when returns) is what
+    lets a cron reminder/schedule RECUR instead of firing once and stopping.
+    """
+    text = (when or "").strip()
+    if text.lower().startswith("cron:"):
+        return text[len("cron:"):].strip()
+    return None
+
+
 def parse_when(when: str, now: Optional[float] = None) -> float:
-    """Resolve '+30m' / '+2h' / '+1d' or an ISO datetime to an epoch timestamp."""
+    """Resolve a time spec to an epoch timestamp.
+
+    Accepts ``+30m`` / ``+2h`` / ``+1d`` (relative), an ISO datetime, or a 5-field
+    cron prefixed with ``cron:`` (e.g. ``cron: 0 9 * * 1-5`` = weekdays at 09:00),
+    evaluated in IRIS_TZ (default UTC) so "09:00" means the owner's local time.
+    """
     now = time.time() if now is None else now
     text = (when or "").strip()
+    if text.lower().startswith("cron:"):
+        from .cron import next_fire
+        spec = text[len("cron:"):].strip()
+        nxt = next_fire(spec, now, os.environ.get("IRIS_TZ", "UTC"))
+        if nxt is None:
+            raise ValueError(f"could not parse cron {spec!r}; use 5 fields, e.g. '0 9 * * 1-5'")
+        return nxt
     rel = _REL.match(text)
     if rel:
         return now + int(rel.group(1)) * _UNIT[rel.group(2).lower()]
@@ -88,7 +111,8 @@ class ReminderStore:
         self._store.save(items)
 
     def add(self, due_ts: float, text: str, channel_id: str, repeat_secs: int = 0,
-            kind: str = "", origin: str = "") -> int:
+            kind: str = "", origin: str = "", remaining: Optional[int] = None,
+            cron: str = "") -> int:
         with self._locked():
             items = self._load()
             new_id = max((int(i.get("id", 0)) for i in items), default=0) + 1
@@ -96,12 +120,21 @@ class ReminderStore:
                 "id": new_id, "due_ts": due_ts, "text": text,
                 "channel_id": channel_id, "repeat_secs": int(repeat_secs or 0),
             }
+            # A cron reminder recurs by recomputing its next fire from the spec
+            # (stored with the tz it was created in), not a fixed interval.
+            if cron:
+                record["cron"] = cron
+                record["cron_tz"] = os.environ.get("IRIS_TZ", "UTC")
             # Optional identity fields, stored only when set so plain reminders
             # keep the original record shape.
             if kind:
                 record["kind"] = kind
             if origin:
                 record["origin"] = origin
+            # A finite recurring reminder fires `remaining` more times then stops,
+            # instead of repeating forever (e.g. "remind me every morning this week").
+            if remaining is not None:
+                record["remaining"] = int(remaining)
             items.append(record)
             self._save(items)
         return new_id
@@ -147,11 +180,29 @@ class ReminderStore:
                 return []
             kept = [i for i in items if i.get("due_ts", 0) > now]
             for job in due:
+                cron = job.get("cron")
+                if cron:
+                    # Recurring on a cron: recompute the next fire from the spec.
+                    from .cron import next_fire
+                    nxt = next_fire(cron, now, job.get("cron_tz") or "UTC")
+                    if nxt is not None:
+                        rescheduled = dict(job)
+                        rescheduled["due_ts"] = nxt
+                        kept.append(rescheduled)
+                    continue
                 period = int(job.get("repeat_secs", 0) or 0)
-                if period > 0:
-                    nxt = dict(job)
-                    nxt["due_ts"] = now + period
-                    kept.append(nxt)
+                if period <= 0:
+                    continue  # one-shot: fired and removed
+                # A finite recurring reminder spends one of its remaining fires;
+                # when they run out it stops instead of rescheduling.
+                remaining = job.get("remaining")
+                if remaining is not None and int(remaining) - 1 <= 0:
+                    continue
+                nxt = dict(job)
+                nxt["due_ts"] = now + period
+                if remaining is not None:
+                    nxt["remaining"] = int(remaining) - 1
+                kept.append(nxt)
             self._save(kept)
             return due
 

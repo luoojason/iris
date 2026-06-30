@@ -10,12 +10,19 @@ import asyncio
 import logging
 from typing import Optional
 
+from . import commands
 from .agent import Agent
 from .attachments import conversation_dir, describe, safe_filename
 from .config import Config
+from .conversation import ConversationRunner, Turn
 from .driver import ClaudeError
 from .textutil import chunk_text
 from .transcribe import build_transcriber, transcribe_audio
+
+# Short interim lines, shared in spirit with the Discord adapter, so a long turn
+# on Telegram is not a silent wait either.
+_ACK_LINES = ("on it", "on it, one sec", "working on it", "give me a moment",
+              "digging into this", "let me take a look")
 
 log = logging.getLogger("iris.telegram")
 
@@ -87,14 +94,104 @@ def build_app(config: Config, agent: Agent):
 
     app = ApplicationBuilder().token(config.telegram_token).build()
     transcriber = build_transcriber(config)  # None unless IRIS_VOICE is on
+    bot = app.bot
+    # One runner per conversation, exactly like Discord: serialize a conversation's
+    # turns (never two claude --resume at once), coalesce messages that pile up
+    # while a turn runs, and fire a short interim ack on a slow turn.
+    runners: dict[str, ConversationRunner] = {}
+    footer_enabled = [config.footer_default]
+
+    def _set_footer(want) -> str:
+        if want is None:
+            return f"Reply footer is {'on' if footer_enabled[0] else 'off'}."
+        footer_enabled[0] = bool(want)
+        return f"Reply footer {'on' if want else 'off'}."
 
     def _allowed(update) -> bool:
         return is_allowed_update(update, config)
 
+    def _preserve_undelivered(conversation_id: str):
+        def preserve(text: str) -> None:
+            try:
+                from .statefile import JsonListStore
+                store = JsonListStore(config.undelivered_file, "undelivered replies")
+                with store.locked():
+                    items = store.load()
+                    items.append({"conversation_id": conversation_id, "text": text})
+                    store.save(items[-200:])
+            except Exception:
+                log.warning("could not preserve an undelivered reply", exc_info=True)
+        return preserve
+
+    def _typing_for(chat_id):
+        class _Typing:
+            async def __aenter__(self):
+                self._stop = asyncio.Event()
+
+                async def loop():
+                    while not self._stop.is_set():
+                        try:
+                            await bot.send_chat_action(chat_id=chat_id, action="typing")
+                        except Exception:
+                            pass
+                        try:
+                            await asyncio.wait_for(self._stop.wait(), timeout=4.0)
+                        except asyncio.TimeoutError:
+                            pass
+                self._task = asyncio.create_task(loop())
+                return self
+
+            async def __aexit__(self, *exc):
+                self._stop.set()
+                await self._task
+        return _Typing()
+
+    def _runner_for(conversation_id: str, chat_id) -> ConversationRunner:
+        runner = runners.get(conversation_id)
+        if runner is not None:
+            return runner
+
+        async def send(text: str) -> None:
+            for piece in chunk_text(text, TELEGRAM_LIMIT):
+                await bot.send_message(chat_id=chat_id, text=piece)
+
+        async def run_turn(prompt: str, has_attachments: bool) -> Optional[str]:
+            try:
+                result = await asyncio.to_thread(
+                    agent.respond, conversation_id, prompt, has_attachments)
+            except ClaudeError as exc:
+                log.error("claude unavailable: %s", exc)
+                return f"I can't reach my brain right now: {exc}"
+            if result.is_error:
+                log.warning("turn errored: %s", result.error)
+                return ("Something went wrong on that one."
+                        + (f" ({result.error})" if result.error else ""))
+            text = result.text.strip() or "(no response)"
+            if footer_enabled[0]:
+                from .footer import format_footer
+                line = format_footer(result, show_cost=config.footer_cost)
+                if line:
+                    text = f"{text}\n{line}"
+            return text
+
+        import random
+        runner = ConversationRunner(
+            run_turn=run_turn,
+            send=send,
+            ack_line=lambda: random.choice(_ACK_LINES),
+            typing=lambda: _typing_for(chat_id),
+            ack_delay=config.ack_delay,
+            on_undelivered=_preserve_undelivered(conversation_id),
+        )
+        runners[conversation_id] = runner
+        return runner
+
     async def reset_cmd(update, context):
         if not _allowed(update):
             return
-        agent.reset(f"telegram:{update.effective_chat.id}")
+        conversation_id = f"telegram:{update.effective_chat.id}"
+        agent.reset(conversation_id)
+        runners.pop(conversation_id, None)  # drop any queued-but-unsent turns
         await update.message.reply_text("Started a fresh conversation.")
 
     async def on_message(update, context):
@@ -122,51 +219,50 @@ def build_app(config: Config, agent: Agent):
             if username:
                 text = text.replace(f"@{username}", "").strip()
 
+        # Bang commands (!usage, !jobs, !stop, !new, ...) are the zero-inference
+        # control plane, handled before the brain ever runs, same as on Discord.
+        cmd = commands.parse(text)
+        if cmd is not None:
+            def _reset() -> None:
+                agent.reset(conversation_id)
+                runners.pop(conversation_id, None)
+
+            def _stop() -> str:
+                runner = runners.pop(conversation_id, None)
+                if runner is not None and runner.cancel():
+                    return "Okay - dropped the queued messages and the reply I was working on."
+                return "Nothing is running here right now."
+
+            def _status_fields() -> dict:
+                runner = runners.get(conversation_id)
+                return {"busy": bool(runner and runner.busy),
+                        "pending": runner.pending if runner else 0,
+                        "session_turns": agent.store.turns(conversation_id)}
+
+            try:
+                reply = commands.dispatch(cmd, config, reset=_reset, stop=_stop,
+                                          status_fields=_status_fields, set_footer=_set_footer)
+            except Exception:
+                log.warning("command %s failed", cmd.name, exc_info=True)
+                reply = f"Couldn't run !{cmd.name} just now."
+            for piece in chunk_text(reply, TELEGRAM_LIMIT):
+                await message.reply_text(piece)
+            return
+
         attach_paths = await _save_attachments(message, context, config.attachments_dir, conversation_id)
         transcripts = await asyncio.to_thread(transcribe_audio, attach_paths, transcriber)
         prompt = describe(text, attach_paths, transcripts)
         if not prompt:
             return
 
-        # Telegram's typing indicator lapses after ~5s, but a turn can take far
-        # longer, so refresh it until the reply is ready.
-        typing_stop = asyncio.Event()
+        async def receipt() -> None:
+            try:
+                await message.set_reaction("\N{EYES}")
+            except Exception:
+                log.debug("could not react to mid-task telegram message", exc_info=True)
 
-        async def _keep_typing() -> None:
-            while not typing_stop.is_set():
-                try:
-                    await context.bot.send_chat_action(chat_id=chat.id, action="typing")
-                except Exception:  # a transient send failure must not sink the turn
-                    pass
-                try:
-                    await asyncio.wait_for(typing_stop.wait(), timeout=4.0)
-                except asyncio.TimeoutError:
-                    pass
-
-        typing_task = asyncio.create_task(_keep_typing())
-        try:
-            result = await asyncio.to_thread(
-                agent.respond, conversation_id, prompt, bool(attach_paths)
-            )
-        except ClaudeError as exc:
-            log.error("claude unavailable: %s", exc)
-            await message.reply_text(f"I can't reach my brain right now: {exc}")
-            return
-        finally:
-            typing_stop.set()
-            await typing_task
-
-        if result.is_error:
-            log.warning("turn errored: %s", result.error)
-            await message.reply_text(
-                "Something went wrong on that one."
-                + (f" ({result.error})" if result.error else "")
-            )
-            return
-
-        reply = result.text.strip() or "(no response)"
-        for piece in chunk_text(reply, TELEGRAM_LIMIT):
-            await message.reply_text(piece)
+        runner = _runner_for(conversation_id, chat.id)
+        runner.submit(Turn(text=prompt, has_attachments=bool(attach_paths), receipt=receipt))
 
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(MessageHandler(

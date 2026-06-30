@@ -66,3 +66,23 @@ def test_max_pending_survives_a_non_numeric_env(monkeypatch):
     monkeypatch.setattr(srv, "MAX_PENDING", None)
     monkeypatch.setenv("IRIS_REMINDERS_MAX_PENDING", "lots")  # garbage
     assert srv._max_pending() == 25  # falls back to the default, does not raise
+
+
+def test_default_channel_prefers_the_origin_thread(tmp_path, monkeypatch):
+    # A reminder/follow-up set mid-conversation defaults to THAT thread, not the
+    # home channel, so it comes back where the owner is actually talking.
+    monkeypatch.setattr(srv, "STORE", ReminderStore(tmp_path / "r.json"))
+    monkeypatch.setattr(srv, "DEFAULT_CHANNEL", None)
+    monkeypatch.setenv("IRIS_ORIGIN_CHANNEL", "thread-9")
+    monkeypatch.setenv("IRIS_DISCORD_HOME_CHANNEL", "home-1")
+    srv.schedule_reminder("check the deploy", "+30m", kind="followup")
+    assert srv.STORE.all()[0]["channel_id"] == "thread-9"
+
+
+def test_default_channel_falls_back_to_home_without_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(srv, "STORE", ReminderStore(tmp_path / "r.json"))
+    monkeypatch.setattr(srv, "DEFAULT_CHANNEL", None)
+    monkeypatch.delenv("IRIS_ORIGIN_CHANNEL", raising=False)
+    monkeypatch.setenv("IRIS_DISCORD_HOME_CHANNEL", "home-1")
+    srv.schedule_reminder("stand up", "+30m")
+    assert srv.STORE.all()[0]["channel_id"] == "home-1"

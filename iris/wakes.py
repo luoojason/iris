@@ -37,6 +37,12 @@ FILE_KINDS = ("file_exists", "file_gone", "file_changed", "log_pattern")
 URL_KINDS = ("url", "url_pattern")
 KINDS = FILE_KINDS + URL_KINDS
 DEFAULT_COOLDOWN = 3600.0
+# How many ticks to keep retrying a ping the channel won't accept before giving
+# up. A deleted channel or a removed bot is permanently undeliverable; without a
+# cap the rule would POST one failing REST call every tick forever AND never fire
+# on a new condition (the tick returns early while a ping is owed). The message
+# already folded into the inbox on the first fire, so giving up loses nothing.
+MAX_PENDING_PING_ATTEMPTS = 5
 # The most of a log's appended tail one tick will read for one rule.
 MAX_TAIL_READ = 256 * 1024
 # The most of a URL body one fetch will read.
@@ -306,8 +312,24 @@ def _run_rule(rule: dict, entry: dict, config: Config, send, inbox: Inbox,
     if pending:
         if _send_ping(rule, config, send, pending):
             entry["pending_ping"] = None
+            entry["pending_attempts"] = 0
             entry["last_fired_ts"] = now
-        return 0  # no new fire while a ping is still owed
+            return 0
+        attempts = int(entry.get("pending_attempts") or 0) + 1
+        if attempts >= MAX_PENDING_PING_ATTEMPTS:
+            # The channel has been undeliverable for too long; stop retrying. The
+            # message already folded into the inbox when it first fired, so the
+            # owner can still see it on the next turn. Clear the owed ping and arm
+            # the cooldown so the rule can fire again on a future change instead of
+            # wedging on this one undeliverable ping forever.
+            log.warning("wake %s: giving up on the ping after %d failed attempts "
+                        "(channel undeliverable)", name, attempts)
+            entry["pending_ping"] = None
+            entry["pending_attempts"] = 0
+            entry["last_fired_ts"] = now
+        else:
+            entry["pending_attempts"] = attempts
+        return 0  # no new fire while a ping is owed (or was just abandoned)
 
     if rule.get("once") and entry.get("fired_once"):
         return 0

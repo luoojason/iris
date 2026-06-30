@@ -68,11 +68,23 @@ def _reply_text(result: ClaudeResult, *, placeholder: bool) -> Optional[str]:
     return "(no response)" if placeholder else None
 
 
+def _with_footer(text: Optional[str], result: ClaudeResult, *, enabled: bool,
+                 show_cost: bool) -> Optional[str]:
+    """Append the runtime footer line under a reply when the toggle is on."""
+    if not (text and enabled):
+        return text
+    from .footer import format_footer
+    line = format_footer(result, show_cost=show_cost)
+    return f"{text}\n{line}" if line else text
+
+
 class _LiveAdapterHandle:
     """Adapts :class:`iris.agent.LiveTurn` to the runner's text-level LiveHandle."""
 
-    def __init__(self, live: LiveTurn) -> None:
+    def __init__(self, live: LiveTurn, footer_enabled=None, footer_cost: bool = False) -> None:
         self._live = live
+        self._footer_enabled = footer_enabled  # a one-element list holder, or None
+        self._footer_cost = footer_cost
 
     async def begin(self) -> None:
         await self._live.begin()
@@ -90,7 +102,9 @@ class _LiveAdapterHandle:
             log.error("claude unavailable: %s", exc)
             self._live.close()
             return f"I can't reach my brain right now: {exc}"
-        return _reply_text(result, placeholder=True)
+        on = bool(self._footer_enabled and self._footer_enabled[0])
+        return _with_footer(_reply_text(result, placeholder=True), result,
+                            enabled=on, show_cost=self._footer_cost)
 
     async def aftermath(self) -> list[str]:
         try:
@@ -235,8 +249,10 @@ async def _save_attachments(attachments, base_dir: str, conversation_id: str) ->
     if not attachments or not base_dir:
         return paths
     conv_dir = conversation_dir(base_dir, conversation_id)
-    for att in list(attachments)[:5]:
-        dest = conv_dir / safe_filename(getattr(att, "filename", None))
+    for i, att in enumerate(list(attachments)[:5]):
+        # Index-prefix the leaf so same-named uploads (Discord pasted images are
+        # all "image.png") don't overwrite each other and drop a file.
+        dest = conv_dir / f"{i}_{safe_filename(getattr(att, 'filename', None))}"
         try:
             await att.save(dest)
             paths.append(str(dest.resolve()))
@@ -262,6 +278,15 @@ def build_client(config: Config, agent: Agent):
     # One runner per conversation serializes its turns and coalesces messages
     # that arrive while a turn is in flight, so the user can keep talking.
     runners: dict[str, ConversationRunner] = {}
+    # Runtime per-reply footer toggle (!footer on|off), a one-element holder so the
+    # command closure and the per-turn closures all see the same flag.
+    footer_enabled = [config.footer_default]
+
+    def _set_footer(want) -> str:
+        if want is None:
+            return f"Reply footer is {'on' if footer_enabled[0] else 'off'}."
+        footer_enabled[0] = bool(want)
+        return f"Reply footer {'on' if want else 'off'}."
     # Guards the autonomous-resume loop to a single start (on_ready re-fires on
     # every reconnect). A list so the on_ready closure can flip it.
     resume_started: list[bool] = []
@@ -305,10 +330,25 @@ def build_client(config: Config, agent: Agent):
             for piece in chunk_text(text, DISCORD_LIMIT):
                 await channel.send(piece)
 
+        def preserve_undelivered(text: str) -> None:
+            # A paid reply whose send raised is appended to a durable file rather
+            # than lost; tagged with the conversation so it can be recovered.
+            try:
+                from .statefile import JsonListStore
+                store = JsonListStore(config.undelivered_file, "undelivered replies")
+                with store.locked():
+                    items = store.load()
+                    items.append({"conversation_id": conversation_id, "text": text})
+                    store.save(items[-200:])  # bound the file
+            except Exception:
+                log.warning("could not preserve an undelivered reply", exc_info=True)
+
         if config.live_interrupt and agent.stream_driver is not None:
             # Live interrupt: a mid-turn message redirects the running turn.
             def start_turn(prompt: str, has_attachments: bool) -> _LiveAdapterHandle:
-                return _LiveAdapterHandle(agent.live_turn(conversation_id, prompt, has_attachments))
+                return _LiveAdapterHandle(
+                    agent.live_turn(conversation_id, prompt, has_attachments),
+                    footer_enabled=footer_enabled, footer_cost=config.footer_cost)
 
             runner = LiveConversationRunner(
                 start_turn=start_turn,
@@ -316,6 +356,7 @@ def build_client(config: Config, agent: Agent):
                 ack_line=_ack_line,
                 typing=channel.typing,
                 ack_delay=config.ack_delay,
+                on_undelivered=preserve_undelivered,
             )
             runners[conversation_id] = runner
             return runner
@@ -328,7 +369,8 @@ def build_client(config: Config, agent: Agent):
             except ClaudeError as exc:
                 log.error("claude unavailable: %s", exc)
                 return f"I can't reach my brain right now: {exc}"
-            return _reply_text(result, placeholder=True)
+            return _with_footer(_reply_text(result, placeholder=True), result,
+                                enabled=footer_enabled[0], show_cost=config.footer_cost)
 
         runner = ConversationRunner(
             run_turn=run_turn,
@@ -336,6 +378,7 @@ def build_client(config: Config, agent: Agent):
             ack_line=_ack_line,
             typing=channel.typing,
             ack_delay=config.ack_delay,
+            on_undelivered=preserve_undelivered,
         )
         runners[conversation_id] = runner
         return runner
@@ -431,7 +474,7 @@ def build_client(config: Config, agent: Agent):
 
             try:
                 reply = commands.dispatch(cmd, config, reset=_reset, stop=_stop,
-                                          status_fields=_status_fields)
+                                          status_fields=_status_fields, set_footer=_set_footer)
             except Exception:
                 log.warning("command %s failed", cmd.name, exc_info=True)
                 reply = f"Couldn't run !{cmd.name} just now."

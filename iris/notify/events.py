@@ -13,5 +13,3 @@ class Event:
     exit_code: int
     duration_s: float
     tail: str = ""       # last lines of output, for failure triage
-    urgency: str = "normal"   # "normal" | "high"
-    detail: str = ""

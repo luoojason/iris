@@ -31,6 +31,23 @@ def test_dotenv_does_not_override_real_env(tmp_path, monkeypatch):
     assert os.environ["IRIS_DISCORD_TOKEN"] == "tok"     # file fills the gap
 
 
+def test_load_dotenv_anchors_to_iris_home(tmp_path, monkeypatch):
+    # An MCP server spawned in an isolated cwd re-anchors to IRIS_HOME so its .env
+    # and cwd-relative state paths resolve against the agent dir.
+    import os
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".env").write_text("IRIS_ANCHOR_PROBE=yes\n", encoding="utf-8")
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    monkeypatch.setenv("IRIS_HOME", str(home))
+    monkeypatch.delenv("IRIS_ANCHOR_PROBE", raising=False)
+    load_dotenv()  # default ".env", but should chdir to IRIS_HOME first
+    assert os.path.realpath(os.getcwd()) == os.path.realpath(str(home))
+    assert os.environ.get("IRIS_ANCHOR_PROBE") == "yes"
+
+
 def test_from_env_reads_values(tmp_path, monkeypatch):
     for key in list(__import__("os").environ):
         if key.startswith("IRIS_"):

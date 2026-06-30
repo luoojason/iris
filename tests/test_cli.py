@@ -30,6 +30,33 @@ def test_watch_without_command_errors():
     assert main(["watch"]) == 2  # no command after watch -> usage, exit 2
 
 
+def test_mcp_import_does_not_crash_on_wrong_shape_json(tmp_path):
+    from types import SimpleNamespace
+
+    from iris.cli import mcp_command
+    from iris.config import Config
+
+    bad = tmp_path / "mcp.json"
+    bad.write_text("[1, 2, 3]", encoding="utf-8")  # valid JSON, not an MCP config object
+    config = Config(connections_file=str(tmp_path / "conns.json"))
+    rc = mcp_command(SimpleNamespace(mcp_action="import", path=str(bad)), config)
+    assert rc == 1  # reported cleanly, did not raise
+
+
+def test_mcp_import_skips_a_non_object_server_spec(tmp_path, capsys):
+    from types import SimpleNamespace
+
+    from iris.cli import mcp_command
+    from iris.config import Config
+
+    src = tmp_path / "mcp.json"
+    src.write_text('{"mcpServers": {"bad": "oops", "ok": {"command": "npx"}}}', encoding="utf-8")
+    config = Config(connections_file=str(tmp_path / "conns.json"))
+    rc = mcp_command(SimpleNamespace(mcp_action="import", path=str(src)), config)
+    assert rc == 0
+    assert "imported 1" in capsys.readouterr().out  # good one added, bad one skipped not crashed
+
+
 def test_usage_error_does_not_load_dotenv(tmp_path, monkeypatch):
     """A usage error must exit before .env is read into the process env.
 

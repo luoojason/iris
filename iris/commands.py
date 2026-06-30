@@ -33,8 +33,10 @@ _ALIASES = {
 # command, so it falls through to the brain. Only `stop` takes an optional arg
 # (a job id), so it is excluded from this set.
 _NO_ARG = frozenset({"help", "new", "status", "usage", "jobs", "schedules",
-                     "goals", "heartbeat"})
-_KNOWN = _NO_ARG | {"stop"}
+                     "goals", "heartbeat", "recap"})
+# stop takes an optional job id; footer takes on/off. Both are excluded from
+# _NO_ARG so their argument is parsed rather than read as trailing prose.
+_KNOWN = _NO_ARG | {"stop", "footer"}
 
 HELP = (
     "Commands (instant, no AI turn):\n"
@@ -45,6 +47,8 @@ HELP = (
     "!stop - stop the reply I'm writing here\n"
     "!stop <id> - cancel background job #id (alias: !cancel <id>)\n"
     "!schedules - scheduled jobs\n"
+    "!recap - instant recap of this conversation (no AI turn)\n"
+    "!footer on|off - show a model/tokens/time line under each reply\n"
     "!status - what I'm doing right now\n"
     "!new - start a fresh conversation here\n"
     "!help - this list"
@@ -80,6 +84,9 @@ def parse(text: str) -> Optional[Command]:
     # str.isdigit() also rejects signs, separators, and non-ascii digit forms.
     if name == "stop" and arg and not (arg.isdigit() and arg.isascii()):
         return None
+    # `footer` takes on/off (or nothing to report state); anything else is prose.
+    if name == "footer" and arg and arg.lower() not in ("on", "off"):
+        return None
     return Command(name, arg)
 
 
@@ -105,7 +112,7 @@ def render_jobs(config: Config, limit: int = 10) -> str:
         # A foreign or hand-edited row may carry no timestamp; default to 0 so
         # a single odd row never crashes the whole listing (fmt_ts handles 0).
         when = job.get("finished_ts") or job.get("started_ts") or job.get("created_ts") or 0
-        lines.append(f"#{job['id']} [{job['state']}] {job['title']} ({fmt_ts(when)})")
+        lines.append(f"#{job.get('id', '?')} [{job.get('state', '?')}] {job.get('title', '(untitled)')} ({fmt_ts(when)})")
     return "\n".join(lines)
 
 
@@ -121,17 +128,12 @@ def render_schedules(config: Config) -> str:
 
 
 def render_goals(config: Config) -> str:
-    from .goals import GoalStore
+    from .goals import GoalStore, format_goal_line
 
     goals = GoalStore(config.goals_file).all()
     if not goals:
         return "No goals set. Tell me an objective to pursue and I'll track it."
-    lines = []
-    for g in goals:
-        if g.get("status") == "active":
-            lines.append(f"#{g['id']} [active {g.get('steps', 0)}/{g.get('max_steps', '?')}]: {g['text']}")
-        else:
-            lines.append(f"#{g['id']} [{g.get('status')}]: {g['text']}")
+    lines = [format_goal_line(g) for g in goals]
     if not config.goals_enabled:
         lines.append("(IRIS_GOALS is off: nothing advances.)")
     return "\n".join(lines)
@@ -196,6 +198,14 @@ def cancel_job(config: Config, arg: str) -> str:
     return cancel(JobStore(config.jobs_file), job_id)
 
 
+def render_recap(config: Config) -> str:
+    """An instant, model-free recap of the latest conversation transcript."""
+    from .recap import build_recap, latest_transcript
+
+    path = latest_transcript()
+    return build_recap(path) if path else "(no conversation transcript yet)"
+
+
 def dispatch(
     cmd: Command,
     config: Config,
@@ -203,11 +213,14 @@ def dispatch(
     reset: Callable[[], None],
     stop: Callable[[], str],
     status_fields: Callable[[], dict],
+    set_footer: Optional[Callable[[Optional[bool]], str]] = None,
 ) -> str:
     """Run a parsed command and return the reply text.
 
     ``reset`` and ``stop`` are adapter-provided side effects (they touch the
-    live conversation), so this stays free of any chat SDK.
+    live conversation), so this stays free of any chat SDK. ``set_footer`` is an
+    optional adapter hook that flips the per-reply footer (``None`` arg reports
+    the current state); when an adapter does not pass it, ``!footer`` says so.
     """
     name = cmd.name
     if name == "help":
@@ -222,6 +235,13 @@ def dispatch(
         return render_heartbeat(config)
     if name == "schedules":
         return render_schedules(config)
+    if name == "recap":
+        return render_recap(config)
+    if name == "footer":
+        if set_footer is None:
+            return "The reply footer isn't available on this transport."
+        want = {"on": True, "off": False}.get(cmd.arg.lower()) if cmd.arg else None
+        return set_footer(want)
     if name == "status":
         return render_status(config, **status_fields())
     if name == "new":
