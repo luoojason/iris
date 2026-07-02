@@ -275,6 +275,41 @@ def test_cancel_handles_a_waiting_job(tmp_path):
     assert "ancel" in out and store.get(1)["state"] == "cancelled"
 
 
+def test_cancel_running_browser_job_warns_about_partial_side_effects(tmp_path):
+    # Regression (the wrong-channel mis-post): a browser job cancelled mid-run
+    # had already published a video, and nothing told the owner its side effects
+    # stood unreported. Killing a job with world-touching grants must say so.
+    from iris.jobs import cancel
+
+    store = make_store(tmp_path)
+    store.add("post shorts", "upload them", ["subagents", "browser"], "", "h")
+    store.transition(1, ("pending",), "running")
+    out = cancel(store, 1, kill=lambda pid: False)
+    assert store.get(1)["state"] == "cancelled"
+    assert "already did" in out and "verify" in out
+
+
+def test_cancel_running_plain_job_has_no_side_effect_warning(tmp_path):
+    # A subagents-only job cannot touch the world; no scary warning for it.
+    from iris.jobs import cancel
+
+    store = make_store(tmp_path)
+    store.add("think", "ponder", ["subagents"], "", "h")
+    store.transition(1, ("pending",), "running")
+    out = cancel(store, 1, kill=lambda pid: False)
+    assert store.get(1)["state"] == "cancelled"
+    assert "already did" not in out
+
+
+def test_timed_out_browser_job_failure_warns_side_effects_may_stand(tmp_path):
+    env = runner_env(tmp_path, result=ClaudeResult(
+        text="", session_id=None, is_error=True, error="claude timed out after 1800s"),
+        grants=["subagents", "browser"])
+    assert run_with(env) == 1
+    ping = env["pings"][0][1]
+    assert "timed out" in ping and "already did" in ping and "verify" in ping
+
+
 # -- active-jobs digest (tier-0 awareness so a turn can't duplicate work) -----
 
 def test_jobs_digest_lists_active_and_recently_finished():
@@ -600,6 +635,23 @@ def test_heavy_job_escalates_to_the_strong_model():
     heavy = build_job_driver(config, {"grants": ["subagents"], "heavy": True}, None)
     assert light.model == "m-light"     # everyday job stays on the cheap model
     assert heavy.model == "m-strong"    # hard job escalates
+
+
+def test_every_job_carries_the_target_lock_protocol():
+    # Regression (the wrong-channel mis-post): a job that could not switch
+    # YouTube channels fell back to the signed-in one and published there,
+    # public, with no veto buffer. The instructions a job happens to be given
+    # are not a boundary; this standing protocol is, so it must ride along on
+    # every job turn next to the question protocol.
+    from iris.jobs import JOB_QUESTION_PROTOCOL, JOB_TARGET_PROTOCOL, build_job_driver
+
+    config = Config(jobs_enabled=True)
+    driver = build_job_driver(config, {"grants": ["subagents"], "workspace": ""}, None)
+    assert JOB_QUESTION_PROTOCOL in driver.append_system_prompt
+    assert JOB_TARGET_PROTOCOL in driver.append_system_prompt
+    # The protocol names the failure modes it exists to stop.
+    assert "fallback" in JOB_TARGET_PROTOCOL
+    assert "QUESTION:" in JOB_TARGET_PROTOCOL
 
 
 # -- config knobs --------------------------------------------------------------

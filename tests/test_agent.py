@@ -132,9 +132,49 @@ def test_dead_session_is_healed_and_retried(tmp_path):
     agent = Agent(driver, store)
     result = agent.respond("c1", "hi")
     assert result.text == "fresh"
-    assert driver.calls[0] == ("hi", "dead-id")  # tried the dead id
-    assert driver.calls[1] == ("hi", None)        # then retried fresh
+    assert driver.calls[0] == ("hi", "dead-id")   # tried the dead id
+    prompt, session = driver.calls[1]             # then retried fresh
+    assert session is None and "hi" in prompt
     assert store.get("c1") == "new-id"
+
+
+def test_dead_session_heal_seeds_recent_context(tmp_path):
+    # Regression (the iris.stories incident): a dead session used to heal onto a
+    # BLANK session, so a short answer to a question Iris had just asked was
+    # answered cold, with long-term memory but no idea what was being discussed.
+    # The heal must carry the recent-turns transcript into the fresh session.
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        ClaudeResult(text="What is the second channel's name?", session_id="s1", is_error=False),
+        ClaudeResult(text="", session_id=None, is_error=True, error="No conversation found for s1"),
+        ClaudeResult(text="got it", session_id="s2", is_error=False),
+    ])
+    agent = Agent(driver, store)
+    agent.respond("c1", "post the shorts to my new channel")
+    result = agent.respond("c1", "iris.stories")
+    assert result.text == "got it"
+    prompt, session = driver.calls[2]
+    assert session is None                                  # healed onto a fresh session
+    assert "What is the second channel's name?" in prompt   # seeded with the thread
+    assert "post the shorts to my new channel" in prompt
+    assert prompt.rstrip().endswith("iris.stories")         # the actual message survives
+    assert "[session reset]" in prompt                      # and the model is told why
+
+
+def test_heal_discloses_the_reset_even_with_no_buffer(tmp_path):
+    # Even with nothing to re-seed, the fresh session must know it is starting
+    # mid-conversation, so it can say it lost the thread instead of guessing.
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "dead-id")
+    driver = FakeDriver([
+        ClaudeResult(text="", session_id=None, is_error=True, error="No conversation found"),
+        ClaudeResult(text="fresh", session_id="new-id", is_error=False),
+    ])
+    agent = Agent(driver, store)
+    agent.respond("c1", "iris.stories")
+    prompt, session = driver.calls[1]
+    assert session is None
+    assert "[session reset]" in prompt and "iris.stories" in prompt
 
 
 def test_other_error_does_not_drop_the_session(tmp_path):
@@ -188,8 +228,37 @@ def test_overflow_heals_to_fresh_session(tmp_path):
     result = agent.respond("c1", "hi")
     assert result.text == "recovered"
     assert driver.calls[0] == ("hi", "big-session")  # tried the overgrown id
-    assert driver.calls[1] == ("hi", None)           # then retried fresh
+    prompt, session = driver.calls[1]                # then retried fresh
+    assert session is None and "hi" in prompt and "[session reset]" in prompt
     assert store.get("c1") == "new-id"
+
+
+def test_short_answer_to_a_pending_question_routes_strong(tmp_path):
+    # "iris.stories" after "What is the second channel's name?" is trivial in
+    # form but pivotal in content: it is an ANSWER, and must not be downgraded
+    # to the light model just because it is short.
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        ClaudeResult(text="Sure. What is the second channel's name?", session_id="s1", is_error=False),
+        ClaudeResult(text="ok", session_id="s1", is_error=False),
+    ])
+    agent = Agent(driver, store, light_model="light")
+    agent.respond("c1", "hey")
+    assert driver.model_calls[0] == "light"   # ordinary trivial turn routes light
+    agent.respond("c1", "iris.stories")
+    assert driver.model_calls[1] is None      # an answer to a question routes strong
+
+
+def test_short_followup_with_no_pending_question_stays_light(tmp_path):
+    store = SessionStore(tmp_path / "s.json")
+    driver = FakeDriver([
+        ClaudeResult(text="Done. Both are scheduled.", session_id="s1", is_error=False),
+        ClaudeResult(text="np", session_id="s1", is_error=False),
+    ])
+    agent = Agent(driver, store, light_model="light")
+    agent.respond("c1", "hey")
+    agent.respond("c1", "thanks")
+    assert driver.model_calls[1] == "light"   # no open question: routing unchanged
 
 
 def test_compaction_summarizes_and_reseeds(tmp_path):
@@ -444,6 +513,28 @@ async def test_live_turn_folds_inbox_and_consumes_on_success(tmp_path):
     assert "job #3 finished: done" in sd.prompts[0]
     assert sd.prompts[0].endswith("hello")
     assert box.drain("c1") == []
+
+
+async def test_live_heal_seeds_recent_context(tmp_path):
+    # The live path heals a dead session too; it must carry the same transcript
+    # seed and disclosure as the one-shot path.
+    store = SessionStore(tmp_path / "s.json")
+    store.set("c1", "dead-id")
+    sd = FakeStreamDriver([
+        ClaudeResult(text="", session_id=None, is_error=True, error="No conversation found"),
+        ClaudeResult(text="fresh", session_id="s2", is_error=False),
+    ])
+    agent = Agent(FakeDriver([]), store, stream_driver=sd)
+    agent._record_turn("c1", "post to my new channel", "What is the channel's name?")
+    turn = agent.live_turn("c1", "iris.stories")
+    await turn.begin()
+    result = await turn.result()
+    await turn.aftermath()
+    assert result.text == "fresh"
+    assert sd.prompts[0] == "iris.stories"                    # tried the dead session as-is
+    assert "[session reset]" in sd.prompts[1]                 # the heal disclosed the reset
+    assert "What is the channel's name?" in sd.prompts[1]     # and carried the thread
+    assert sd.prompts[1].rstrip().endswith("iris.stories")
 
 
 async def test_live_turn_records_a_turn_for_compaction(tmp_path):

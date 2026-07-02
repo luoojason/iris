@@ -95,6 +95,25 @@ JOB_QUESTION_PROTOCOL = (
     "decision, note the assumption, and finish."
 )
 
+# Also injected into every job's system prompt. The instructions a job happens
+# to be given are not a boundary; this standing rule is. It exists for the class
+# of failure where a browser job that could not switch YouTube channels fell
+# back to the signed-in one and published there, public, with no schedule
+# buffer: a failing step must never substitute the target of an irreversible
+# action, it must pause on the question protocol instead.
+JOB_TARGET_PROTOCOL = (
+    "Actions that are outward-facing or hard to undo (publishing, scheduling or "
+    "uploading a post, sending a message or email, paying, deleting, creating an "
+    "account or channel) are locked to the exact target and settings named in "
+    "your instructions. Verify you are acting on that exact target (account, "
+    "channel, recipient, destination) immediately before each such action, and "
+    "verify it took effect there afterwards. If you cannot verify the target, or "
+    "a step fails and the only way forward would change the target, widen "
+    "visibility, skip a required buffer or safety step, or otherwise deviate "
+    "from the named settings, do not improvise a fallback: stop and ask with "
+    "QUESTION:. A wrong irreversible action is far worse than a late one."
+)
+
 
 def extract_question(report: str) -> Optional[str]:
     """The owner-directed question a job ended with, or None.
@@ -383,6 +402,26 @@ class JobStore:
         return sum(1 for j in self._load() if j.get("state") in _ACTIVE_STATES)
 
 
+# Grants whose tools act on the world (a browser, a shell, file writes). A job
+# holding one that is killed mid-run may already have acted, unreported.
+_SIDE_EFFECT_GRANTS = ("browser", "shell", "files")
+
+
+def _side_effect_warning(job) -> str:
+    """A warning to append when a world-touching job is killed mid-run, or "".
+
+    A cancelled or timed-out job has no transactionality: the mis-posted video
+    behind this rule was uploaded by a job that was cancelled before it could
+    report or track anything. The owner must be told the side effects stand.
+    """
+    grants = set((job or {}).get("grants") or ())
+    if not grants.intersection(_SIDE_EFFECT_GRANTS):
+        return ""
+    return (" It was killed mid-run: anything it already did (posts, uploads, file "
+            "or system changes) still stands and was never reported, so verify the "
+            "real state before re-running it.")
+
+
 def kill_process_group(pid) -> bool:
     """SIGKILL a pid's whole process group. False if the pid is gone/invalid."""
     if not isinstance(pid, int) or pid <= 0:
@@ -420,7 +459,7 @@ def cancel(store: JobStore, job_id: int, *, kill=kill_process_group) -> str:
         killed_claude = bool(fresh.get("claude_pid")) and kill(fresh.get("claude_pid"))
         if store.transition(job_id, ("running",), "cancelled", finished_ts=time.time()):
             suffix = "" if (killed_runner or killed_claude) else " (its runner was already gone)"
-            return f"Cancelled job #{job_id}.{suffix}"
+            return f"Cancelled job #{job_id}.{suffix}{_side_effect_warning(job)}"
         job = store.get(job_id)
     return f"Job #{job_id} is already {job['state'] if job else 'gone'}."
 
@@ -759,7 +798,7 @@ def _build_job_driver(config: Config, job: dict, workspace_path: Optional[str],
     driver = ClaudeDriver(
         claude_bin=config.claude_bin,
         model=model,
-        append_system_prompt=JOB_QUESTION_PROTOCOL,
+        append_system_prompt="\n\n".join((JOB_QUESTION_PROTOCOL, JOB_TARGET_PROTOCOL)),
         append_system_prompt_file=config.job_persona or None,
         mcp_config=mcp_config,
         permission_mode=config.permission_mode,
@@ -1013,7 +1052,10 @@ def run_job(
             error = result.error or "the job turn failed"
             store.transition(job_id, ("running",), "failed",
                              error=error, finished_ts=time.time())
-            deliver(f"job #{job_id} ({job['title']}) failed: {error}")
+            # A timeout SIGKILLed the claude tree mid-work; unlike most errors
+            # (which fail before acting), its side effects may already exist.
+            warning = _side_effect_warning(job) if "timed out" in error else ""
+            deliver(f"job #{job_id} ({job['title']}) failed: {error}{warning}")
             return 1
 
         report = result.text or ""
